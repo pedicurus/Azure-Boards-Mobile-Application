@@ -1,0 +1,8 @@
+{
+  "name": "Azure Boards",
+  "description": "View and filter Azure Boards work items by title, type, and state using Personal Access Token authentication.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
