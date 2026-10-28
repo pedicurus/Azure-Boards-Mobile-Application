@@ -98,6 +98,13 @@ interface AzureDevOpsService {
         @Query("api-version") apiVersion: String = "7.0"
     ): Response<com.example.data.model.WorkItemTypeCategoriesResponse>
 
+    @GET("{organization}/{project}/_apis/work/backlogs")
+    suspend fun getProjectBacklogs(
+        @Path("organization") organization: String,
+        @Path("project") project: String,
+        @Query("api-version") apiVersion: String = "7.0"
+    ): Response<com.example.data.model.BacklogsResponse>
+
     @GET("{organization}/_apis/work/processes")
     suspend fun getProcesses(
         @Path("organization") organization: String,

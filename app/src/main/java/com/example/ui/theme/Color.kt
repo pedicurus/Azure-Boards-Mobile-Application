@@ -3,8 +3,9 @@ package com.example.ui.theme
 import androidx.compose.ui.graphics.Color
 
 // Brand Colors
-val NeumorphicTeal = Color(0xFF1447E6) // Royal / Digital Blue
-val NeumorphicTealLight = Color(0xFF4D72FA) // Light Royal Blue / Periwinkle
+val AzureDevOpsBlue = Color(0xFF0078D4) // Official Azure DevOps Brand Blue
+val NeumorphicTeal = Color(0xFF0078D4) // Official Azure DevOps Brand Blue
+val NeumorphicTealLight = Color(0xFF2B88D8) // Light Azure DevOps Blue
 val NeumorphicBg = Color(0xFFEEF2F5) // Crisp light-grey base background
 val NeumorphicTextSecondary = Color(0xFF5E6F8F) // Soft slate-blue typography
 

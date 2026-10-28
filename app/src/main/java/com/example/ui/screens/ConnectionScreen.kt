@@ -27,11 +27,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
@@ -86,7 +83,6 @@ private val LoginBgBottom = Color(0xFFDFE4F1)
 private val LoginCardBorder = Color(0xFFDCE1EF)
 private val LoginTextDark = Color(0xFF0D101C)
 private val LoginTextMuted = Color(0xFF6E7591)
-private val LoginAccentPurple = Color(0xFF613BE7)
 private val LoginAzureBlue = Color(0xFF0078D4)
 private val LoginInputFill = Color(0xFFF8FAFC)
 
@@ -159,14 +155,6 @@ fun ConnectionScreen(
                 letterSpacing = (-0.5).sp
             )
 
-            Text(
-                text = "Sign in with your Organization and Personal Access Token",
-                color = LoginTextMuted,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Normal,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-
             Spacer(modifier = Modifier.height(26.dp))
 
             // Main Login Card
@@ -181,19 +169,6 @@ fun ConnectionScreen(
                 Column(
                     modifier = Modifier.padding(22.dp)
                 ) {
-                    Text(
-                        text = "Sign In to Organization",
-                        color = LoginTextDark,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "Connect to your Azure DevOps organization projects and work items",
-                        color = LoginTextMuted,
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(top = 3.dp, bottom = 18.dp)
-                    )
-
                     // Error Banner
                     AnimatedVisibility(visible = errorMessage != null) {
                         Surface(
@@ -226,9 +201,9 @@ fun ConnectionScreen(
                         }
                     }
 
-                    // Organization Name or URL
+                    // Azure DevOps URL
                     Text(
-                        text = "Organization Name or URL",
+                        text = "Azure DevOps URL",
                         color = LoginTextDark,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold
@@ -247,54 +222,26 @@ fun ConnectionScreen(
                                 fontSize = 12.sp
                             )
                         },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Default.Language,
-                                contentDescription = null,
-                                tint = LoginAzureBlue,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        },
-                        trailingIcon = {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                if (orgInput.isNotEmpty()) {
-                                    IconButton(
-                                        onClick = {
-                                            orgInput = ""
-                                            if (errorMessage != null) onDismissError()
-                                        },
-                                        modifier = Modifier
-                                            .size(36.dp)
-                                            .testTag("clear_org_button")
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Clear,
-                                            contentDescription = "Clear organization",
-                                            tint = LoginTextMuted,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
-                                }
+                        trailingIcon = if (orgInput.isNotEmpty()) {
+                            {
                                 IconButton(
                                     onClick = {
-                                        readClipboardText(context)?.let { pasted ->
-                                            orgInput = pasted.trim()
-                                            if (errorMessage != null) onDismissError()
-                                        }
+                                        orgInput = ""
+                                        if (errorMessage != null) onDismissError()
                                     },
                                     modifier = Modifier
                                         .size(36.dp)
-                                        .testTag("paste_org_button")
+                                        .testTag("clear_org_button")
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Default.ContentPaste,
-                                        contentDescription = "Paste organization from clipboard",
-                                        tint = LoginAzureBlue,
+                                        imageVector = Icons.Default.Clear,
+                                        contentDescription = "Clear organization",
+                                        tint = LoginTextMuted,
                                         modifier = Modifier.size(18.dp)
                                     )
                                 }
                             }
-                        },
+                        } else null,
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.None,
@@ -304,7 +251,7 @@ fun ConnectionScreen(
                         ),
                         shape = RoundedCornerShape(12.dp),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = LoginAccentPurple,
+                            focusedBorderColor = LoginAzureBlue,
                             unfocusedBorderColor = LoginCardBorder,
                             focusedContainerColor = LoginInputFill,
                             unfocusedContainerColor = LoginInputFill,
@@ -336,14 +283,14 @@ fun ConnectionScreen(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    // Personal Access Token (PAT)
+                    // Personal Access Token
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "Personal Access Token (PAT)",
+                            text = "Personal Access Token",
                             color = LoginTextDark,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold
@@ -374,14 +321,6 @@ fun ConnectionScreen(
                                 fontSize = 12.sp
                             )
                         },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Default.Key,
-                                contentDescription = null,
-                                tint = LoginAzureBlue,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        },
                         trailingIcon = {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 if (patInput.isNotEmpty()) {
@@ -401,24 +340,6 @@ fun ConnectionScreen(
                                             modifier = Modifier.size(18.dp)
                                         )
                                     }
-                                }
-                                IconButton(
-                                    onClick = {
-                                        readClipboardText(context)?.let { pasted ->
-                                            patInput = pasted.trim()
-                                            if (errorMessage != null) onDismissError()
-                                        }
-                                    },
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .testTag("paste_pat_button")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.ContentPaste,
-                                        contentDescription = "Paste PAT from clipboard",
-                                        tint = LoginAzureBlue,
-                                        modifier = Modifier.size(18.dp)
-                                    )
                                 }
                                 IconButton(
                                     onClick = { patVisible = !patVisible },
@@ -451,7 +372,7 @@ fun ConnectionScreen(
                         ),
                         shape = RoundedCornerShape(12.dp),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = LoginAccentPurple,
+                            focusedBorderColor = LoginAzureBlue,
                             unfocusedBorderColor = LoginCardBorder,
                             focusedContainerColor = LoginInputFill,
                             unfocusedContainerColor = LoginInputFill,
@@ -526,7 +447,7 @@ fun ConnectionScreen(
                             checked = rememberCredentials,
                             onCheckedChange = { rememberCredentials = it },
                             colors = CheckboxDefaults.colors(
-                                checkedColor = LoginAccentPurple,
+                                checkedColor = LoginAzureBlue,
                                 uncheckedColor = LoginTextMuted,
                                 checkmarkColor = Color.White
                             ),
@@ -563,7 +484,7 @@ fun ConnectionScreen(
                         enabled = !isLoading,
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = LoginAccentPurple,
+                            containerColor = LoginAzureBlue,
                             contentColor = Color.White
                         ),
                         modifier = Modifier

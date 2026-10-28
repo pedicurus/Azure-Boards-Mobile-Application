@@ -59,8 +59,6 @@ fun AzureBoardsApp(
     val availableProjects by viewModel.availableProjects.collectAsStateWithLifecycle()
     val projectAssignees by viewModel.projectAssignees.collectAsStateWithLifecycle()
     val projectFrequentTags by viewModel.projectFrequentTags.collectAsStateWithLifecycle()
-    val remainingItemsCount by viewModel.remainingItemsCount.collectAsStateWithLifecycle()
-    val completedItemsCount by viewModel.completedItemsCount.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val selectedWorkItem by viewModel.selectedWorkItem.collectAsStateWithLifecycle()
@@ -85,9 +83,8 @@ fun AzureBoardsApp(
                 projectsByOrg = projectsByOrg,
                 defaultProjectsByOrg = defaultProjectsByOrg,
                 workItems = filteredWorkItems,
+                allWorkItems = allWorkItems,
                 totalCount = allWorkItems.size,
-                remainingCount = remainingItemsCount,
-                completedCount = completedItemsCount,
                 searchQuery = searchQuery,
                 selectedType = selectedType,
                 selectedState = selectedState,
@@ -103,8 +100,10 @@ fun AzureBoardsApp(
                 selectedWorkItem = selectedWorkItem,
                 childWorkItems = selectedWorkItemChildren,
                 getAllowedChildTypes = viewModel::getAllowedChildTypesForWorkItem,
+                getAllowedChildTypesForType = viewModel::getAllowedChildTypesForType,
                 getStatesForWorkItem = viewModel::getStatesForWorkItem,
                 getStatesForChildType = { proj, type -> viewModel.getStatesForType(proj, type) },
+                onCreateWorkItem = viewModel::createWorkItem,
                 onAddChildWorkItem = viewModel::addChildWorkItem,
                 onSearchChange = viewModel::setSearchQuery,
                 onTypeSelect = viewModel::setTypeFilter,

@@ -204,3 +204,19 @@ data class WorkItemTypeCategory(
 data class CategoryWorkItemTypeRef(
     @param:Json(name = "name") val name: String? = ""
 )
+
+@JsonClass(generateAdapter = true)
+data class BacklogsResponse(
+    @param:Json(name = "count") val count: Int? = 0,
+    @param:Json(name = "value") val value: List<BacklogLevelConfiguration>? = emptyList()
+)
+
+@JsonClass(generateAdapter = true)
+data class BacklogLevelConfiguration(
+    @param:Json(name = "id") val id: String? = "",
+    @param:Json(name = "name") val name: String? = "",
+    @param:Json(name = "rank") val rank: Int? = null,
+    @param:Json(name = "type") val type: String? = null,
+    @param:Json(name = "workItemTypes") val workItemTypes: List<CategoryWorkItemTypeRef>? = emptyList()
+)
+

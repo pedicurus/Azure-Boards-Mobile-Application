@@ -1,6 +1,6 @@
 {
-  "summary":  "Revised implementation plan incorporating a single global Default Organization and a single Default Project (under that default organization) selectable in Settings, alongside multi-organization credential management, Remember Me login, and conditional dropdown icons.",
-  "updatedAt":  "2026-10-28T11:54:56.449810480Z",
+  "summary":  "Implementation plan for replacing the Home screen Summary section with a Create New Items button and building the full-featured Create New Item page with capsule Work Item Type selection, required Title input, Detail-page fields (State, Assignee, Tags, Description, Children), and automatic parent creation when adding child items.",
+  "updatedAt":  "2026-10-28T18:05:53.799321647Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

@@ -21,7 +21,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Visibility
@@ -75,7 +74,7 @@ import com.example.ui.theme.TypeBug
 private val DialogCardBorderColor = Color(0xFFDCE1EF)
 private val DialogTextDark = Color(0xFF0D101C)
 private val DialogTextMuted = Color(0xFF6E7591)
-private val DialogAccentPurple = Color(0xFF613BE7)
+private val DialogAccentPurple = Color(0xFF0078D4)
 
 @Composable
 fun AzureBoardsSettingsDialog(
@@ -386,7 +385,7 @@ fun AzureBoardsSettingsDialog(
                                     editorOrgInput = it
                                     editorError = null
                                 },
-                                label = { Text("Organization Name or URL", fontSize = 12.sp) },
+                                label = { Text("Azure DevOps URL", fontSize = 12.sp) },
                                 placeholder = {
                                     Text(
                                         "https://dev.azure.com/OrganizationName",
@@ -394,44 +393,24 @@ fun AzureBoardsSettingsDialog(
                                         color = DialogTextMuted.copy(alpha = 0.6f)
                                     )
                                 },
-                                trailingIcon = {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        if (editorOrgInput.isNotEmpty()) {
-                                            IconButton(
-                                                onClick = {
-                                                    editorOrgInput = ""
-                                                    editorError = null
-                                                },
-                                                modifier = Modifier.size(32.dp)
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Clear,
-                                                    contentDescription = "Clear organization",
-                                                    tint = DialogTextMuted,
-                                                    modifier = Modifier.size(16.dp)
-                                                )
-                                            }
-                                        }
+                                trailingIcon = if (editorOrgInput.isNotEmpty()) {
+                                    {
                                         IconButton(
                                             onClick = {
-                                                readClipboardText(context)?.let { pasted ->
-                                                    editorOrgInput = pasted.trim()
-                                                    editorError = null
-                                                }
+                                                editorOrgInput = ""
+                                                editorError = null
                                             },
-                                            modifier = Modifier
-                                                .size(32.dp)
-                                                .testTag("settings_paste_org_button")
+                                            modifier = Modifier.size(32.dp)
                                         ) {
                                             Icon(
-                                                imageVector = Icons.Default.ContentPaste,
-                                                contentDescription = "Paste organization",
-                                                tint = DialogAccentPurple,
+                                                imageVector = Icons.Default.Clear,
+                                                contentDescription = "Clear organization",
+                                                tint = DialogTextMuted,
                                                 modifier = Modifier.size(16.dp)
                                             )
                                         }
                                     }
-                                },
+                                } else null,
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(
                                     capitalization = KeyboardCapitalization.None,
@@ -479,7 +458,7 @@ fun AzureBoardsSettingsDialog(
                                     editorPatInput = it
                                     editorError = null
                                 },
-                                label = { Text("Personal Access Token (PAT)", fontSize = 12.sp) },
+                                label = { Text("Personal Access Token", fontSize = 12.sp) },
                                 placeholder = {
                                     Text(
                                         "Paste your Personal Access Token",
@@ -512,24 +491,6 @@ fun AzureBoardsSettingsDialog(
                                                     modifier = Modifier.size(16.dp)
                                                 )
                                             }
-                                        }
-                                        IconButton(
-                                            onClick = {
-                                                readClipboardText(context)?.let { pasted ->
-                                                    editorPatInput = pasted.trim()
-                                                    editorError = null
-                                                }
-                                            },
-                                            modifier = Modifier
-                                                .size(32.dp)
-                                                .testTag("settings_paste_pat_button")
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.ContentPaste,
-                                                contentDescription = "Paste PAT",
-                                                tint = DialogAccentPurple,
-                                                modifier = Modifier.size(16.dp)
-                                            )
                                         }
                                         IconButton(
                                             onClick = { editorPatVisible = !editorPatVisible },

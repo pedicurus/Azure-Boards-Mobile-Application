@@ -40,7 +40,7 @@ fun registerAzureStateColor(stateName: String?, hexColor: String?) {
  * Supports live colors fetched from Azure DevOps REST API, standard English names, and Persian equivalents.
  */
 fun getAzureTypeColor(type: String?): Color {
-    if (type.isNullOrBlank()) return AzureTypeFeature
+    if (type.isNullOrBlank()) return AzureDevOpsBlue
     val clean = type.lowercase().trim()
     dynamicTypeColors[clean]?.let { return it }
     return when {
@@ -51,7 +51,7 @@ fun getAzureTypeColor(type: String?): Color {
         clean.contains("epic") || clean.contains("هدف") || clean.contains("حماسه") -> AzureTypeEpic
         clean.contains("issue") || clean.contains("مسئله") -> AzureTypeIssue
         clean.contains("test") -> AzureTypeTestCase
-        else -> AzureTypeFeature
+        else -> AzureDevOpsBlue
     }
 }
 
@@ -109,8 +109,9 @@ fun getAzureTypeTextColor(type: String?): Color {
  * Prioritizes live state colors fetched from Azure DevOps process definitions.
  */
 fun getAzureStateColor(state: String?): Color {
-    if (state.isNullOrBlank()) return AzureStateActive
+    if (state.isNullOrBlank()) return AzureDevOpsBlue
     val clean = state.lowercase().trim()
+    if (clean == "all") return AzureDevOpsBlue
     dynamicStateColors[clean]?.let { return it }
     return when {
         // Active / In Progress (Azure DevOps Blue)

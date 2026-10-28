@@ -38,6 +38,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
@@ -47,6 +48,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -96,6 +98,7 @@ import com.example.R
 import com.example.data.model.OrganizationAccount
 import com.example.data.model.WorkItem
 import com.example.ui.components.WorkItemCard
+import com.example.ui.components.WorkItemCreateSheet
 import com.example.ui.components.WorkItemDetailSheet
 import com.example.ui.components.isAlmostPersian
 import com.example.ui.theme.getAzureStateColor
@@ -109,7 +112,7 @@ private val HomeBgBottom = Color(0xFFDFE4F1)
 private val CardBorderColor = Color(0xFFDCE1EF)
 private val TextDark = Color(0xFF0D101C)
 private val TextMuted = Color(0xFF6E7591)
-private val AccentPurple = Color(0xFF613BE7)
+private val AccentPurple = Color(0xFF0078D4)
 private val SettingsIconColor = Color(0xFF1D1B20)
 private val BottomBarIconMuted = Color(0xFF93989D)
 
@@ -122,9 +125,8 @@ fun WorkItemsScreen(
     projectsByOrg: Map<String, List<String>> = emptyMap(),
     defaultProjectsByOrg: Map<String, String> = emptyMap(),
     workItems: List<WorkItem>,
+    allWorkItems: List<WorkItem> = workItems,
     totalCount: Int,
-    remainingCount: Int,
-    completedCount: Int,
     searchQuery: String,
     selectedType: String?,
     selectedState: String?,
@@ -140,8 +142,19 @@ fun WorkItemsScreen(
     selectedWorkItem: WorkItem?,
     childWorkItems: List<WorkItem> = emptyList(),
     getAllowedChildTypes: (WorkItem) -> List<String> = { emptyList() },
+    getAllowedChildTypesForType: (String?, String) -> List<String> = { _, _ -> emptyList() },
     getStatesForWorkItem: (WorkItem) -> List<String> = { availableStates },
     getStatesForChildType: (String?, String) -> List<String> = { _, _ -> emptyList() },
+    onCreateWorkItem: (
+        project: String?,
+        workItemType: String,
+        title: String,
+        state: String,
+        assignedToName: String?,
+        description: String?,
+        tags: List<String>,
+        onResult: (Result<WorkItem>) -> Unit
+    ) -> Unit = { _, _, _, _, _, _, _, _ -> },
     onAddChildWorkItem: (WorkItem, String, String, String) -> Unit = { _, _, _, _ -> },
     onSearchChange: (String) -> Unit,
     onTypeSelect: (String?) -> Unit,
@@ -167,9 +180,14 @@ fun WorkItemsScreen(
     onUpdateWorkItem: (WorkItem) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    // Handle hardware/gesture back to dismiss detail sheet when open
+    var showCreateSheet by remember { mutableStateOf(false) }
+
+    // Handle hardware/gesture back to dismiss detail or create sheet when open
     BackHandler(enabled = selectedWorkItem != null) {
         onDismissDetail()
+    }
+    BackHandler(enabled = showCreateSheet) {
+        showCreateSheet = false
     }
 
     var showSettingsDialog by remember { mutableStateOf(false) }
@@ -189,7 +207,7 @@ fun WorkItemsScreen(
     }
 
     // Handle back button when inline search bar is open
-    BackHandler(enabled = isSearchBarOpen && selectedWorkItem == null) {
+    BackHandler(enabled = isSearchBarOpen && selectedWorkItem == null && !showCreateSheet) {
         if (searchQuery.isNotEmpty()) {
             onSearchChange("")
         } else {
@@ -287,87 +305,43 @@ fun WorkItemsScreen(
                 }
             }
 
-            // Summary Section Title
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
+            // Create New Items Button between Organization name and Project name
+            Button(
+                onClick = {
+                    if (isSearchBarOpen) {
+                        focusManager.clearFocus()
+                        keyboardController?.hide()
+                    }
+                    showCreateSheet = true
+                },
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AccentPurple,
+                    contentColor = Color.White
+                ),
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp)
+                    .height(48.dp)
+                    .testTag("create_new_items_button")
             ) {
+                Icon(
+                    imageVector = Icons.Default.Add,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Summary",
-                    color = TextDark,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = (-0.3).sp
+                    text = "Create New Items",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold
                 )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Two Summary Cards: Remaining Items & Completed Items
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
-            ) {
-                // Remaining Items Card
-                Surface(
-                    color = Color.White,
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, CardBorderColor),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 14.dp)
-                    ) {
-                        Text(
-                            text = "Remaining Items",
-                            color = TextMuted,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = remainingCount.toString(),
-                            color = TextDark,
-                            fontSize = 26.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.testTag("remaining_items_count")
-                        )
-                    }
-                }
-
-                // Completed Items Card
-                Surface(
-                    color = Color.White,
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, CardBorderColor),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 14.dp)
-                    ) {
-                        Text(
-                            text = "Completed Items",
-                            color = TextMuted,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = completedCount.toString(),
-                            color = TextDark,
-                            fontSize = 26.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.testTag("completed_items_count")
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             // Second Section: Interactive {Project} Title on left & Assignee Dropdown on right
             Row(
@@ -443,7 +417,7 @@ fun WorkItemsScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Filter Capsule 2: States for selected Type (only active states, no "All" option)
+            // Filter Capsule 2: States for selected Type (includes "All" + active states)
             if (availableStates.isNotEmpty()) {
                 Surface(
                     color = Color.White,
@@ -462,7 +436,11 @@ fun WorkItemsScreen(
                             .horizontalScroll(rememberScrollState())
                     ) {
                         availableStates.forEach { state ->
-                            val isSelected = selectedState == state
+                            val isSelected = if (state.equals("All", ignoreCase = true)) {
+                                selectedState == null || selectedState.equals("All", ignoreCase = true)
+                            } else {
+                                selectedState.equals(state, ignoreCase = true)
+                            }
                             val stateColor = getAzureStateColor(state)
                             val stateTextColor = getAzureStateTextColor(state)
 
@@ -644,7 +622,7 @@ fun WorkItemsScreen(
                                 .background(AccentPurple.copy(alpha = 0.1f))
                         ) {
                             Icon(
-                                imageVector = if (searchQuery.isNotEmpty() || selectedType != null || selectedState != null)
+                                imageVector = if (searchQuery.isNotEmpty() || selectedType != null || (selectedState != null && !selectedState.equals("All", ignoreCase = true)))
                                     Icons.Default.SearchOff
                                 else
                                     Icons.Default.CloudDone,
@@ -764,7 +742,9 @@ fun WorkItemsScreen(
             WorkItemDetailSheet(
                 workItem = selectedWorkItem,
                 onDismiss = onDismissDetail,
-                availableStates = getStatesForWorkItem(selectedWorkItem).ifEmpty { availableStates },
+                availableStates = getStatesForWorkItem(selectedWorkItem).ifEmpty {
+                    availableStates.filterNot { it.equals("All", ignoreCase = true) }
+                },
                 availableAssignees = availableAssignees,
                 availableTags = availableTags,
                 childWorkItems = childWorkItems,
@@ -777,6 +757,25 @@ fun WorkItemsScreen(
                     onAddChildWorkItem(selectedWorkItem, title, childType, initialState)
                 },
                 onUpdateWorkItem = onUpdateWorkItem
+            )
+        }
+
+        // Create New Item Bottom Sheet when user taps "Create New Items"
+        if (showCreateSheet) {
+            WorkItemCreateSheet(
+                project = selectedProject ?: availableProjects.firstOrNull(),
+                availableTypes = availableTypes,
+                initialType = selectedType ?: availableTypes.firstOrNull(),
+                availableAssignees = availableAssignees,
+                availableTags = availableTags,
+                allWorkItems = allWorkItems,
+                getStatesForType = getStatesForChildType,
+                getAllowedChildTypesForType = getAllowedChildTypesForType,
+                getChildStates = getStatesForWorkItem,
+                onCreateWorkItem = onCreateWorkItem,
+                onAddChildWorkItem = onAddChildWorkItem,
+                onUpdateWorkItem = onUpdateWorkItem,
+                onDismiss = { showCreateSheet = false }
             )
         }
 
@@ -885,59 +884,63 @@ private fun HomeOrganizationHeader(
             }
         }
 
-        if (hasMultipleOrgs) {
-            DropdownMenu(
-                expanded = expanded,
-                onDismissRequest = { expanded = false },
-                containerColor = Color.White,
-                shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(1.dp, CardBorderColor),
-                modifier = Modifier.widthIn(min = 200.dp)
-            ) {
-                organizations.forEach { acc ->
-                    val isCurrent = acc.organization.equals(organization, ignoreCase = true)
-                    val isDefault = acc.organization.equals(defaultOrganization, ignoreCase = true)
-                    DropdownMenuItem(
-                        text = {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(modifier = Modifier.weight(1f, fill = false)) {
+        LaunchedEffect(hasMultipleOrgs) {
+            if (!hasMultipleOrgs && expanded) {
+                expanded = false
+            }
+        }
+
+        DropdownMenu(
+            expanded = expanded && hasMultipleOrgs,
+            onDismissRequest = { expanded = false },
+            containerColor = Color.White,
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, CardBorderColor),
+            modifier = Modifier.widthIn(min = 200.dp)
+        ) {
+            organizations.forEach { acc ->
+                val isCurrent = acc.organization.equals(organization, ignoreCase = true)
+                val isDefault = acc.organization.equals(defaultOrganization, ignoreCase = true)
+                DropdownMenuItem(
+                    text = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f, fill = false)) {
+                                Text(
+                                    text = acc.organization,
+                                    color = if (isCurrent) AccentPurple else TextDark,
+                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (isDefault) {
                                     Text(
-                                        text = acc.organization,
-                                        color = if (isCurrent) AccentPurple else TextDark,
-                                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
-                                        fontSize = 13.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (isDefault) {
-                                        Text(
-                                            text = "Default",
-                                            color = TextMuted,
-                                            fontSize = 10.sp
-                                        )
-                                    }
-                                }
-                                if (isCurrent) {
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Icon(
-                                        imageVector = Icons.Default.Check,
-                                        contentDescription = null,
-                                        tint = AccentPurple,
-                                        modifier = Modifier.size(16.dp)
+                                        text = "Default",
+                                        color = TextMuted,
+                                        fontSize = 10.sp
                                     )
                                 }
                             }
-                        },
-                        onClick = {
-                            onOrganizationSelected(acc.organization)
-                            expanded = false
+                            if (isCurrent) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = null,
+                                    tint = AccentPurple,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                         }
-                    )
-                }
+                    },
+                    onClick = {
+                        expanded = false
+                        onOrganizationSelected(acc.organization)
+                    }
+                )
             }
         }
     }
@@ -1004,47 +1007,51 @@ private fun HomeProjectDropdown(
             }
         }
 
-        if (hasMultipleProjects) {
-            DropdownMenu(
-                expanded = expanded,
-                onDismissRequest = { expanded = false },
-                containerColor = Color.White,
-                shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(1.dp, CardBorderColor),
-                modifier = Modifier.widthIn(min = 160.dp)
-            ) {
-                availableProjects.forEach { project ->
-                    DropdownMenuItem(
-                        text = {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text(
-                                    text = project,
-                                    color = if (selectedProject == project) AccentPurple else TextDark,
-                                    fontWeight = if (selectedProject == project) FontWeight.Bold else FontWeight.Normal,
-                                    fontSize = 13.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+        LaunchedEffect(hasMultipleProjects) {
+            if (!hasMultipleProjects && expanded) {
+                expanded = false
+            }
+        }
+
+        DropdownMenu(
+            expanded = expanded && hasMultipleProjects,
+            onDismissRequest = { expanded = false },
+            containerColor = Color.White,
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.dp, CardBorderColor),
+            modifier = Modifier.widthIn(min = 160.dp)
+        ) {
+            availableProjects.forEach { project ->
+                DropdownMenuItem(
+                    text = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = project,
+                                color = if (selectedProject == project) AccentPurple else TextDark,
+                                fontWeight = if (selectedProject == project) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (selectedProject == project) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = null,
+                                    tint = AccentPurple,
+                                    modifier = Modifier.size(16.dp)
                                 )
-                                if (selectedProject == project) {
-                                    Icon(
-                                        imageVector = Icons.Default.Check,
-                                        contentDescription = null,
-                                        tint = AccentPurple,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                }
                             }
-                        },
-                        onClick = {
-                            onProjectSelected(project)
-                            expanded = false
                         }
-                    )
-                }
+                    },
+                    onClick = {
+                        expanded = false
+                        onProjectSelected(project)
+                    }
+                )
             }
         }
     }
@@ -1153,8 +1160,8 @@ private fun HomeAssigneeDropdown(
                         }
                     },
                     onClick = {
-                        onAssigneeSelected(if (option == "All") null else option)
                         expanded = false
+                        onAssigneeSelected(if (option == "All") null else option)
                     }
                 )
             }

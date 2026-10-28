@@ -486,6 +486,17 @@ class AzureDevOpsRepository(context: Context) {
         try {
             val operations = mutableListOf<JsonPatchOperation>()
 
+            // 0. Title (/fields/System.Title)
+            if (previousItem == null || previousItem.title != updatedItem.title) {
+                operations.add(
+                    JsonPatchOperation(
+                        op = "add",
+                        path = "/fields/System.Title",
+                        value = updatedItem.title.trim()
+                    )
+                )
+            }
+
             // 1. State (/fields/System.State)
             if (previousItem == null || previousItem.state != updatedItem.state) {
                 operations.add(
@@ -582,6 +593,168 @@ class AzureDevOpsRepository(context: Context) {
                     Exception("Failed to update work item #${updatedItem.id} (${response.code()}): ${response.message()}")
                 )
             }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Creates a new top-level or standalone work item in Azure DevOps with all user-specified fields.
+     */
+    suspend fun createWorkItemOnServer(
+        organization: String,
+        pat: String,
+        project: String,
+        workItemType: String,
+        title: String,
+        desiredState: String? = null,
+        assignedToName: String? = null,
+        resolvedAssigneeIdentity: String? = null,
+        description: String? = null,
+        tags: List<String> = emptyList()
+    ): Result<WorkItem> = withContext(Dispatchers.IO) {
+        val normalizedOrg = extractOrganization(organization)
+        if (normalizedOrg.isBlank() || pat.isBlank() || project.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Missing Azure DevOps credentials or project."))
+        }
+        val cleanTitle = title.trim()
+        if (cleanTitle.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Work item title is required."))
+        }
+
+        try {
+            val service = AzureDevOpsClient.createService(pat)
+            val cleanAssignee = assignedToName?.trim()?.takeUnless {
+                it.isEmpty() || it.equals("Unassigned", ignoreCase = true)
+            }
+            val cleanDesc = description?.trim().orEmpty()
+            val cleanTags = tags.map { it.trim() }.filter { it.isNotBlank() }
+
+            val createOps = mutableListOf(
+                JsonPatchOperation(
+                    op = "add",
+                    path = "/fields/System.Title",
+                    value = cleanTitle
+                )
+            )
+            if (cleanDesc.isNotEmpty()) {
+                createOps.add(
+                    JsonPatchOperation(
+                        op = "add",
+                        path = "/fields/System.Description",
+                        value = cleanDesc
+                    )
+                )
+            }
+            if (cleanTags.isNotEmpty()) {
+                createOps.add(
+                    JsonPatchOperation(
+                        op = "add",
+                        path = "/fields/System.Tags",
+                        value = cleanTags.joinToString("; ")
+                    )
+                )
+            }
+            if (cleanAssignee != null) {
+                val assigneeVal = resolvedAssigneeIdentity?.takeIf { it.isNotBlank() } ?: cleanAssignee
+                createOps.add(
+                    JsonPatchOperation(
+                        op = "add",
+                        path = "/fields/System.AssignedTo",
+                        value = assigneeVal
+                    )
+                )
+            }
+
+            var response = service.createWorkItem(
+                organization = normalizedOrg,
+                project = project,
+                type = workItemType,
+                patchBody = AzureDevOpsClient.createPatchRequestBody(createOps)
+            )
+
+            // Fallback if assignee identity format caused a 400 error on initial creation
+            if (!response.isSuccessful && cleanAssignee != null) {
+                val fallbackOps = if (resolvedAssigneeIdentity != null && resolvedAssigneeIdentity != cleanAssignee) {
+                    createOps.map { op ->
+                        if (op.path == "/fields/System.AssignedTo") op.copy(value = cleanAssignee) else op
+                    }
+                } else {
+                    createOps.filterNot { it.path == "/fields/System.AssignedTo" }
+                }
+                val retryResp = service.createWorkItem(
+                    organization = normalizedOrg,
+                    project = project,
+                    type = workItemType,
+                    patchBody = AzureDevOpsClient.createPatchRequestBody(fallbackOps)
+                )
+                if (retryResp.isSuccessful) {
+                    response = retryResp
+                }
+            }
+
+            if (!response.isSuccessful) {
+                return@withContext Result.failure(
+                    Exception("Failed to create work item (${response.code()}): ${response.message()}")
+                )
+            }
+
+            val createdRaw = response.body()
+                ?: return@withContext Result.failure(Exception("Empty response when creating work item."))
+
+            val createdId = createdRaw.id
+            var currentRawState = (createdRaw.fields["System.State"] as? String)?.trim()
+                ?: desiredState?.trim()?.takeIf { it.isNotEmpty() }
+                ?: getStandardProcessStates(workItemType).firstOrNull()
+                ?: "New"
+
+            if (!desiredState.isNullOrBlank() &&
+                !desiredState.equals("All", ignoreCase = true) &&
+                !currentRawState.equals(desiredState.trim(), ignoreCase = true)
+            ) {
+                val statePatchOps = listOf(
+                    JsonPatchOperation(
+                        op = "add",
+                        path = "/fields/System.State",
+                        value = desiredState.trim()
+                    )
+                )
+                val stateResp = try {
+                    service.updateWorkItem(
+                        organization = normalizedOrg,
+                        id = createdId,
+                        patchBody = AzureDevOpsClient.createPatchRequestBody(statePatchOps)
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+                if (stateResp?.isSuccessful == true) {
+                    currentRawState = desiredState.trim()
+                }
+            }
+
+            val f = createdRaw.fields
+            val boardOrder = (f["Microsoft.VSTS.Common.StackRank"] as? Number)?.toDouble()
+                ?: (f["Microsoft.VSTS.Common.BacklogPriority"] as? Number)?.toDouble()
+
+            Result.success(
+                WorkItem(
+                    id = createdId,
+                    title = (f["System.Title"] as? String)?.trim() ?: cleanTitle,
+                    workItemType = (f["System.WorkItemType"] as? String)?.trim() ?: workItemType,
+                    state = currentRawState,
+                    teamProject = (f["System.TeamProject"] as? String) ?: project,
+                    assignedToName = cleanAssignee,
+                    assignedToEmail = resolvedAssigneeIdentity,
+                    createdDate = f["System.CreatedDate"] as? String,
+                    changedDate = f["System.ChangedDate"] as? String,
+                    description = cleanDesc.ifEmpty { null },
+                    areaPath = (f["System.AreaPath"] as? String) ?: project,
+                    iterationPath = (f["System.IterationPath"] as? String) ?: project,
+                    boardOrder = boardOrder,
+                    tags = cleanTags
+                )
+            )
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -706,42 +879,144 @@ class AzureDevOpsRepository(context: Context) {
         if (normalizedOrg.isBlank() || project.isBlank() || pat.isBlank()) return@withContext emptyMap()
         try {
             val service = AzureDevOpsClient.createService(pat)
-            val response = service.getWorkItemTypeCategories(
-                organization = normalizedOrg,
-                project = project
-            )
-            if (response.isSuccessful) {
-                val categories = response.body()?.value.orEmpty()
+            coroutineScope {
+                val categoriesDeferred = async {
+                    runCatching {
+                        service.getWorkItemTypeCategories(
+                            organization = normalizedOrg,
+                            project = project
+                        )
+                    }.getOrNull()
+                }
+                val backlogsDeferred = async {
+                    runCatching {
+                        service.getProjectBacklogs(
+                            organization = normalizedOrg,
+                            project = project
+                        )
+                    }.getOrNull()
+                }
+
+                val categoriesResp = categoriesDeferred.await()
+                val backlogsResp = backlogsDeferred.await()
                 val result = mutableMapOf<String, String>()
+
                 val relevantCategories = listOf(
-                    "Microsoft.EpicCategory",
-                    "Microsoft.FeatureCategory",
+                    "Microsoft.BugCategory",
+                    "Microsoft.TaskCategory",
                     "Microsoft.RequirementCategory",
-                    "Microsoft.TaskCategory"
+                    "Microsoft.FeatureCategory",
+                    "Microsoft.EpicCategory"
                 )
-                for (cat in categories) {
-                    val catRefName = cat.referenceName?.trim().orEmpty()
-                    if (relevantCategories.any { it.equals(catRefName, ignoreCase = true) }) {
-                        for (witRef in cat.workItemTypes.orEmpty()) {
+                if (categoriesResp?.isSuccessful == true) {
+                    val categories = categoriesResp.body()?.value.orEmpty()
+                    // Iterate from lowest priority to highest so higher-tier categories win
+                    for (targetCat in relevantCategories) {
+                        val matchedCat = categories.firstOrNull {
+                            it.referenceName?.trim()?.equals(targetCat, ignoreCase = true) == true
+                        } ?: continue
+                        for (witRef in matchedCat.workItemTypes.orEmpty()) {
                             val witName = witRef.name?.trim().orEmpty()
                             if (witName.isNotBlank()) {
-                                result[witName] = catRefName
+                                result[witName] = targetCat
+                            }
+                        }
+                    }
+                }
+
+                // Also incorporate explicit project Backlog Level ranks (highest rank = biggest portfolio tier)
+                if (backlogsResp?.isSuccessful == true) {
+                    val backlogs = backlogsResp.body()?.value.orEmpty()
+                        .sortedByDescending { it.rank ?: 0 }
+                    if (backlogs.isNotEmpty()) {
+                        val portfolioBacklogs = backlogs.filter { it.type.equals("portfolio", ignoreCase = true) }
+                            .sortedByDescending { it.rank ?: 0 }
+                        for ((idx, bLevel) in portfolioBacklogs.withIndex()) {
+                            val mappedCat = if (idx == 0) "Microsoft.EpicCategory" else "Microsoft.FeatureCategory"
+                            for (witRef in bLevel.workItemTypes.orEmpty()) {
+                                val witName = witRef.name?.trim().orEmpty()
+                                if (witName.isNotBlank() && !result.containsKey(witName)) {
+                                    result[witName] = mappedCat
+                                }
+                            }
+                        }
+                        for (bLevel in backlogs) {
+                            val bType = bLevel.type?.trim()?.lowercase()
+                            val mappedCat = when (bType) {
+                                "requirement" -> "Microsoft.RequirementCategory"
+                                "task" -> "Microsoft.TaskCategory"
+                                else -> null
+                            } ?: continue
+                            for (witRef in bLevel.workItemTypes.orEmpty()) {
+                                val witName = witRef.name?.trim().orEmpty()
+                                if (witName.isNotBlank() && !result.containsKey(witName)) {
+                                    result[witName] = mappedCat
+                                }
                             }
                         }
                     }
                 }
                 result
-            } else {
-                emptyMap()
             }
         } catch (e: Exception) {
             emptyMap()
         }
     }
 
+    private fun baseHierarchyScore(
+        type: String,
+        categoryRef: String?,
+        projectWorkItems: List<WorkItem> = emptyList()
+    ): Int {
+        val n = type.lowercase().trim()
+        // Check explicit name-based hierarchy first for fine-grained ordering within/across categories
+        val nameScore = when {
+            n.contains("initiative") || n.contains("theme") -> 0
+            n.contains("epic") || n.contains("هدف") || n.contains("اهداف") || n.contains("حماسه") ||
+                n.contains("goal") || n.contains("objective") || n.contains("کلان") -> 2
+            n.contains("feature") || n.contains("ویژگی") || n.contains("قابلیت") ||
+                n.contains("امکانات") || n.contains("deliverable") -> 10
+            n.contains("user story") || n.contains("story") || n.contains("product backlog item") ||
+                n.contains("backlog item") || n.contains("requirement") || n.contains("داستان") ||
+                n.contains("نیازمندی") || n.contains("پروژه") || n.contains("خواسته") -> 20
+            n.contains("issue") || n.contains("مسئله") || n.contains("impediment") || n.contains("مانع") -> 22
+            n.contains("subtask") || n.contains("sub-task") || n.contains("زیرکار") -> 35
+            n.contains("task") || n.contains("کار") || n.contains("وظیفه") || n.contains("اقدام") -> 30
+            n.contains("bug") || n.contains("باگ") || n.contains("خطا") || n.contains("ایراد") -> 32
+            else -> null
+        }
+        val catScore = when {
+            categoryRef.equals("Microsoft.EpicCategory", ignoreCase = true) -> 2
+            categoryRef.equals("Microsoft.FeatureCategory", ignoreCase = true) -> 10
+            categoryRef.equals("Microsoft.RequirementCategory", ignoreCase = true) -> 20
+            categoryRef.equals("Microsoft.TaskCategory", ignoreCase = true) -> 30
+            categoryRef.equals("Microsoft.BugCategory", ignoreCase = true) -> 32
+            else -> null
+        }
+        if (catScore != null && nameScore != null) {
+            return if (kotlin.math.abs(catScore - nameScore) <= 4) nameScore else catScore
+        }
+        if (catScore != null) return catScore
+        if (nameScore != null) return nameScore
+
+        // For custom types not matched by category or name, inspect whether items of this type act as parents or leaves
+        val itemsOfType = projectWorkItems.filter { it.workItemType.equals(type, ignoreCase = true) }
+        if (itemsOfType.isNotEmpty()) {
+            val hasChildren = itemsOfType.any { it.childIds.isNotEmpty() }
+            val hasParents = itemsOfType.any { it.parentId != null }
+            return when {
+                hasChildren && !hasParents -> 5
+                hasChildren && hasParents -> 15
+                !hasChildren && hasParents -> 28
+                else -> 15
+            }
+        }
+        return 15
+    }
+
     /**
      * Resolves the ordered hierarchy levels of active work item types for a project,
-     * from top level (index 0) down to the last/leaf level (lastIndex).
+     * from biggest / top level (index 0) down to smallest / leaf level (lastIndex).
      */
     fun resolveOrderedHierarchyLevels(
         activeTypes: List<String>,
@@ -752,36 +1027,43 @@ class AzureDevOpsRepository(context: Context) {
         if (cleanedTypes.isEmpty()) return emptyList()
 
         val tierScores = mutableMapOf<String, Int>()
+        val isKnownTier = mutableMapOf<String, Boolean>()
         for (type in cleanedTypes) {
             val catRef = categoryMap.entries.firstOrNull { it.key.equals(type, ignoreCase = true) }?.value
-            val n = type.lowercase().trim()
-            val score = when {
-                catRef.equals("Microsoft.EpicCategory", ignoreCase = true) -> 0
-                catRef.equals("Microsoft.FeatureCategory", ignoreCase = true) -> 10
-                catRef.equals("Microsoft.RequirementCategory", ignoreCase = true) -> 20
-                catRef.equals("Microsoft.TaskCategory", ignoreCase = true) -> 30
-                n.contains("epic") || n.contains("هدف") || n.contains("goal") || n.contains("initiative") -> 0
-                n.contains("feature") || n.contains("ویژگی") -> 10
-                n.contains("story") || n.contains("requirement") || n.contains("backlog item") || n.contains("issue") || n.contains("داستان") -> 20
-                n.contains("task") || n.contains("کار") || n.contains("وظیفه") || n.contains("subtask") || n.contains("sub-task") || n.contains("bug") || n.contains("باگ") -> 30
-                else -> 15
-            }
-            tierScores[type] = score
+            tierScores[type] = baseHierarchyScore(type, catRef, projectWorkItems)
+            isKnownTier[type] = catRef != null || baseHierarchyScore(type, null) != 15
         }
 
-        // Refine tiers using any observed parent -> child relationships in projectWorkItems
+        // Refine tiers using observed parent -> child relationships in projectWorkItems
         if (projectWorkItems.isNotEmpty()) {
             val byId = projectWorkItems.associateBy { it.id }
+            val edgeCounts = mutableMapOf<Pair<String, String>, Int>()
             for (item in projectWorkItems) {
                 val pId = item.parentId ?: continue
                 val parent = byId[pId] ?: continue
                 val pType = cleanedTypes.firstOrNull { it.equals(parent.workItemType, ignoreCase = true) } ?: continue
                 val cType = cleanedTypes.firstOrNull { it.equals(item.workItemType, ignoreCase = true) } ?: continue
                 if (!pType.equals(cType, ignoreCase = true)) {
+                    val key = pType to cType
+                    edgeCounts[key] = (edgeCounts[key] ?: 0) + 1
+                }
+            }
+            // Keep dominant direction if bidirectional links exist
+            val directedEdges = edgeCounts.keys.filter { (p, c) ->
+                val forward = edgeCounts[p to c] ?: 0
+                val backward = edgeCounts[c to p] ?: 0
+                forward >= backward
+            }
+            repeat(cleanedTypes.size) {
+                for ((pType, cType) in directedEdges) {
                     val pScore = tierScores[pType] ?: 15
                     val cScore = tierScores[cType] ?: 15
                     if (pScore >= cScore) {
-                        tierScores[cType] = pScore + 5
+                        if (isKnownTier[cType] == true && isKnownTier[pType] != true) {
+                            tierScores[pType] = cScore - 5
+                        } else {
+                            tierScores[cType] = pScore + 5
+                        }
                     }
                 }
             }
@@ -791,7 +1073,28 @@ class AzureDevOpsRepository(context: Context) {
             .groupBy { tierScores[it] ?: 15 }
             .toSortedMap()
             .values
-            .map { it.distinct() }
+            .map { levelList ->
+                levelList.distinct().sortedBy { type ->
+                    val catRef = categoryMap.entries.firstOrNull { it.key.equals(type, ignoreCase = true) }?.value
+                    baseHierarchyScore(type, catRef, projectWorkItems)
+                }
+            }
+    }
+
+    /**
+     * Orders work item types from biggest (highest in hierarchy, e.g. Epic / هدف)
+     * to smallest (lowest in hierarchy, e.g. Task / کار / Bug).
+     */
+    fun orderWorkItemTypesBiggestToSmallest(
+        activeTypes: List<String>,
+        categoryMap: Map<String, String> = emptyMap(),
+        projectWorkItems: List<WorkItem> = emptyList()
+    ): List<String> {
+        return resolveOrderedHierarchyLevels(
+            activeTypes = activeTypes,
+            categoryMap = categoryMap,
+            projectWorkItems = projectWorkItems
+        ).flatten()
     }
 
     suspend fun fetchProjects(organization: String, pat: String): List<String> =
@@ -1063,11 +1366,16 @@ class AzureDevOpsRepository(context: Context) {
                     }
                 }.awaitAll()
 
-                val resultMap = linkedMapOf<String, List<String>>()
+                val unorderedMap = linkedMapOf<String, List<String>>()
                 for ((typeName, states) in perTypeResults) {
                     if (states.isNotEmpty()) {
-                        resultMap[typeName] = states
+                        unorderedMap[typeName] = states
                     }
+                }
+                val orderedKeys = orderWorkItemTypesBiggestToSmallest(unorderedMap.keys.toList())
+                val resultMap = linkedMapOf<String, List<String>>()
+                for (key in orderedKeys) {
+                    unorderedMap[key]?.let { resultMap[key] = it }
                 }
                 resultMap
             }
