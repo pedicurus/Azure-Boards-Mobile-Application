@@ -302,29 +302,34 @@ class AzureDevOpsRepository(context: Context) {
                 // Batch fetch work item fields (up to 200 per batch) with all fields and relations so StackRank / BacklogPriority and parent-child links are included
                 val rawItems = mutableListOf<com.example.data.model.RawWorkItem>()
                 val chunks = refs.take(400).chunked(200)
-                for (chunk in chunks) {
-                    val ids = chunk.joinToString(",") { it.id.toString() }
-                    var batchResponse = service.getWorkItems(
-                        organization = normalizedOrg,
-                        ids = ids,
-                        fields = null,
-                        expand = "relations"
-                    )
-                    if (!batchResponse.isSuccessful) {
-                        batchResponse = service.getWorkItems(
-                            organization = normalizedOrg,
-                            ids = ids,
-                            fields = null,
-                            expand = null
-                        )
-                    }
 
-                    if (!batchResponse.isSuccessful) {
-                        return@withContext Result.failure(
-                            Exception("Failed to fetch work item details (${batchResponse.code()}): ${batchResponse.message()}")
-                        )
-                    }
-                    rawItems.addAll(batchResponse.body()?.value ?: emptyList())
+                coroutineScope {
+                    val chunkResults = chunks.map { chunk ->
+                        async {
+                            val ids = chunk.joinToString(",") { it.id.toString() }
+                            var batchResponse = service.getWorkItems(
+                                organization = normalizedOrg,
+                                ids = ids,
+                                fields = null,
+                                expand = "relations"
+                            )
+                            if (!batchResponse.isSuccessful) {
+                                batchResponse = service.getWorkItems(
+                                    organization = normalizedOrg,
+                                    ids = ids,
+                                    fields = null,
+                                    expand = null
+                                )
+                            }
+
+                            if (!batchResponse.isSuccessful) {
+                                throw Exception("Failed to fetch work item details (${batchResponse.code()}): ${batchResponse.message()}")
+                            }
+                            batchResponse.body()?.value ?: emptyList()
+                        }
+                    }.awaitAll()
+
+                    chunkResults.forEach { rawItems.addAll(it) }
                 }
 
                 // Fetch any child work items referenced via Hierarchy-Forward relations that weren't in the initial batch
@@ -336,21 +341,25 @@ class AzureDevOpsRepository(context: Context) {
                 }.distinct().filter { it !in fetchedIds }
 
                 if (missingChildIds.isNotEmpty()) {
-                    for (chunk in missingChildIds.chunked(200)) {
-                        val ids = chunk.joinToString(",")
-                        val extraResp = try {
-                            service.getWorkItems(
-                                organization = normalizedOrg,
-                                ids = ids,
-                                fields = null,
-                                expand = "relations"
-                            )
-                        } catch (e: Exception) {
-                            null
-                        }
-                        if (extraResp?.isSuccessful == true) {
-                            rawItems.addAll(extraResp.body()?.value ?: emptyList())
-                        }
+                    coroutineScope {
+                        val chunkResults = missingChildIds.chunked(200).map { chunk ->
+                            async {
+                                val ids = chunk.joinToString(",")
+                                try {
+                                    val extraResp = service.getWorkItems(
+                                        organization = normalizedOrg,
+                                        ids = ids,
+                                        fields = null,
+                                        expand = "relations"
+                                    )
+                                    if (extraResp.isSuccessful) extraResp.body()?.value ?: emptyList() else emptyList()
+                                } catch (e: Exception) {
+                                    emptyList()
+                                }
+                            }
+                        }.awaitAll()
+
+                        chunkResults.forEach { rawItems.addAll(it) }
                     }
                 }
 
