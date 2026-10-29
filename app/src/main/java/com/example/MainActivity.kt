@@ -60,6 +60,13 @@ fun AzureBoardsApp(
     val projectAssignees by viewModel.projectAssignees.collectAsStateWithLifecycle()
     val projectFrequentTags by viewModel.projectFrequentTags.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+    val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
+    val isSearchingServer by viewModel.isSearchingServer.collectAsStateWithLifecycle()
+    val isBackgroundSyncing by viewModel.isBackgroundSyncing.collectAsStateWithLifecycle()
+    val syncProgress by viewModel.syncProgress.collectAsStateWithLifecycle()
+    val isPullRefreshing by viewModel.isPullRefreshing.collectAsStateWithLifecycle()
+    val syncStatusText by viewModel.syncStatusText.collectAsStateWithLifecycle()
+    val hasMoreItems by viewModel.hasMoreItems.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val selectedWorkItem by viewModel.selectedWorkItem.collectAsStateWithLifecycle()
     val selectedWorkItemChildren by viewModel.selectedWorkItemChildren.collectAsStateWithLifecycle()
@@ -97,6 +104,14 @@ fun AzureBoardsApp(
                 availableAssignees = projectAssignees,
                 availableTags = projectFrequentTags,
                 isLoading = isLoading,
+                isLoadingMore = isLoadingMore,
+                isSearchingServer = isSearchingServer,
+                isBackgroundSyncing = isBackgroundSyncing,
+                syncProgress = syncProgress,
+                isPullRefreshing = isPullRefreshing,
+                syncStatusText = syncStatusText,
+                hasMoreItems = hasMoreItems,
+                onLoadMore = viewModel::loadMoreWorkItems,
                 selectedWorkItem = selectedWorkItem,
                 childWorkItems = selectedWorkItemChildren,
                 getAllowedChildTypes = viewModel::getAllowedChildTypesForWorkItem,

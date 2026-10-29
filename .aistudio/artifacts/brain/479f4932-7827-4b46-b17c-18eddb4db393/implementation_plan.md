@@ -1,58 +1,66 @@
-# Implementation Plan: Create New Items Button & Full Create Work Item Flow
+# Iterative Background Streaming, On-Device Persistence & Project-Wide Search Plan
 
-## 1. Overview & Goals
-Replace the **Summary** section (`Summary` header, `Remaining Items`, and `Completed Items` cards) on the Home screen with a prominent **Create New Items** button positioned between the **Organization Name** header row and the **Project Name** selector row. Tapping this button opens a full-screen **Create New Item** page that mirrors the existing Work Item Detail layout while enforcing the two required fields (**Work Item Type** and **Title**) and supporting all detail attributes (**State**, **Assignee**, **Tags**, **Description**, and **Children**) with automatic parent saving when adding a child work item.
+## 1. Root Causes of Current Lags & Missing Search Results
 
----
+### Why You Still Feel Lags
+1. **Large Blocking Initial Hydration**: Currently, `connect()` keeps `isLoading = true` while running multiple WIQL queries, hydrating up to 400 work items + all missing child items at once, and fetching process/category metadata before rendering the main list.
+2. **Scroll-Dependent Loading**: Remaining `Proposed` and `Completed/Resolved/Removed` items are held in `unloadedProposedIdsByOrg` and `unloadedOtherIdsByOrg` and only fetched when you manually scroll to the bottom of the list.
+3. **No On-Device Cache**: Work items and project process/category metadata are stored only in memory. Every time you open the app or switch organizations, the app re-downloads everything from Azure DevOps from scratch.
 
-## 2. Home Screen Updates (`WorkItemsScreen.kt`)
-- **Remove Summary Section**:
-  - Remove the `"Summary"` section heading and the two metric cards (`Remaining Items` and `Completed Items`) from the Home screen header area.
-  - Clean up unused `remainingCount` and `completedCount` state collections in `WorkItemsScreen`.
-- **Add "Create New Items" Button**:
-  - Place a full-width, Azure DevOps Blue (`#0078D4`) primary button labeled **"Create New Items"** (with a leading `+` icon and `testTag("create_new_items_button")`) directly between the Organization header row (`HomeOrganizationHeader` + Refresh/Settings icons) and the Project/Assignee selector row (`HomeProjectDropdown` + `HomeAssigneeDropdown`).
-  - Tapping **Create New Items** opens the **Create New Item** full-screen view, pre-selecting the currently active project and defaulting the Work Item Type to the active type filter (or the top-level work item type for the project).
+### Why Search Misses Existing Azure Items
+1. **Active Filter Chips Hide Search Results**: By default, the Home screen automatically selects the highest-level work item type chip (e.g., `Epic` or `Feature`). In `AzureDevOpsViewModel.filteredWorkItems`, `matchesType`, `matchesState`, and `matchesAssignee` are still enforced during search—meaning if you search for a `Task`, `Bug`, or `User Story` by title or ID while `Epic` is selected, the item is fetched from the server and immediately hidden by the `matchesType` filter.
+2. **WIQL LongText Search Syntax**: Azure DevOps WIQL requires `CONTAINS WORDS` rather than `CONTAINS` for HTML `LongText` fields like `[System.Description]`, and direct numeric ID lookups (`getWorkItems(ids = ...)`) should run alongside WIQL text queries so ID searches never fail.
 
 ---
 
-## 3. Create New Item Page & Detail Parity (`WorkItemComponents.kt`)
-- **Unified Create / Detail Experience (`FigmaCreateWorkItemView`)**:
-  - Match the rounded sheet design and visual hierarchy of `FigmaItemDetailView`, including bidirectional English/Persian (RTL/LTR) text support.
-  - **Top Bar**: Back navigation (`< Create New Item`) and a primary **Save / Create** action button (`create_work_item_save_button`). Also register a `BackHandler` to return to the Home board cleanly.
-  - **1. Required Work Item Type Selector (First Essential Field)**:
-    - Render a horizontal **Capsule Selector** at the top of the Create page listing the project's enabled work item types ordered from biggest to smallest in the hierarchy.
-    - Selecting a type dynamically updates the available **States** (defaulting to the initial state for that type, e.g., `New` / `To Do` / `اهداف`) and the allowed **Child Work Item Types** for the Children section.
-  - **2. Required Title Input (Second Essential Field)**:
-    - Prominent, multi-line RTL/LTR-aware title field (`create_work_item_title_input`) with clear placeholder and inline validation feedback if the user attempts to save or add a child before entering a title.
-  - **3. Metadata Row (State & Assignee)**:
-    - Interactive **State** badge dropdown selector (`create_state_selector`) populated with the enabled states for the chosen Work Item Type.
-    - Interactive **Assignee** pill dropdown selector (`create_assignee_selector`) populated with `Unassigned` and all known project/organization members.
-  - **4. Tags Section**:
-    - Identical to the Detail page: displays attached tag chips with remove (`×`) buttons and a `+` button (`create_add_tag_button`) opening the frequent tags dropdown + `"Create new tag..."` dialog.
-  - **5. Description Section**:
-    - Editable, auto-directional (RTL/LTR) description card (`create_description_input`) matching the Detail screen.
-  - **6. Children Section & Auto-Save Parent Logic**:
-    - Displayed whenever the selected Work Item Type supports child work items in the project's hierarchy (`allowedChildTypes.isNotEmpty()`).
-    - When the user taps the `+` button (`create_add_child_button`) to add a child item:
-      - If **Title** is blank, prompt the user inline to enter the parent Title first.
-      - Open the **Add Child Work Item** dialog (allowing the user to enter Child Title, Child Type, and Initial State).
-      - Upon confirming the dialog, if the parent work item has not been saved to Azure Boards yet, **automatically save/create the parent work item on the server first** to obtain its real Azure DevOps `#ID`, transition the screen seamlessly into the saved parent item, and immediately create and link the new child work item (`System.LinkTypes.Hierarchy-Reverse`) under that parent.
+## 2. Proposed Architecture & Solutions
+
+### A. On-Device Persistent Cache (Instant Launch & Zero Initial Wait)
+- **Local Storage Layer (`WorkItemLocalCache` / Room + JSON metadata cache)**:
+  - Persist all fetched `WorkItem` records, project lists, and project process/category metadata (`ProjectProcessMetadata`, `ProjectCategoryMetadata`) per organization on the device.
+  - **Instant Startup (`0ms` Blocking Load)**: When opening the app or switching organizations, immediately hydrate `_workItems`, `_projectsByOrg`, `_projectProcessMap`, and `_projectCategoryMap` from local device storage on `Dispatchers.IO`.
+  - If cached items exist on device, `isLoading` is immediately `false` so you can browse, filter, and search your cached items right away without waiting for network calls.
+  - Whenever an item is created, edited, reordered, or newly synced, the local device cache is updated automatically.
+
+### B. Iterative, Incremental Background Streaming (No Scroll Required)
+- **Continuous Small-Batch Streaming Pipeline**:
+  - Instead of waiting for a giant batch or requiring you to scroll, the app will run a non-blocking background sync coroutine (`startIncrementalSyncJob`) that streams items iteratively in small batches (**40–50 items per batch**):
+    1. **Delta Check First (When Cache Exists)**: Query items changed since the last cached `[System.ChangedDate]` watermark (`WHERE [System.ChangedDate] >= '...'`) plus reconcile current work item IDs in the project/organization so any newly created or externally updated items are synced first in a single lightweight pass.
+    2. **Priority Wave 1 (`InProgress` + Active Hierarchy)**: Stream all `InProgress` items in small batches of 40–50 items, emitting each batch immediately to the UI `StateFlow` and saving to device storage.
+    3. **Priority Wave 2 (`Proposed` Items)**: Automatically continue streaming `Proposed` items in background batches of 50 items (with a short `yield()` / `50ms` breather between batches so the UI thread and animations stay at a locked 60fps) **even if the user does not scroll**.
+    4. **Priority Wave 3 (`Completed` / `Resolved` / `Removed` Items)**: First hydrate the 5 most recently changed items per type and state for immediate chip browsing, then continue trickling any remaining uncached items into the local device cache in the background until 100% of the project's work items are saved on the device.
+- **Subtle Non-Blocking Sync Status Indicator**:
+  - Replace full-screen blocking spinners (when cached data is already present) with a sleek, non-intrusive status pill in the header showing live incremental sync progress (e.g., *"Syncing 120 / 340..."* -> *"Saved on device"*).
+
+### C. Reliable Project-Wide Search (Local Full-Cache + Resilient Server WIQL)
+- **Search All Types, States, and Assignees in Current Project**:
+  - When the search bar has a query (`searchQuery.isNotBlank()`), `filteredWorkItems` will **search across all work item types, states, and assignees within the currently selected project**, bypassing the active Type, State, and Assignee chip filters so matching items of any type or state are always shown.
+  - Search result cards will clearly display their **Work Item Type badge** and **State badge** so you can immediately distinguish Epics, Features, User Stories, Tasks, and Bugs in the search results.
+- **Two-Tier Search Execution**:
+  1. **Instant On-Device Search (0ms latency)**: Immediately matches against all locally cached items in the current project across **ID, Title, Description, Tags, Assigned To, Work Item Type, and State**, ranked by relevance (exact ID match -> title starts-with -> title contains -> tag/description match).
+  2. **Parallel Server-Side Search Fallback (`searchWorkItemsOnServer`)**:
+     - Runs in parallel (debounced at `250ms`) so even if an item hasn't finished streaming into the local cache yet, it is fetched live from Azure DevOps.
+     - If the query is numeric (e.g., `1234` or `#1234`), directly calls `getWorkItems(ids = "1234")` in parallel with WIQL so exact ID lookup is guaranteed.
+     - Uses resilient WIQL clauses scoped to the current project:
+       - `[System.Title] CONTAINS '...'`
+       - `[System.Tags] CONTAINS '...'`
+       - `[System.Description] CONTAINS WORDS '...'` (with automatic fallback to Title/Tags query if the Azure DevOps server instance does not index `Description` for full-text search).
+     - Any newly discovered items from server search are immediately merged into `_workItems` and persisted into the on-device cache.
 
 ---
 
-## 4. Data & ViewModel Layer (`AzureDevOpsRepository.kt` & `AzureDevOpsViewModel.kt`)
-- **Repository (`createWorkItemOnServer`)**:
-  - Add `createWorkItemOnServer` in `AzureDevOpsRepository` using `POST /{organization}/{project}/_apis/wit/workitems/${type}?api-version=7.0` (`application/json-patch+json`).
-  - Include patch operations for `/fields/System.Title`, `/fields/System.Description` (if non-blank), `/fields/System.AssignedTo` (with fallback from email/identity to display name if needed), and `/fields/System.Tags` (if non-empty).
-  - If the user selected a non-default initial `/fields/System.State`, apply a follow-up patch update (just like child item creation) so Azure Boards state transition rules are respected.
-- **ViewModel (`createWorkItem` & Auto-Save for Child Creation)**:
-  - Add `createWorkItem(...)` in `AzureDevOpsViewModel` that creates the work item on the server, inserts it into `_allWorkItems` and `serverSyncedItems`, and invokes an `onCreated(WorkItem)` callback.
-  - Support both:
-    - **Standard Save**: Saves the new work item and returns to the Home list (or updates the board immediately).
-    - **Auto-Save on Add Child**: Saves the parent work item first, switches the active item to the newly created `WorkItem` (with its real `#ID`), and immediately executes `addChildWorkItem(createdParent, childTitle, childType, childState)`.
+## 3. Files to Create & Modify
 
----
-
-## 5. Verification Plan
-- Compile the project using `compile_applet` to ensure zero build or type errors.
-- Run the unit and Robolectric test suite (`gradle :app:testDebugUnitTest`) and verify the Home screen button placement and Create New Item workflow.
+1. **`/app/src/main/java/com/example/data/local/WorkItemLocalStore.kt` (New)**:
+   - Fast, thread-safe on-device persistence per organization for `WorkItem` lists, project lists, process/category metadata, and per-organization sync watermarks (`lastSyncedChangedDate`), using Moshi JSON serialization on `Dispatchers.IO` with atomic file writes.
+2. **`/app/src/main/java/com/example/data/repository/AzureDevOpsRepository.kt`**:
+   - Add `streamWorkItemsIncrementally(...)` / iterative batch hydration (`BATCH_SIZE = 50`) that yields between batches and invokes an `onBatchLoaded` callback after every batch.
+   - Add delta sync query support (`fetchUpdatedWorkItemsSince(...)`) so subsequent app launches only download new/modified items while keeping existing cached items on device.
+   - Upgrade `searchWorkItemsOnServer(...)` to scope to the selected project, support direct numeric ID lookup, and use `CONTAINS WORDS` with safe fallback so WIQL never fails on description queries.
+3. **`/app/src/main/java/com/example/ui/AzureDevOpsViewModel.kt`**:
+   - Load cached work items and metadata from `WorkItemLocalStore` immediately on startup and organization switch (`isLoading = false` as soon as cache is displayed).
+   - Run the iterative background sync loop automatically without requiring user scroll, persisting each batch to `WorkItemLocalStore` and updating a `syncStatusText` / `isBackgroundSyncing` state.
+   - Update `filteredWorkItems` so active search queries (`cleanQuery.isNotEmpty()`) search across **all types, states, and assignees in the current project**, ranked by match relevance.
+4. **`/app/src/main/java/com/example/ui/screens/WorkItemListScreen.kt` & `/app/src/main/java/com/example/MainActivity.kt`**:
+   - Display a subtle, non-blocking background sync badge in the header when incremental background loading or delta sync is active.
+   - When `searchQuery.isNotBlank()`, show a contextual banner/subtitle (*"Showing matches across all types & states in [Project]"*) so it is clear why items from all types/states appear.

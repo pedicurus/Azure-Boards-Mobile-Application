@@ -870,6 +870,8 @@ fun FigmaItemDetailView(
                             placeholder = {
                                 Text(
                                     text = "Enter child title...",
+                                    color = NeumorphicTextSecondary,
+                                    fontSize = 14.sp,
                                     textAlign = if (isNewChildTitleRtl) TextAlign.Right else TextAlign.Left,
                                     modifier = Modifier.fillMaxWidth()
                                 )
@@ -877,10 +879,23 @@ fun FigmaItemDetailView(
                             textStyle = TextStyle(
                                 color = TextPrimary,
                                 fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
                                 textAlign = if (isNewChildTitleRtl) TextAlign.Right else TextAlign.Left,
                                 textDirection = if (isNewChildTitleRtl) TextDirection.Rtl else TextDirection.Ltr
                             ),
                             singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary,
+                                cursorColor = NeumorphicTeal,
+                                focusedBorderColor = NeumorphicTeal,
+                                unfocusedBorderColor = SurfaceBorder,
+                                focusedContainerColor = SurfaceCard,
+                                unfocusedContainerColor = SurfaceCard,
+                                focusedPlaceholderColor = NeumorphicTextSecondary,
+                                unfocusedPlaceholderColor = NeumorphicTextSecondary
+                            ),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("new_child_title_input")
@@ -951,6 +966,7 @@ fun FigmaItemDetailView(
     }
 
     if (showAddTagDialog) {
+        val isTagInputRtl = isAlmostPersian(customTagInput.ifBlank { workItem.title })
         AlertDialog(
             onDismissRequest = { showAddTagDialog = false },
             title = {
@@ -962,13 +978,46 @@ fun FigmaItemDetailView(
                 )
             },
             text = {
-                OutlinedTextField(
-                    value = customTagInput,
-                    onValueChange = { customTagInput = it },
-                    placeholder = { Text("Enter tag name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                CompositionLocalProvider(
+                    LocalLayoutDirection provides if (isTagInputRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+                ) {
+                    OutlinedTextField(
+                        value = customTagInput,
+                        onValueChange = { customTagInput = it },
+                        placeholder = {
+                            Text(
+                                text = "Enter tag name",
+                                color = NeumorphicTextSecondary,
+                                fontSize = 14.sp,
+                                textAlign = if (isTagInputRtl) TextAlign.Right else TextAlign.Left,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        },
+                        textStyle = TextStyle(
+                            color = TextPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            textAlign = if (isTagInputRtl) TextAlign.Right else TextAlign.Left,
+                            textDirection = if (isTagInputRtl) TextDirection.Rtl else TextDirection.Ltr
+                        ),
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = NeumorphicTeal,
+                            focusedBorderColor = NeumorphicTeal,
+                            unfocusedBorderColor = SurfaceBorder,
+                            focusedContainerColor = SurfaceCard,
+                            unfocusedContainerColor = SurfaceCard,
+                            focusedPlaceholderColor = NeumorphicTextSecondary,
+                            unfocusedPlaceholderColor = NeumorphicTextSecondary
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("detail_new_tag_input")
+                    )
+                }
             },
             confirmButton = {
                 TextButton(
@@ -1063,13 +1112,32 @@ fun WorkItemCard(
                     }
                 }
                 Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = "#${workItem.id}",
-                    color = NeumorphicTeal,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.testTag("work_item_id_${workItem.id}")
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    val typeColor = getAzureTypeColor(workItem.workItemType)
+                    Surface(
+                        color = typeColor.copy(alpha = 0.14f),
+                        shape = RoundedCornerShape(8.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, typeColor.copy(alpha = 0.35f))
+                    ) {
+                        Text(
+                            text = workItem.workItemType,
+                            color = Color(0xFF1E293B),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                        )
+                    }
+                    Text(
+                        text = "#${workItem.id}",
+                        color = NeumorphicTeal,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.testTag("work_item_id_${workItem.id}")
+                    )
+                }
             }
 
             // Description
@@ -2357,6 +2425,8 @@ fun FigmaCreateWorkItemView(
                             placeholder = {
                                 Text(
                                     text = "Enter child title...",
+                                    color = NeumorphicTextSecondary,
+                                    fontSize = 14.sp,
                                     textAlign = if (isNewChildTitleRtl) TextAlign.Right else TextAlign.Left,
                                     modifier = Modifier.fillMaxWidth()
                                 )
@@ -2364,10 +2434,23 @@ fun FigmaCreateWorkItemView(
                             textStyle = TextStyle(
                                 color = TextPrimary,
                                 fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
                                 textAlign = if (isNewChildTitleRtl) TextAlign.Right else TextAlign.Left,
                                 textDirection = if (isNewChildTitleRtl) TextDirection.Rtl else TextDirection.Ltr
                             ),
                             singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary,
+                                cursorColor = NeumorphicTeal,
+                                focusedBorderColor = NeumorphicTeal,
+                                unfocusedBorderColor = SurfaceBorder,
+                                focusedContainerColor = SurfaceCard,
+                                unfocusedContainerColor = SurfaceCard,
+                                focusedPlaceholderColor = NeumorphicTextSecondary,
+                                unfocusedPlaceholderColor = NeumorphicTextSecondary
+                            ),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("create_new_child_title_input")
@@ -2480,6 +2563,7 @@ fun FigmaCreateWorkItemView(
     }
 
     if (showAddTagDialog) {
+        val isTagInputRtl = isAlmostPersian(customTagInput.ifBlank { titleInput })
         AlertDialog(
             onDismissRequest = { showAddTagDialog = false },
             title = {
@@ -2491,13 +2575,46 @@ fun FigmaCreateWorkItemView(
                 )
             },
             text = {
-                OutlinedTextField(
-                    value = customTagInput,
-                    onValueChange = { customTagInput = it },
-                    placeholder = { Text("Enter tag name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                CompositionLocalProvider(
+                    LocalLayoutDirection provides if (isTagInputRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+                ) {
+                    OutlinedTextField(
+                        value = customTagInput,
+                        onValueChange = { customTagInput = it },
+                        placeholder = {
+                            Text(
+                                text = "Enter tag name",
+                                color = NeumorphicTextSecondary,
+                                fontSize = 14.sp,
+                                textAlign = if (isTagInputRtl) TextAlign.Right else TextAlign.Left,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        },
+                        textStyle = TextStyle(
+                            color = TextPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            textAlign = if (isTagInputRtl) TextAlign.Right else TextAlign.Left,
+                            textDirection = if (isTagInputRtl) TextDirection.Rtl else TextDirection.Ltr
+                        ),
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = NeumorphicTeal,
+                            focusedBorderColor = NeumorphicTeal,
+                            unfocusedBorderColor = SurfaceBorder,
+                            focusedContainerColor = SurfaceCard,
+                            unfocusedContainerColor = SurfaceCard,
+                            focusedPlaceholderColor = NeumorphicTextSecondary,
+                            unfocusedPlaceholderColor = NeumorphicTextSecondary
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("create_new_tag_input")
+                    )
+                }
             },
             confirmButton = {
                 TextButton(

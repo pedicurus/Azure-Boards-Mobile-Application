@@ -837,6 +837,14 @@ fun AzureBoardsSettingsDialog(
                     }
                 }
             ) {
+                if (editorLoading) {
+                    CircularProgressIndicator(
+                        color = DialogAccentPurple,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
                 Text("Refresh Data", color = DialogAccentPurple, fontWeight = FontWeight.Bold)
             }
         },

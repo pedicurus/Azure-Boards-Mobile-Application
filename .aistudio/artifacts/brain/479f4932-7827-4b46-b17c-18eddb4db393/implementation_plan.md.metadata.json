@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for replacing the Home screen Summary section with a Create New Items button and building the full-featured Create New Item page with capsule Work Item Type selection, required Title input, Detail-page fields (State, Assignee, Tags, Description, Children), and automatic parent creation when adding child items.",
-  "updatedAt":  "2026-10-28T18:05:53.799321647Z",
+  "summary":  "Implementation plan for instant on-device cached loading, continuous iterative background streaming sync (without requiring user scroll), delta sync, and project-wide search across all work item types, states, and assignees.",
+  "updatedAt":  "2026-10-29T18:47:20.962550602Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

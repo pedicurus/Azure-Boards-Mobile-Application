@@ -31,12 +31,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
@@ -44,23 +46,28 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.PersonOutline
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -116,6 +123,7 @@ private val AccentPurple = Color(0xFF0078D4)
 private val SettingsIconColor = Color(0xFF1D1B20)
 private val BottomBarIconMuted = Color(0xFF93989D)
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WorkItemsScreen(
     organization: String,
@@ -139,6 +147,14 @@ fun WorkItemsScreen(
     availableAssignees: List<String> = emptyList(),
     availableTags: List<String> = emptyList(),
     isLoading: Boolean,
+    isLoadingMore: Boolean = false,
+    isSearchingServer: Boolean = false,
+    isBackgroundSyncing: Boolean = false,
+    syncProgress: Float? = null,
+    isPullRefreshing: Boolean = false,
+    syncStatusText: String? = null,
+    hasMoreItems: Boolean = false,
+    onLoadMore: () -> Unit = {},
     selectedWorkItem: WorkItem?,
     childWorkItems: List<WorkItem> = emptyList(),
     getAllowedChildTypes: (WorkItem) -> List<String> = { emptyList() },
@@ -261,31 +277,46 @@ fun WorkItemsScreen(
                     modifier = Modifier.weight(1f)
                 )
 
-                // Refresh button beside Settings button at the top
+                // Compact circular sync indicator (circle + sync symbol, no numbers) beside Settings button
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    IconButton(
-                        onClick = onRefresh,
-                        enabled = !isLoading,
-                        modifier = Modifier
-                            .size(40.dp)
-                            .testTag("top_refresh_button")
-                    ) {
-                        if (isLoading) {
-                            CircularProgressIndicator(
-                                color = AccentPurple,
-                                strokeWidth = 2.2.dp,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = "Refresh",
-                                tint = SettingsIconColor,
-                                modifier = Modifier.size(22.dp)
-                            )
+                    if (isBackgroundSyncing || isLoading) {
+                        Surface(
+                            color = AccentPurple.copy(alpha = 0.08f),
+                            shape = CircleShape,
+                            modifier = Modifier
+                                .size(32.dp)
+                                .testTag("background_sync_indicator")
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                if (syncProgress != null) {
+                                    CircularProgressIndicator(
+                                        progress = { syncProgress },
+                                        color = AccentPurple,
+                                        trackColor = AccentPurple.copy(alpha = 0.2f),
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(26.dp)
+                                    )
+                                } else {
+                                    CircularProgressIndicator(
+                                        color = AccentPurple,
+                                        trackColor = AccentPurple.copy(alpha = 0.16f),
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(26.dp)
+                                    )
+                                }
+                                Icon(
+                                    imageVector = Icons.Default.Sync,
+                                    contentDescription = "Syncing work items",
+                                    tint = AccentPurple,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
                         }
                     }
 
@@ -571,6 +602,17 @@ fun WorkItemsScreen(
                                 }
                             }
 
+                            if (isSearchingServer) {
+                                CircularProgressIndicator(
+                                    color = AccentPurple,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier
+                                        .size(16.dp)
+                                        .testTag("server_search_loading_indicator")
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                            }
+
                             // Single X button: clears text if non-empty, or removes the search bar if empty
                             IconButton(
                                 onClick = {
@@ -596,22 +638,82 @@ fun WorkItemsScreen(
                             }
                         }
                     }
+
+                    if (searchQuery.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 6.dp)
+                        ) {
+                            Text(
+                                text = "Searching all types, states & assignees in ${selectedProject ?: "all projects"}",
+                                color = TextMuted,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (isSearchingServer) "Searching Azure..." else "${workItems.size} found",
+                                color = AccentPurple,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
                 }
             }
 
-            // Work Items List
-            Box(
+            // Work Items List with progressive auto-load on scroll
+            val listState = rememberLazyListState()
+            val shouldLoadMore by remember {
+                derivedStateOf {
+                    val layoutInfo = listState.layoutInfo
+                    val totalItemsNumber = layoutInfo.totalItemsCount
+                    val lastVisibleItemIndex = (layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) + 1
+                    totalItemsNumber > 0 && lastVisibleItemIndex >= (totalItemsNumber - 3)
+                }
+            }
+
+            LaunchedEffect(shouldLoadMore, hasMoreItems, isLoadingMore, searchQuery) {
+                if (shouldLoadMore && hasMoreItems && !isLoadingMore && searchQuery.isBlank()) {
+                    onLoadMore()
+                }
+            }
+
+            val pullRefreshState = rememberPullToRefreshState()
+
+            PullToRefreshBox(
+                isRefreshing = isPullRefreshing,
+                onRefresh = onRefresh,
+                state = pullRefreshState,
+                indicator = {
+                    PullToRefreshDefaults.Indicator(
+                        state = pullRefreshState,
+                        isRefreshing = isPullRefreshing,
+                        containerColor = Color.White,
+                        color = AccentPurple,
+                        modifier = Modifier.align(Alignment.TopCenter)
+                    )
+                },
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
+                    .testTag("pull_to_refresh_box")
             ) {
                 if (workItems.isEmpty()) {
-                    // Empty State
+                    // Empty State (scrollable so pull-to-refresh works even when 0 items match)
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center,
                         modifier = Modifier
                             .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
                             .padding(horizontal = 32.dp, vertical = 24.dp)
                     ) {
                         Box(
@@ -621,24 +723,38 @@ fun WorkItemsScreen(
                                 .clip(CircleShape)
                                 .background(AccentPurple.copy(alpha = 0.1f))
                         ) {
-                            Icon(
-                                imageVector = if (searchQuery.isNotEmpty() || selectedType != null || (selectedState != null && !selectedState.equals("All", ignoreCase = true)))
-                                    Icons.Default.SearchOff
-                                else
-                                    Icons.Default.CloudDone,
-                                contentDescription = null,
-                                tint = AccentPurple,
-                                modifier = Modifier.size(28.dp)
-                            )
+                            if (isSearchingServer || isLoadingMore) {
+                                CircularProgressIndicator(
+                                    color = AccentPurple,
+                                    strokeWidth = 2.5.dp,
+                                    modifier = Modifier.size(26.dp)
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = if (searchQuery.isNotEmpty() || selectedType != null || (selectedState != null && !selectedState.equals("All", ignoreCase = true)))
+                                        Icons.Default.SearchOff
+                                    else
+                                        Icons.Default.CloudDone,
+                                    contentDescription = null,
+                                    tint = AccentPurple,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            }
                         }
 
                         Spacer(modifier = Modifier.height(14.dp))
 
                         Text(
-                            text = if (searchQuery.isNotEmpty())
-                                "No items matching \"$searchQuery\""
-                            else
-                                "No work items for current selection",
+                            text = when {
+                                searchQuery.isNotEmpty() && isSearchingServer ->
+                                    "Searching Azure Boards for \"$searchQuery\"..."
+                                isLoadingMore ->
+                                    "Loading work items..."
+                                searchQuery.isNotEmpty() ->
+                                    "No items matching \"$searchQuery\""
+                                else ->
+                                    "No work items for current selection"
+                            },
                             color = TextDark,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold,
@@ -646,17 +762,23 @@ fun WorkItemsScreen(
                         )
 
                         Text(
-                            text = if (searchQuery.isNotEmpty())
-                                "Try adjusting your search query or clear the filter."
-                            else
-                                "Select another type or project from the options above.",
+                            text = when {
+                                searchQuery.isNotEmpty() && isSearchingServer ->
+                                    "Checking unloaded items on the server..."
+                                isLoadingMore ->
+                                    "Fetching items from Azure DevOps..."
+                                searchQuery.isNotEmpty() ->
+                                    "Try adjusting your search query or clear the filter."
+                                else ->
+                                    "Select another type or project from the options above."
+                            },
                             color = TextMuted,
                             fontSize = 12.sp,
                             textAlign = TextAlign.Center,
                             modifier = Modifier.padding(top = 4.dp, bottom = 14.dp)
                         )
 
-                        if (searchQuery.isNotEmpty()) {
+                        if (searchQuery.isNotEmpty() && !isSearchingServer) {
                             OutlinedButton(
                                 onClick = { onSearchChange("") },
                                 shape = RoundedCornerShape(8.dp),
@@ -668,6 +790,7 @@ fun WorkItemsScreen(
                     }
                 } else {
                     LazyColumn(
+                        state = listState,
                         contentPadding = PaddingValues(
                             start = 20.dp,
                             end = 20.dp,
@@ -697,6 +820,32 @@ fun WorkItemsScreen(
                                     onWorkItemClick(item)
                                 }
                             )
+                        }
+
+                        if (isLoadingMore) {
+                            item(key = "loading_more_footer") {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 12.dp)
+                                        .testTag("loading_more_footer")
+                                ) {
+                                    CircularProgressIndicator(
+                                        color = AccentPurple,
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        text = "Loading more items...",
+                                        color = TextMuted,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -955,9 +1104,9 @@ private fun HomeProjectDropdown(
 ) {
     var expanded by remember { mutableStateOf(false) }
     val hasMultipleProjects = availableProjects.size > 1
-    val displayedProject = selectedProject
-        ?: availableProjects.firstOrNull()
-        ?: "Project"
+    val displayedProject = selectedProject?.takeIf { sel ->
+        availableProjects.isEmpty() || availableProjects.any { it.equals(sel, ignoreCase = true) }
+    } ?: availableProjects.firstOrNull() ?: selectedProject ?: "Project"
 
     Box(modifier = modifier) {
         Row(

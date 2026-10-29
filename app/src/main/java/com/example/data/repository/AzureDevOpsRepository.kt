@@ -4,6 +4,9 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Base64
 import com.example.data.api.AzureDevOpsClient
+import com.example.data.local.WorkItemLocalStore
+import com.example.data.model.CachedOrganizationMetadata
+import com.example.data.model.CachedOrganizationSnapshot
 import com.example.data.model.JsonPatchOperation
 import com.example.data.model.OrganizationAccount
 import com.example.data.model.WiqlQueryRequest
@@ -16,11 +19,25 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
+
+data class DeltaSyncResult(
+    val updatedOrNewItems: List<WorkItem>,
+    val deletedItemIds: Set<Int>,
+    val totalServerCount: Int
+)
 
 class AzureDevOpsRepository(context: Context) {
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences("azure_boards_prefs", Context.MODE_PRIVATE)
+
+    private val localStore = WorkItemLocalStore(context.applicationContext ?: context)
+
+    private val hydratedIdsByOrg = ConcurrentHashMap<String, MutableSet<Int>>()
+    private val unloadedProposedIdsByOrg = ConcurrentHashMap<String, MutableList<Int>>()
+    private val unloadedOtherIdsByOrg = ConcurrentHashMap<String, MutableList<Int>>()
 
     companion object {
         private const val KEY_DEFAULT_ORG = "pref_azure_user_default_organization"
@@ -28,6 +45,17 @@ class AzureDevOpsRepository(context: Context) {
         private const val KEY_DEFAULT_PROJECT_PREFIX = "pref_azure_user_default_project_"
         private const val KEY_CACHED_PROJECTS_PREFIX = "pref_azure_user_cached_projects_"
         private const val KEY_SAVED_ORGS = "pref_azure_user_saved_organizations"
+
+        private const val INITIAL_FAST_HYDRATE_LIMIT = 60
+        const val STREAM_BATCH_SIZE = 50
+
+        const val CATEGORY_IN_PROGRESS = "InProgress"
+        const val CATEGORY_PROPOSED = "Proposed"
+        const val CATEGORY_RESOLVED = "Resolved"
+        const val CATEGORY_COMPLETED = "Completed"
+        const val CATEGORY_REMOVED = "Removed"
+
+        private val stateCategoryCache = ConcurrentHashMap<String, String>()
 
         val NON_WORK_ITEM_TYPES = setOf(
             "feedback response",
@@ -46,6 +74,182 @@ class AzureDevOpsRepository(context: Context) {
             if (typeName.isNullOrBlank()) return true
             val clean = typeName.trim().lowercase()
             return NON_WORK_ITEM_TYPES.any { clean == it || clean.startsWith(it) }
+        }
+
+        private fun normalizeCategoryName(rawCategory: String?): String? {
+            return when (rawCategory?.trim()?.lowercase()) {
+                "inprogress", "in progress" -> CATEGORY_IN_PROGRESS
+                "proposed" -> CATEGORY_PROPOSED
+                "resolved" -> CATEGORY_RESOLVED
+                "completed" -> CATEGORY_COMPLETED
+                "removed" -> CATEGORY_REMOVED
+                else -> null
+            }
+        }
+
+        fun registerStateCategory(
+            stateName: String?,
+            rawCategory: String?,
+            project: String? = null,
+            workItemType: String? = null
+        ) {
+            val cleanState = stateName?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return
+            val normalizedCat = normalizeCategoryName(rawCategory) ?: return
+            stateCategoryCache[cleanState] = normalizedCat
+            if (!project.isNullOrBlank() && !workItemType.isNullOrBlank()) {
+                val scopedKey = "${project.trim().lowercase()}|${workItemType.trim().lowercase()}|$cleanState"
+                stateCategoryCache[scopedKey] = normalizedCat
+            }
+        }
+    }
+
+    /**
+     * Synchronously loads the cached work item snapshot for [organization] from local device storage
+     * and restores the progressive hydration queues.
+     */
+    fun getCachedOrganizationSnapshotSync(organization: String): CachedOrganizationSnapshot? {
+        val normOrg = extractOrganization(organization)
+        if (normOrg.isBlank()) return null
+        val snapshot = localStore.loadSnapshotSync(normOrg) ?: return null
+        val orgKey = normOrg.lowercase()
+        val hydratedSet = Collections.synchronizedSet(snapshot.workItems.map { it.id }.toMutableSet())
+        hydratedIdsByOrg[orgKey] = hydratedSet
+        unloadedProposedIdsByOrg[orgKey] = Collections.synchronizedList(
+            snapshot.unloadedProposedIds.filter { it !in hydratedSet }.toMutableList()
+        )
+        unloadedOtherIdsByOrg[orgKey] = Collections.synchronizedList(
+            snapshot.unloadedOtherIds.filter { it !in hydratedSet }.toMutableList()
+        )
+        return snapshot
+    }
+
+    suspend fun getCachedOrganizationSnapshot(organization: String): CachedOrganizationSnapshot? =
+        withContext(Dispatchers.IO) {
+            getCachedOrganizationSnapshotSync(organization)
+        }
+
+    /**
+     * Saves the current work items and unloaded queues for [organization] to local device storage.
+     */
+    suspend fun saveCachedOrganizationSnapshot(
+        organization: String,
+        workItems: List<WorkItem>
+    ) {
+        val normOrg = extractOrganization(organization)
+        if (normOrg.isBlank()) return
+        val orgKey = normOrg.lowercase()
+        val propRemaining = unloadedProposedIdsByOrg[orgKey]?.let { queue ->
+            synchronized(queue) { queue.toList() }
+        }.orEmpty()
+        val otherRemaining = unloadedOtherIdsByOrg[orgKey]?.let { queue ->
+            synchronized(queue) { queue.toList() }
+        }.orEmpty()
+        val maxChangedDate = workItems.mapNotNull { it.changedDate?.trim() }
+            .filter { it.isNotEmpty() }
+            .maxOrNull()
+
+        localStore.saveSnapshot(
+            CachedOrganizationSnapshot(
+                organization = normOrg,
+                workItems = workItems,
+                unloadedProposedIds = propRemaining,
+                unloadedOtherIds = otherRemaining,
+                lastSyncedChangedDate = maxChangedDate,
+                savedAtEpochMs = System.currentTimeMillis()
+            )
+        )
+    }
+
+    fun getCachedOrganizationMetadataSync(organization: String): CachedOrganizationMetadata? {
+        val normOrg = extractOrganization(organization)
+        if (normOrg.isBlank()) return null
+        val meta = localStore.loadMetadataSync(normOrg) ?: return null
+        meta.stateCategoryMap.forEach { (k, v) ->
+            stateCategoryCache[k] = v
+        }
+        return meta
+    }
+
+    suspend fun saveCachedOrganizationMetadata(
+        organization: String,
+        processHierarchyByProject: Map<String, Map<String, List<String>>>,
+        categoryMapByProject: Map<String, Map<String, String>>
+    ) {
+        val normOrg = extractOrganization(organization)
+        if (normOrg.isBlank()) return
+        localStore.saveMetadata(
+            CachedOrganizationMetadata(
+                organization = normOrg,
+                processHierarchyByProject = processHierarchyByProject,
+                categoryMapByProject = categoryMapByProject,
+                stateCategoryMap = stateCategoryCache.toMap()
+            )
+        )
+    }
+
+    fun getRemainingUnloadedCount(organization: String): Int {
+        val orgKey = extractOrganization(organization).lowercase()
+        if (orgKey.isBlank()) return 0
+        val propSize = unloadedProposedIdsByOrg[orgKey]?.let { synchronized(it) { it.size } } ?: 0
+        val otherSize = unloadedOtherIdsByOrg[orgKey]?.let { synchronized(it) { it.size } } ?: 0
+        return propSize + otherSize
+    }
+
+    fun resolveStateCategory(
+        state: String?,
+        project: String? = null,
+        workItemType: String? = null
+    ): String {
+        val cleanState = state?.trim()?.lowercase().orEmpty()
+        if (cleanState.isEmpty()) return CATEGORY_PROPOSED
+
+        if (!project.isNullOrBlank() && !workItemType.isNullOrBlank()) {
+            val scopedKey = "${project.trim().lowercase()}|${workItemType.trim().lowercase()}|$cleanState"
+            stateCategoryCache[scopedKey]?.let { return it }
+        }
+        stateCategoryCache[cleanState]?.let { return it }
+
+        return when {
+            cleanState in setOf(
+                "in progress", "inprogress", "active", "doing", "committed",
+                "در راه", "امروز", "در حال انجام", "فعال"
+            ) -> CATEGORY_IN_PROGRESS
+            cleanState in setOf(
+                "new", "to do", "todo", "proposed", "approved", "design", "open", "requested",
+                "اهداف", "کارها", "پیشنهادی", "جدید"
+            ) -> CATEGORY_PROPOSED
+            cleanState in setOf(
+                "resolved", "ready", "حل شده", "آماده"
+            ) -> CATEGORY_RESOLVED
+            cleanState in setOf(
+                "done", "closed", "completed", "تکمیل", "انجام شده", "بسته"
+            ) -> CATEGORY_COMPLETED
+            cleanState in setOf(
+                "removed", "cut", "منتفی", "حذف شده", "لغو"
+            ) -> CATEGORY_REMOVED
+            else -> CATEGORY_PROPOSED
+        }
+    }
+
+    fun isTerminalOrResolvedCategory(
+        state: String?,
+        project: String? = null,
+        workItemType: String? = null
+    ): Boolean {
+        val cat = resolveStateCategory(state, project, workItemType)
+        return cat == CATEGORY_COMPLETED || cat == CATEGORY_RESOLVED || cat == CATEGORY_REMOVED
+    }
+
+    fun getStatePriorityTier(
+        state: String?,
+        project: String? = null,
+        workItemType: String? = null
+    ): Int {
+        return when (resolveStateCategory(state, project, workItemType)) {
+            CATEGORY_IN_PROGRESS -> 0
+            CATEGORY_PROPOSED -> 1
+            CATEGORY_RESOLVED, CATEGORY_COMPLETED, CATEGORY_REMOVED -> 2
+            else -> 1
         }
     }
 
@@ -121,6 +325,7 @@ class AzureDevOpsRepository(context: Context) {
     fun removeOrganizationAccount(organization: String) {
         val normOrg = extractOrganization(organization)
         if (normOrg.isBlank()) return
+        localStore.clearOrganizationCache(normOrg)
         val remaining = getSavedOrganizations().filterNot {
             it.organization.equals(normOrg, ignoreCase = true)
         }
@@ -228,6 +433,7 @@ class AzureDevOpsRepository(context: Context) {
     }
 
     fun clearCredentials() {
+        localStore.clearAllCaches()
         prefs.edit()
             .remove(KEY_SAVED_ORGS)
             .remove(KEY_DEFAULT_ORG)
@@ -259,6 +465,135 @@ class AzureDevOpsRepository(context: Context) {
             }
         }
         return clean.substringAfterLast("/").trim()
+    }
+
+    /**
+     * Performs a fast delta check against Azure DevOps when cached items already exist on device.
+     * Hydrates any newly created or modified items and queues any remaining uncached server IDs
+     * for non-blocking background streaming.
+     */
+    suspend fun syncDeltaAndQueueRemaining(
+        organization: String,
+        pat: String,
+        cachedItems: List<WorkItem>,
+        lastSyncedChangedDate: String? = null
+    ): Result<DeltaSyncResult> = withContext(Dispatchers.IO) {
+        val normalizedOrg = extractOrganization(organization)
+        if (normalizedOrg.isBlank() || pat.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Missing Azure DevOps credentials."))
+        }
+        try {
+            val service = AzureDevOpsClient.createService(pat)
+            val orgKey = normalizedOrg.lowercase()
+
+            // 1. Fetch ordered list of all valid work item IDs in the organization
+            val allWiqlResp = service.queryWorkItems(
+                organization = normalizedOrg,
+                request = WiqlQueryRequest(
+                    query = "SELECT [System.Id] FROM WorkItems ORDER BY [System.ChangedDate] DESC"
+                )
+            )
+            if (!allWiqlResp.isSuccessful) {
+                return@withContext Result.failure(
+                    Exception("Azure DevOps sync error (${allWiqlResp.code()}): ${allWiqlResp.message()}")
+                )
+            }
+
+            val allServerRefs = allWiqlResp.body()?.workItems.orEmpty()
+            val allServerIds = allServerRefs.map { it.id }
+            val allServerIdSet = allServerIds.toSet()
+
+            val cachedIdSet = cachedItems.map { it.id }.toSet()
+            val deletedIds = cachedIdSet.filter { it !in allServerIdSet }.toSet()
+
+            // 2. Determine which items were updated since our last sync or are brand new at the top of the feed
+            val watermarkDate = lastSyncedChangedDate
+                ?: cachedItems.mapNotNull { it.changedDate?.trim() }.filter { it.isNotEmpty() }.maxOrNull()
+            val datePrefix = watermarkDate?.take(10) // yyyy-MM-dd safe for all Azure DevOps WIQL servers
+
+            val changedIdsFromServer = if (!datePrefix.isNullOrBlank()) {
+                runCatching {
+                    service.queryWorkItems(
+                        organization = normalizedOrg,
+                        request = WiqlQueryRequest(
+                            query = "SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= '$datePrefix' ORDER BY [System.ChangedDate] DESC"
+                        )
+                    ).body()?.workItems.orEmpty().map { it.id }
+                }.getOrDefault(emptyList())
+            } else {
+                allServerIds.take(40)
+            }
+
+            // Always check top 35 most recently changed IDs + any new IDs in changedIdsFromServer
+            val deltaCandidateIds = LinkedHashSet<Int>()
+            allServerIds.take(35).forEach { deltaCandidateIds.add(it) }
+            changedIdsFromServer.take(60).forEach { deltaCandidateIds.add(it) }
+
+            val deltaIdsToHydrate = deltaCandidateIds.take(INITIAL_FAST_HYDRATE_LIMIT)
+            val rawDeltaItems = if (deltaIdsToHydrate.isNotEmpty()) {
+                hydrateRawItemsByIds(service, normalizedOrg, deltaIdsToHydrate)
+            } else {
+                emptyList()
+            }
+            val parsedDeltaItems = parseAndLinkRawWorkItems(rawDeltaItems)
+
+            val nowHydratedSet = Collections.synchronizedSet(mutableSetOf<Int>())
+            nowHydratedSet.addAll(cachedIdSet - deletedIds)
+            parsedDeltaItems.forEach { nowHydratedSet.add(it.id) }
+            hydratedIdsByOrg[orgKey] = nowHydratedSet
+
+            // 3. Any server IDs still not in our local cache are queued for iterative background streaming
+            val remainingUncachedIds = allServerIds.filter { it !in nowHydratedSet }
+            if (remainingUncachedIds.isEmpty()) {
+                unloadedProposedIdsByOrg[orgKey] = Collections.synchronizedList(mutableListOf())
+                unloadedOtherIdsByOrg[orgKey] = Collections.synchronizedList(mutableListOf())
+            } else {
+                val (inProgressRefs, proposedRefs) = queryPriorityCategoryIds(service, normalizedOrg)
+                val priorityProposedAndActive = (inProgressRefs + proposedRefs).filter { it !in nowHydratedSet }.distinct()
+                val prioritySet = priorityProposedAndActive.toSet()
+                val remainingOther = remainingUncachedIds.filter { it !in prioritySet }
+
+                unloadedProposedIdsByOrg[orgKey] = Collections.synchronizedList(priorityProposedAndActive.toMutableList())
+                unloadedOtherIdsByOrg[orgKey] = Collections.synchronizedList(remainingOther.toMutableList())
+            }
+
+            Result.success(
+                DeltaSyncResult(
+                    updatedOrNewItems = parsedDeltaItems,
+                    deletedItemIds = deletedIds,
+                    totalServerCount = allServerIds.size
+                )
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private suspend fun queryPriorityCategoryIds(
+        service: com.example.data.api.AzureDevOpsService,
+        normalizedOrg: String
+    ): Pair<List<Int>, List<Int>> = coroutineScope {
+        val inProgressDef = async {
+            runCatching {
+                service.queryWorkItems(
+                    organization = normalizedOrg,
+                    request = WiqlQueryRequest(
+                        query = "SELECT [System.Id] FROM WorkItems WHERE [System.State] IN ('Active', 'In Progress', 'Doing', 'Committed', 'در راه', 'امروز', 'در حال انجام', 'فعال') ORDER BY [System.ChangedDate] DESC"
+                    )
+                ).body()?.workItems.orEmpty().map { it.id }
+            }.getOrDefault(emptyList())
+        }
+        val proposedDef = async {
+            runCatching {
+                service.queryWorkItems(
+                    organization = normalizedOrg,
+                    request = WiqlQueryRequest(
+                        query = "SELECT [System.Id] FROM WorkItems WHERE [System.State] IN ('New', 'To Do', 'Proposed', 'Approved', 'Design', 'Open', 'اهداف', 'کارها', 'پیشنهادی', 'جدید') ORDER BY [System.ChangedDate] DESC"
+                    )
+                ).body()?.workItems.orEmpty().map { it.id }
+            }.getOrDefault(emptyList())
+        }
+        inProgressDef.await() to proposedDef.await()
     }
 
     suspend fun fetchWorkItems(organization: String, pat: String): Result<List<WorkItem>> =
@@ -295,181 +630,475 @@ class AzureDevOpsRepository(context: Context) {
                 }
 
                 val refs = wiqlResponse.body()?.workItems ?: emptyList()
+                val orgKey = normalizedOrg.lowercase()
+                val hydratedSet = Collections.synchronizedSet(mutableSetOf<Int>())
+                hydratedIdsByOrg[orgKey] = hydratedSet
+
                 if (refs.isEmpty()) {
+                    unloadedProposedIdsByOrg[orgKey] = Collections.synchronizedList(mutableListOf())
+                    unloadedOtherIdsByOrg[orgKey] = Collections.synchronizedList(mutableListOf())
                     return@withContext Result.success(emptyList())
                 }
 
-                // Batch fetch work item fields (up to 200 per batch) with all fields and relations so StackRank / BacklogPriority and parent-child links are included
-                val rawItems = mutableListOf<com.example.data.model.RawWorkItem>()
-                val chunks = refs.take(400).chunked(200)
+                // Hydrate a fast initial wave (up to INITIAL_FAST_HYDRATE_LIMIT = 60 items) so the first screen
+                // renders immediately without lag, and queue all remaining items for automatic background streaming.
+                val initialIdsToHydrate: List<Int>
+                if (refs.size <= INITIAL_FAST_HYDRATE_LIMIT) {
+                    initialIdsToHydrate = refs.map { it.id }
+                    unloadedProposedIdsByOrg[orgKey] = Collections.synchronizedList(mutableListOf())
+                    unloadedOtherIdsByOrg[orgKey] = Collections.synchronizedList(mutableListOf())
+                } else {
+                    val (inProgressRefs, proposedRefs) = queryPriorityCategoryIds(service, normalizedOrg)
 
-                coroutineScope {
-                    val chunkResults = chunks.map { chunk ->
-                        async {
-                            val ids = chunk.joinToString(",") { it.id.toString() }
-                            var batchResponse = service.getWorkItems(
-                                organization = normalizedOrg,
-                                ids = ids,
-                                fields = null,
-                                expand = "relations"
-                            )
-                            if (!batchResponse.isSuccessful) {
-                                batchResponse = service.getWorkItems(
-                                    organization = normalizedOrg,
-                                    ids = ids,
-                                    fields = null,
-                                    expand = null
-                                )
-                            }
-
-                            if (!batchResponse.isSuccessful) {
-                                throw Exception("Failed to fetch work item details (${batchResponse.code()}): ${batchResponse.message()}")
-                            }
-                            batchResponse.body()?.value ?: emptyList()
-                        }
-                    }.awaitAll()
-
-                    chunkResults.forEach { rawItems.addAll(it) }
-                }
-
-                // Fetch any child work items referenced via Hierarchy-Forward relations that weren't in the initial batch
-                val fetchedIds = rawItems.map { it.id }.toSet()
-                val missingChildIds = rawItems.flatMap { raw ->
-                    raw.relations.orEmpty()
-                        .filter { it.rel.equals("System.LinkTypes.Hierarchy-Forward", ignoreCase = true) }
-                        .mapNotNull { it.url?.trimEnd('/')?.substringAfterLast('/')?.toIntOrNull() }
-                }.distinct().filter { it !in fetchedIds }
-
-                if (missingChildIds.isNotEmpty()) {
-                    coroutineScope {
-                        val chunkResults = missingChildIds.chunked(200).map { chunk ->
-                            async {
-                                val ids = chunk.joinToString(",")
-                                try {
-                                    val extraResp = service.getWorkItems(
-                                        organization = normalizedOrg,
-                                        ids = ids,
-                                        fields = null,
-                                        expand = "relations"
-                                    )
-                                    if (extraResp.isSuccessful) extraResp.body()?.value ?: emptyList() else emptyList()
-                                } catch (e: Exception) {
-                                    emptyList()
-                                }
-                            }
-                        }.awaitAll()
-
-                        chunkResults.forEach { rawItems.addAll(it) }
+                    val prioritizedSet = LinkedHashSet<Int>()
+                    // Priority 1: InProgress items first
+                    inProgressRefs.take(INITIAL_FAST_HYDRATE_LIMIT).forEach { prioritizedSet.add(it) }
+                    // Priority 2: Top Proposed items
+                    for (id in proposedRefs) {
+                        if (prioritizedSet.size >= INITIAL_FAST_HYDRATE_LIMIT) break
+                        prioritizedSet.add(id)
                     }
-                }
+                    // Priority 3: Fill up to INITIAL_FAST_HYDRATE_LIMIT with most recently changed items
+                    for (ref in refs) {
+                        if (prioritizedSet.size >= INITIAL_FAST_HYDRATE_LIMIT) break
+                        prioritizedSet.add(ref.id)
+                    }
 
-                val parsedItems = rawItems.distinctBy { it.id }.map { raw ->
-                    val f = raw.fields
-                    val id = raw.id
-                    val title = (f["System.Title"] as? String)?.trim() ?: "Work Item #$id"
-                    val type = (f["System.WorkItemType"] as? String)?.trim() ?: "Task"
-                    val state = (f["System.State"] as? String)?.trim() ?: "New"
-                    val teamProject = (f["System.TeamProject"] as? String)
-                        ?: (f["System.AreaPath"] as? String)?.substringBefore("\\")
-                        ?: "General"
+                    initialIdsToHydrate = prioritizedSet.take(INITIAL_FAST_HYDRATE_LIMIT)
+                    val initialSet = initialIdsToHydrate.toSet()
 
-                    val assignedMap = f["System.AssignedTo"] as? Map<*, *>
-                    val assignedName = assignedMap?.get("displayName") as? String
-                    val assignedEmail = assignedMap?.get("uniqueName") as? String
-                    val avatarUrl = (assignedMap?.get("_links") as? Map<*, *>)
-                        ?.let { links -> (links["avatar"] as? Map<*, *>)?.get("href") as? String }
-
-                    val createdDate = f["System.CreatedDate"] as? String
-                    val changedDate = f["System.ChangedDate"] as? String
-                    val description = (f["System.Description"] as? String)
-                        ?: (f["Microsoft.VSTS.Common.AcceptanceCriteria"] as? String)
-                    val areaPath = f["System.AreaPath"] as? String
-                    val iterationPath = f["System.IterationPath"] as? String
-                    val priority = (f["Microsoft.VSTS.Common.Priority"] as? Number)?.toInt()
-
-                    // Azure Boards orders items within each state using StackRank or BacklogPriority
-                    val boardOrder = (f["Microsoft.VSTS.Common.StackRank"] as? Number)?.toDouble()
-                        ?: (f["Microsoft.VSTS.Common.BacklogPriority"] as? Number)?.toDouble()
-                        ?: f.entries.firstOrNull { (k, v) ->
-                            v is Number && (
-                                k.endsWith(".StackRank", ignoreCase = true) ||
-                                k.endsWith(".BacklogPriority", ignoreCase = true)
-                            )
-                        }?.let { (it.value as? Number)?.toDouble() }
-
-                    // Parent ID from System.Parent field or System.LinkTypes.Hierarchy-Reverse relation
-                    val parentIdFromField = (f["System.Parent"] as? Number)?.toInt()
-                        ?: (f["System.Parent"] as? String)?.trim()?.toIntOrNull()
-                    val parentIdFromRel = raw.relations.orEmpty()
-                        .firstOrNull { it.rel.equals("System.LinkTypes.Hierarchy-Reverse", ignoreCase = true) }
-                        ?.url?.trimEnd('/')?.substringAfterLast('/')?.toIntOrNull()
-                    val parentId = parentIdFromField ?: parentIdFromRel
-
-                    // Child IDs from System.LinkTypes.Hierarchy-Forward relations
-                    val childIdsFromRel = raw.relations.orEmpty()
-                        .filter { it.rel.equals("System.LinkTypes.Hierarchy-Forward", ignoreCase = true) }
-                        .mapNotNull { it.url?.trimEnd('/')?.substringAfterLast('/')?.toIntOrNull() }
+                    // Queue remaining InProgress + Proposed IDs first so background streamer hydrates them next
+                    val remainingHighPriority = (inProgressRefs + proposedRefs)
+                        .filter { it !in initialSet }
                         .distinct()
+                    val remainingHighPrioritySet = remainingHighPriority.toSet()
+                    val remainingOther = refs.map { it.id }
+                        .filter { it !in initialSet && it !in remainingHighPrioritySet }
 
-                    val rawTags = f["System.Tags"] as? String
-                    val tagList = rawTags?.split(";")?.map { it.trim() }?.filter { it.isNotEmpty() }
-                        ?: emptyList()
-
-                    WorkItem(
-                        id = id,
-                        title = title,
-                        workItemType = type,
-                        state = state,
-                        teamProject = teamProject,
-                        assignedToName = assignedName,
-                        assignedToEmail = assignedEmail,
-                        assignedToAvatar = avatarUrl,
-                        createdDate = createdDate,
-                        changedDate = changedDate,
-                        description = cleanHtml(description),
-                        areaPath = areaPath,
-                        iterationPath = iterationPath,
-                        priority = priority,
-                        boardOrder = boardOrder,
-                        parentId = parentId,
-                        childIds = childIdsFromRel,
-                        tags = tagList
-                    )
+                    unloadedProposedIdsByOrg[orgKey] = Collections.synchronizedList(remainingHighPriority.toMutableList())
+                    unloadedOtherIdsByOrg[orgKey] = Collections.synchronizedList(remainingOther.toMutableList())
                 }
 
-                // Cross-link parent and child IDs bidirectionally so every parent knows all its children
-                val parentToChildren = mutableMapOf<Int, MutableSet<Int>>()
-                val childToParent = mutableMapOf<Int, Int>()
-                for (item in parsedItems) {
-                    if (item.parentId != null) {
-                        childToParent[item.id] = item.parentId
-                        parentToChildren.getOrPut(item.parentId) { mutableSetOf() }.add(item.id)
-                    }
-                    for (cId in item.childIds) {
-                        parentToChildren.getOrPut(item.id) { mutableSetOf() }.add(cId)
-                        if (!childToParent.containsKey(cId)) {
-                            childToParent[cId] = item.id
-                        }
-                    }
-                }
-
-                val workItems = parsedItems.map { item ->
-                    item.copy(
-                        parentId = item.parentId ?: childToParent[item.id],
-                        childIds = parentToChildren[item.id]?.toList() ?: item.childIds
-                    )
-                }.sortedWith(
-                    compareBy<WorkItem>(
-                        { it.boardOrder ?: Double.MAX_VALUE },
-                        { it.id }
-                    )
-                )
+                val rawItems = hydrateRawItemsByIds(service, normalizedOrg, initialIdsToHydrate)
+                val workItems = parseAndLinkRawWorkItems(rawItems)
+                workItems.forEach { hydratedSet.add(it.id) }
+                unloadedProposedIdsByOrg[orgKey]?.removeAll(hydratedSet)
+                unloadedOtherIdsByOrg[orgKey]?.removeAll(hydratedSet)
 
                 Result.success(workItems)
             } catch (e: Exception) {
                 Result.failure(e)
             }
         }
+
+    fun hasUnloadedServerItems(organization: String): Boolean {
+        val orgKey = extractOrganization(organization).lowercase()
+        if (orgKey.isBlank()) return false
+        val propRemaining = unloadedProposedIdsByOrg[orgKey]?.isNotEmpty() == true
+        val otherRemaining = unloadedOtherIdsByOrg[orgKey]?.isNotEmpty() == true
+        return propRemaining || otherRemaining
+    }
+
+    /**
+     * Hydrates the next batch of unloaded work items for continuous background streaming,
+     * progressive scroll, or when a user selects a specific state chip.
+     */
+    suspend fun fetchNextWorkItemBatch(
+        organization: String,
+        pat: String,
+        project: String? = null,
+        workItemType: String? = null,
+        state: String? = null,
+        alreadyLoadedIds: Set<Int> = emptySet(),
+        batchSize: Int = STREAM_BATCH_SIZE
+    ): Result<List<WorkItem>> = withContext(Dispatchers.IO) {
+        val normalizedOrg = extractOrganization(organization)
+        if (normalizedOrg.isBlank() || pat.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Missing Azure DevOps credentials."))
+        }
+        try {
+            val service = AzureDevOpsClient.createService(pat)
+            val orgKey = normalizedOrg.lowercase()
+            val hydratedSet = hydratedIdsByOrg.getOrPut(orgKey) {
+                Collections.synchronizedSet(mutableSetOf())
+            }
+            hydratedSet.addAll(alreadyLoadedIds)
+
+            val candidateIds = mutableListOf<Int>()
+
+            // If filtering by a specific state (or project + type + state), run a targeted WIQL query
+            // so items of that specific state beyond the initial 5-item cap are fetched immediately.
+            if (!state.isNullOrBlank() && !state.equals("All", ignoreCase = true)) {
+                val escapedState = state.trim().replace("'", "''")
+                val clauses = mutableListOf("[System.State] = '$escapedState'")
+                if (!project.isNullOrBlank()) {
+                    clauses.add("[System.TeamProject] = '${project.trim().replace("'", "''")}'")
+                }
+                if (!workItemType.isNullOrBlank()) {
+                    clauses.add("[System.WorkItemType] = '${workItemType.trim().replace("'", "''")}'")
+                }
+                val wiqlQuery = "SELECT [System.Id] FROM WorkItems WHERE ${clauses.joinToString(" AND ")} ORDER BY [System.ChangedDate] DESC"
+                val targetedIds = runCatching {
+                    service.queryWorkItems(
+                        organization = normalizedOrg,
+                        request = WiqlQueryRequest(query = wiqlQuery)
+                    ).body()?.workItems.orEmpty().map { it.id }
+                }.getOrDefault(emptyList())
+
+                for (id in targetedIds) {
+                    if (id !in hydratedSet) {
+                        candidateIds.add(id)
+                        if (candidateIds.size >= batchSize) break
+                    }
+                }
+            }
+
+            // Pull from queued Proposed/InProgress IDs first, then remaining IDs
+            if (candidateIds.size < batchSize) {
+                val propQueue = unloadedProposedIdsByOrg[orgKey]
+                if (propQueue != null) {
+                    synchronized(propQueue) {
+                        val iterator = propQueue.iterator()
+                        while (iterator.hasNext() && candidateIds.size < batchSize) {
+                            val nextId = iterator.next()
+                            iterator.remove()
+                            if (nextId !in hydratedSet && nextId !in candidateIds) {
+                                candidateIds.add(nextId)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (candidateIds.size < batchSize) {
+                val otherQueue = unloadedOtherIdsByOrg[orgKey]
+                if (otherQueue != null) {
+                    synchronized(otherQueue) {
+                        val iterator = otherQueue.iterator()
+                        while (iterator.hasNext() && candidateIds.size < batchSize) {
+                            val nextId = iterator.next()
+                            iterator.remove()
+                            if (nextId !in hydratedSet && nextId !in candidateIds) {
+                                candidateIds.add(nextId)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (candidateIds.isEmpty()) {
+                return@withContext Result.success(emptyList())
+            }
+
+            val rawItems = hydrateRawItemsByIds(service, normalizedOrg, candidateIds)
+            val parsed = parseAndLinkRawWorkItems(rawItems)
+            parsed.forEach { hydratedSet.add(it.id) }
+            unloadedProposedIdsByOrg[orgKey]?.removeAll(hydratedSet)
+            unloadedOtherIdsByOrg[orgKey]?.removeAll(hydratedSet)
+
+            Result.success(parsed)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Executes a resilient server-side search across all types, states, and assignees (scoped to
+     * [project] with organization-wide fallback + direct ID lookup) so any matching item in Azure DevOps
+     * is guaranteed to be found, hydrated, and merged into the Home screen search results.
+     */
+    suspend fun searchWorkItemsOnServer(
+        organization: String,
+        pat: String,
+        query: String,
+        project: String? = null,
+        alreadyLoadedIds: Set<Int> = emptySet()
+    ): Result<List<WorkItem>> = withContext(Dispatchers.IO) {
+        val normalizedOrg = extractOrganization(organization)
+        val cleanQuery = query.trim()
+        if (normalizedOrg.isBlank() || pat.isBlank() || cleanQuery.isBlank()) {
+            return@withContext Result.success(emptyList())
+        }
+
+        try {
+            val service = AzureDevOpsClient.createService(pat)
+            val orgKey = normalizedOrg.lowercase()
+            val hydratedSet = hydratedIdsByOrg.getOrPut(orgKey) {
+                Collections.synchronizedSet(mutableSetOf())
+            }
+            hydratedSet.addAll(alreadyLoadedIds)
+
+            val escaped = cleanQuery.replace("'", "''")
+            val numericId = cleanQuery.removePrefix("#").trim().toIntOrNull()
+            val escapedProject = project?.trim()?.takeIf { it.isNotEmpty() }?.replace("'", "''")
+            val projectPrefix = if (escapedProject != null) {
+                "[System.TeamProject] = '$escapedProject' AND "
+            } else {
+                ""
+            }
+
+            // Run direct ID lookup, Title/Tags WIQL, and Description full-text WIQL in parallel
+            val (directIdRaw, titleAndTagsIds, descIds) = coroutineScope {
+                val directDef = async {
+                    if (numericId != null && numericId !in hydratedSet) {
+                        runCatching {
+                            hydrateRawItemsByIds(service, normalizedOrg, listOf(numericId))
+                        }.getOrDefault(emptyList())
+                    } else {
+                        emptyList()
+                    }
+                }
+
+                val titleTagsDef = async {
+                    val whereClause = if (numericId != null) {
+                        "${projectPrefix}([System.Id] = $numericId OR [System.Title] CONTAINS '$escaped' OR [System.Tags] CONTAINS '$escaped')"
+                    } else {
+                        "${projectPrefix}([System.Title] CONTAINS '$escaped' OR [System.Tags] CONTAINS '$escaped')"
+                    }
+                    val scopedIds = runCatching {
+                        service.queryWorkItems(
+                            organization = normalizedOrg,
+                            request = WiqlQueryRequest(
+                                query = "SELECT [System.Id] FROM WorkItems WHERE $whereClause ORDER BY [System.ChangedDate] DESC"
+                            )
+                        ).body()?.workItems.orEmpty().map { it.id }
+                    }.getOrDefault(emptyList())
+
+                    // If project-scoped query returned nothing, also check organization-wide
+                    if (scopedIds.isEmpty() && projectPrefix.isNotEmpty()) {
+                        val unscopedWhere = if (numericId != null) {
+                            "[System.Id] = $numericId OR [System.Title] CONTAINS '$escaped' OR [System.Tags] CONTAINS '$escaped'"
+                        } else {
+                            "[System.Title] CONTAINS '$escaped' OR [System.Tags] CONTAINS '$escaped'"
+                        }
+                        runCatching {
+                            service.queryWorkItems(
+                                organization = normalizedOrg,
+                                request = WiqlQueryRequest(
+                                    query = "SELECT [System.Id] FROM WorkItems WHERE $unscopedWhere ORDER BY [System.ChangedDate] DESC"
+                                )
+                            ).body()?.workItems.orEmpty().map { it.id }
+                        }.getOrDefault(emptyList())
+                    } else {
+                        scopedIds
+                    }
+                }
+
+                val descDef = async {
+                    // Azure DevOps LongText HTML fields use CONTAINS WORDS (with fallback to CONTAINS)
+                    val wordsQuery = "SELECT [System.Id] FROM WorkItems WHERE ${projectPrefix}[System.Description] CONTAINS WORDS '$escaped' ORDER BY [System.ChangedDate] DESC"
+                    val wordsResp = runCatching {
+                        service.queryWorkItems(
+                            organization = normalizedOrg,
+                            request = WiqlQueryRequest(query = wordsQuery)
+                        )
+                    }.getOrNull()
+
+                    if (wordsResp?.isSuccessful == true) {
+                        wordsResp.body()?.workItems.orEmpty().map { it.id }
+                    } else {
+                        val containsQuery = "SELECT [System.Id] FROM WorkItems WHERE ${projectPrefix}[System.Description] CONTAINS '$escaped' ORDER BY [System.ChangedDate] DESC"
+                        runCatching {
+                            service.queryWorkItems(
+                                organization = normalizedOrg,
+                                request = WiqlQueryRequest(query = containsQuery)
+                            ).body()?.workItems.orEmpty().map { it.id }
+                        }.getOrDefault(emptyList())
+                    }
+                }
+
+                Triple(directDef.await(), titleTagsDef.await(), descDef.await())
+            }
+
+            val directIds = directIdRaw.map { it.id }.toSet()
+            val unloadedMatchedIds = (titleAndTagsIds + descIds)
+                .distinct()
+                .filter { it !in hydratedSet && it !in directIds }
+                .take(100)
+
+            val hydratedFromWiql = if (unloadedMatchedIds.isNotEmpty()) {
+                hydrateRawItemsByIds(service, normalizedOrg, unloadedMatchedIds)
+            } else {
+                emptyList()
+            }
+
+            val combinedRaw = (directIdRaw + hydratedFromWiql).distinctBy { it.id }
+            if (combinedRaw.isEmpty()) {
+                return@withContext Result.success(emptyList())
+            }
+
+            val parsed = parseAndLinkRawWorkItems(combinedRaw)
+            parsed.forEach { hydratedSet.add(it.id) }
+            unloadedProposedIdsByOrg[orgKey]?.removeAll(hydratedSet)
+            unloadedOtherIdsByOrg[orgKey]?.removeAll(hydratedSet)
+
+            Result.success(parsed)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private suspend fun hydrateRawItemsByIds(
+        service: com.example.data.api.AzureDevOpsService,
+        normalizedOrg: String,
+        idsToHydrate: List<Int>
+    ): List<com.example.data.model.RawWorkItem> {
+        if (idsToHydrate.isEmpty()) return emptyList()
+        val rawItems = mutableListOf<com.example.data.model.RawWorkItem>()
+        coroutineScope {
+            val chunkResults = idsToHydrate.distinct().chunked(200).map { chunk ->
+                async {
+                    val ids = chunk.joinToString(",")
+                    var batchResponse = service.getWorkItems(
+                        organization = normalizedOrg,
+                        ids = ids,
+                        fields = null,
+                        expand = "relations"
+                    )
+                    if (!batchResponse.isSuccessful) {
+                        batchResponse = service.getWorkItems(
+                            organization = normalizedOrg,
+                            ids = ids,
+                            fields = null,
+                            expand = null
+                        )
+                    }
+                    if (batchResponse.isSuccessful) batchResponse.body()?.value ?: emptyList() else emptyList()
+                }
+            }.awaitAll()
+            chunkResults.forEach { rawItems.addAll(it) }
+        }
+
+        val fetchedIds = rawItems.map { it.id }.toSet()
+        val missingChildIds = rawItems.flatMap { raw ->
+            raw.relations.orEmpty()
+                .filter { it.rel.equals("System.LinkTypes.Hierarchy-Forward", ignoreCase = true) }
+                .mapNotNull { it.url?.trimEnd('/')?.substringAfterLast('/')?.toIntOrNull() }
+        }.distinct().filter { it !in fetchedIds }
+
+        if (missingChildIds.isNotEmpty()) {
+            coroutineScope {
+                val extraResults = missingChildIds.chunked(200).map { chunk ->
+                    async {
+                        val ids = chunk.joinToString(",")
+                        try {
+                            val extraResp = service.getWorkItems(
+                                organization = normalizedOrg,
+                                ids = ids,
+                                fields = null,
+                                expand = "relations"
+                            )
+                            if (extraResp.isSuccessful) extraResp.body()?.value ?: emptyList() else emptyList()
+                        } catch (_: Exception) {
+                            emptyList()
+                        }
+                    }
+                }.awaitAll()
+                extraResults.forEach { rawItems.addAll(it) }
+            }
+        }
+        return rawItems
+    }
+
+    private fun parseAndLinkRawWorkItems(rawItems: List<com.example.data.model.RawWorkItem>): List<WorkItem> {
+        val parsedItems = rawItems.distinctBy { it.id }.map { raw ->
+            val f = raw.fields
+            val id = raw.id
+            val title = (f["System.Title"] as? String)?.trim() ?: "Work Item #$id"
+            val type = (f["System.WorkItemType"] as? String)?.trim() ?: "Task"
+            val state = (f["System.State"] as? String)?.trim() ?: "New"
+            val teamProject = (f["System.TeamProject"] as? String)
+                ?: (f["System.AreaPath"] as? String)?.substringBefore("\\")
+                ?: "General"
+
+            val assignedMap = f["System.AssignedTo"] as? Map<*, *>
+            val assignedName = assignedMap?.get("displayName") as? String
+            val assignedEmail = assignedMap?.get("uniqueName") as? String
+            val avatarUrl = (assignedMap?.get("_links") as? Map<*, *>)
+                ?.let { links -> (links["avatar"] as? Map<*, *>)?.get("href") as? String }
+
+            val createdDate = f["System.CreatedDate"] as? String
+            val changedDate = f["System.ChangedDate"] as? String
+            val description = (f["System.Description"] as? String)
+                ?: (f["Microsoft.VSTS.Common.AcceptanceCriteria"] as? String)
+            val areaPath = f["System.AreaPath"] as? String
+            val iterationPath = f["System.IterationPath"] as? String
+            val priority = (f["Microsoft.VSTS.Common.Priority"] as? Number)?.toInt()
+
+            val boardOrder = (f["Microsoft.VSTS.Common.StackRank"] as? Number)?.toDouble()
+                ?: (f["Microsoft.VSTS.Common.BacklogPriority"] as? Number)?.toDouble()
+                ?: f.entries.firstOrNull { (k, v) ->
+                    v is Number && (
+                        k.endsWith(".StackRank", ignoreCase = true) ||
+                        k.endsWith(".BacklogPriority", ignoreCase = true)
+                    )
+                }?.let { (it.value as? Number)?.toDouble() }
+
+            val parentIdFromField = (f["System.Parent"] as? Number)?.toInt()
+                ?: (f["System.Parent"] as? String)?.trim()?.toIntOrNull()
+            val parentIdFromRel = raw.relations.orEmpty()
+                .firstOrNull { it.rel.equals("System.LinkTypes.Hierarchy-Reverse", ignoreCase = true) }
+                ?.url?.trimEnd('/')?.substringAfterLast('/')?.toIntOrNull()
+            val parentId = parentIdFromField ?: parentIdFromRel
+
+            val childIdsFromRel = raw.relations.orEmpty()
+                .filter { it.rel.equals("System.LinkTypes.Hierarchy-Forward", ignoreCase = true) }
+                .mapNotNull { it.url?.trimEnd('/')?.substringAfterLast('/')?.toIntOrNull() }
+                .distinct()
+
+            val rawTags = f["System.Tags"] as? String
+            val tagList = rawTags?.split(";")?.map { it.trim() }?.filter { it.isNotEmpty() }
+                ?: emptyList()
+
+            WorkItem(
+                id = id,
+                title = title,
+                workItemType = type,
+                state = state,
+                teamProject = teamProject,
+                assignedToName = assignedName,
+                assignedToEmail = assignedEmail,
+                assignedToAvatar = avatarUrl,
+                createdDate = createdDate,
+                changedDate = changedDate,
+                description = cleanHtml(description),
+                areaPath = areaPath,
+                iterationPath = iterationPath,
+                priority = priority,
+                boardOrder = boardOrder,
+                parentId = parentId,
+                childIds = childIdsFromRel,
+                tags = tagList
+            )
+        }
+
+        val parentToChildren = mutableMapOf<Int, MutableSet<Int>>()
+        val childToParent = mutableMapOf<Int, Int>()
+        for (item in parsedItems) {
+            if (item.parentId != null) {
+                childToParent[item.id] = item.parentId
+                parentToChildren.getOrPut(item.parentId) { mutableSetOf() }.add(item.id)
+            }
+            for (cId in item.childIds) {
+                parentToChildren.getOrPut(item.id) { mutableSetOf() }.add(cId)
+                if (!childToParent.containsKey(cId)) {
+                    childToParent[cId] = item.id
+                }
+            }
+        }
+
+        return parsedItems.map { item ->
+            item.copy(
+                parentId = item.parentId ?: childToParent[item.id],
+                childIds = parentToChildren[item.id]?.toList() ?: item.childIds
+            )
+        }.sortedWith(
+            compareBy<WorkItem>(
+                { it.boardOrder ?: Double.MAX_VALUE },
+                { it.id }
+            )
+        )
+    }
 
     /**
      * Persists work item changes (State, AssignedTo, Description, Tags) to Azure DevOps
@@ -1335,6 +1964,7 @@ class AzureDevOpsRepository(context: Context) {
                             .mapNotNull { stateDef ->
                                 val sName = stateDef.name?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
                                 registerAzureStateColor(sName, stateDef.color)
+                                registerStateCategory(sName, stateDef.stateCategory, project, candidate.name)
                                 sName
                             }
                             .distinctBy { it.lowercase() }
@@ -1350,6 +1980,7 @@ class AzureDevOpsRepository(context: Context) {
                             .mapNotNull { stateDef ->
                                 val sName = stateDef.name?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
                                 registerAzureStateColor(sName, stateDef.color)
+                                registerStateCategory(sName, stateDef.category, project, candidate.name)
                                 sName
                             }
                             .distinctBy { it.lowercase() }

@@ -6,6 +6,7 @@ import com.squareup.moshi.JsonClass
 /**
  * Clean domain model for an Azure DevOps Work Item.
  */
+@JsonClass(generateAdapter = true)
 data class WorkItem(
     val id: Int,
     val title: String,
@@ -28,8 +29,35 @@ data class WorkItem(
 )
 
 /**
+ * On-device persisted snapshot of work items and progressive sync state for an organization.
+ */
+@JsonClass(generateAdapter = true)
+data class CachedOrganizationSnapshot(
+    val organization: String,
+    val workItems: List<WorkItem> = emptyList(),
+    val unloadedProposedIds: List<Int> = emptyList(),
+    val unloadedOtherIds: List<Int> = emptyList(),
+    val lastSyncedChangedDate: String? = null,
+    val savedAtEpochMs: Long = 0L
+)
+
+/**
+ * On-device persisted snapshot of project process hierarchies, category maps, and state categories.
+ */
+@JsonClass(generateAdapter = true)
+data class CachedOrganizationMetadata(
+    val organization: String,
+    val processHierarchyByProject: Map<String, Map<String, List<String>>> = emptyMap(),
+    val categoryMapByProject: Map<String, Map<String, String>> = emptyMap(),
+    val stateCategoryMap: Map<String, String> = emptyMap(),
+    val typeColors: Map<String, String> = emptyMap(),
+    val stateColors: Map<String, String> = emptyMap()
+)
+
+/**
  * Represents a configured Azure DevOps organization account and its Personal Access Token.
  */
+@JsonClass(generateAdapter = true)
 data class OrganizationAccount(
     val organization: String,
     val pat: String,
