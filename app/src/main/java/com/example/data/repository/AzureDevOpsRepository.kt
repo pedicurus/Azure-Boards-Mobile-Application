@@ -8,6 +8,7 @@ import com.example.data.model.JsonPatchOperation
 import com.example.data.model.OrganizationAccount
 import com.example.data.model.WiqlQueryRequest
 import com.example.data.model.WorkItem
+import androidx.core.text.HtmlCompat
 import com.example.ui.theme.registerAzureStateColor
 import com.example.ui.theme.registerAzureTypeColor
 import kotlinx.coroutines.Dispatchers
@@ -27,12 +28,6 @@ class AzureDevOpsRepository(context: Context) {
         private const val KEY_DEFAULT_PROJECT_PREFIX = "pref_azure_user_default_project_"
         private const val KEY_CACHED_PROJECTS_PREFIX = "pref_azure_user_cached_projects_"
         private const val KEY_SAVED_ORGS = "pref_azure_user_saved_organizations"
-
-        private val BR_REGEX = Regex("<br\\s*/?>", RegexOption.IGNORE_CASE)
-        private val P_CLOSE_REGEX = Regex("</p>", RegexOption.IGNORE_CASE)
-        private val LI_CLOSE_REGEX = Regex("</li>", RegexOption.IGNORE_CASE)
-        private val LI_OPEN_REGEX = Regex("<li[^>]*>", RegexOption.IGNORE_CASE)
-        private val HTML_TAG_REGEX = Regex("<[^>]+>")
 
         val NON_WORK_ITEM_TYPES = setOf(
             "feedback response",
@@ -1410,17 +1405,6 @@ class AzureDevOpsRepository(context: Context) {
 
     private fun cleanHtml(html: String?): String? {
         if (html.isNullOrBlank()) return null
-        return html
-            .replace(BR_REGEX, "\n")
-            .replace(P_CLOSE_REGEX, "\n\n")
-            .replace(LI_CLOSE_REGEX, "\n")
-            .replace(LI_OPEN_REGEX, "• ")
-            .replace(HTML_TAG_REGEX, "")
-            .replace("&nbsp;", " ")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .trim()
+        return HtmlCompat.fromHtml(html, HtmlCompat.FROM_HTML_MODE_COMPACT).toString().trim()
     }
 }
