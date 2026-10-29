@@ -2,7 +2,6 @@ package com.example
 
 import com.example.data.model.WorkItem
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ExampleUnitTest {
