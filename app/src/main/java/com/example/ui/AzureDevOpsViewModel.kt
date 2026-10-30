@@ -1263,8 +1263,10 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
             updateJobs.values.forEach { it.cancel() }
             updateJobs.clear()
             val dirtyList = pendingDirtyItems.values.toList()
-            for (dirtyItem in dirtyList) {
-                syncWorkItemToServer(dirtyItem)
+            coroutineScope {
+                dirtyList.map { dirtyItem ->
+                    async { syncWorkItemToServer(dirtyItem) }
+                }.awaitAll()
             }
             pendingDirtyItems.clear()
 
@@ -1530,8 +1532,10 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
             updateJobs.values.forEach { it.cancel() }
             updateJobs.clear()
             val dirtyList = pendingDirtyItems.values.toList()
-            for (dirtyItem in dirtyList) {
-                syncWorkItemToServer(dirtyItem)
+            coroutineScope {
+                dirtyList.map { dirtyItem ->
+                    async { syncWorkItemToServer(dirtyItem) }
+                }.awaitAll()
             }
 
             if (hasExisting) {
