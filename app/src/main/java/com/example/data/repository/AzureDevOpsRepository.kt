@@ -12,8 +12,12 @@ import com.example.data.model.OrganizationAccount
 import com.example.data.model.WiqlQueryRequest
 import com.example.data.model.WorkItem
 import androidx.core.text.HtmlCompat
+import com.example.ui.theme.getRegisteredStateColorsHex
+import com.example.ui.theme.getRegisteredTypeColorsHex
+import com.example.ui.theme.getRegisteredTypeIcons
 import com.example.ui.theme.registerAzureStateColor
 import com.example.ui.theme.registerAzureTypeColor
+import com.example.ui.theme.registerAzureTypeIcon
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -167,13 +171,25 @@ class AzureDevOpsRepository(context: Context) {
         meta.stateCategoryMap.forEach { (k, v) ->
             stateCategoryCache[k] = v
         }
+        meta.typeColors.forEach { (k, v) ->
+            registerAzureTypeColor(k, v)
+        }
+        meta.typeIcons.forEach { (k, v) ->
+            registerAzureTypeIcon(k, v)
+        }
+        meta.stateColors.forEach { (k, v) ->
+            registerAzureStateColor(k, v)
+        }
         return meta
     }
 
     suspend fun saveCachedOrganizationMetadata(
         organization: String,
         processHierarchyByProject: Map<String, Map<String, List<String>>>,
-        categoryMapByProject: Map<String, Map<String, String>>
+        categoryMapByProject: Map<String, Map<String, String>>,
+        backlogLevelsByProject: Map<String, List<List<String>>> = emptyMap(),
+        areasByProject: Map<String, List<String>> = emptyMap(),
+        iterationsByProject: Map<String, List<String>> = emptyMap()
     ) {
         val normOrg = extractOrganization(organization)
         if (normOrg.isBlank()) return
@@ -182,7 +198,13 @@ class AzureDevOpsRepository(context: Context) {
                 organization = normOrg,
                 processHierarchyByProject = processHierarchyByProject,
                 categoryMapByProject = categoryMapByProject,
-                stateCategoryMap = stateCategoryCache.toMap()
+                backlogLevelsByProject = backlogLevelsByProject,
+                areasByProject = areasByProject,
+                iterationsByProject = iterationsByProject,
+                stateCategoryMap = stateCategoryCache.toMap(),
+                typeColors = getRegisteredTypeColorsHex(),
+                typeIcons = getRegisteredTypeIcons(),
+                stateColors = getRegisteredStateColorsHex()
             )
         )
     }
@@ -1189,6 +1211,32 @@ class AzureDevOpsRepository(context: Context) {
                 )
             }
 
+            // 5. Area Path (/fields/System.AreaPath)
+            val prevArea = previousItem?.areaPath?.trim()?.takeIf { it.isNotBlank() }
+            val newArea = updatedItem.areaPath?.trim()?.takeIf { it.isNotBlank() }
+            if (newArea != null && (previousItem == null || !newArea.equals(prevArea, ignoreCase = false))) {
+                operations.add(
+                    JsonPatchOperation(
+                        op = "add",
+                        path = "/fields/System.AreaPath",
+                        value = newArea
+                    )
+                )
+            }
+
+            // 6. Iteration Path (/fields/System.IterationPath)
+            val prevIteration = previousItem?.iterationPath?.trim()?.takeIf { it.isNotBlank() }
+            val newIteration = updatedItem.iterationPath?.trim()?.takeIf { it.isNotBlank() }
+            if (newIteration != null && (previousItem == null || !newIteration.equals(prevIteration, ignoreCase = false))) {
+                operations.add(
+                    JsonPatchOperation(
+                        op = "add",
+                        path = "/fields/System.IterationPath",
+                        value = newIteration
+                    )
+                )
+            }
+
             if (operations.isEmpty()) {
                 return@withContext Result.success(updatedItem)
             }
@@ -1244,7 +1292,9 @@ class AzureDevOpsRepository(context: Context) {
         assignedToName: String? = null,
         resolvedAssigneeIdentity: String? = null,
         description: String? = null,
-        tags: List<String> = emptyList()
+        tags: List<String> = emptyList(),
+        areaPath: String? = null,
+        iterationPath: String? = null
     ): Result<WorkItem> = withContext(Dispatchers.IO) {
         val normalizedOrg = extractOrganization(organization)
         if (normalizedOrg.isBlank() || pat.isBlank() || project.isBlank()) {
@@ -1262,6 +1312,8 @@ class AzureDevOpsRepository(context: Context) {
             }
             val cleanDesc = description?.trim().orEmpty()
             val cleanTags = tags.map { it.trim() }.filter { it.isNotBlank() }
+            val cleanAreaPath = areaPath?.trim()?.takeIf { it.isNotBlank() }
+            val cleanIterationPath = iterationPath?.trim()?.takeIf { it.isNotBlank() }
 
             val createOps = mutableListOf(
                 JsonPatchOperation(
@@ -1285,6 +1337,24 @@ class AzureDevOpsRepository(context: Context) {
                         op = "add",
                         path = "/fields/System.Tags",
                         value = cleanTags.joinToString("; ")
+                    )
+                )
+            }
+            if (cleanAreaPath != null) {
+                createOps.add(
+                    JsonPatchOperation(
+                        op = "add",
+                        path = "/fields/System.AreaPath",
+                        value = cleanAreaPath
+                    )
+                )
+            }
+            if (cleanIterationPath != null) {
+                createOps.add(
+                    JsonPatchOperation(
+                        op = "add",
+                        path = "/fields/System.IterationPath",
+                        value = cleanIterationPath
                     )
                 )
             }
@@ -1382,8 +1452,8 @@ class AzureDevOpsRepository(context: Context) {
                     createdDate = f["System.CreatedDate"] as? String,
                     changedDate = f["System.ChangedDate"] as? String,
                     description = cleanDesc.ifEmpty { null },
-                    areaPath = (f["System.AreaPath"] as? String) ?: project,
-                    iterationPath = (f["System.IterationPath"] as? String) ?: project,
+                    areaPath = (f["System.AreaPath"] as? String) ?: cleanAreaPath ?: project,
+                    iterationPath = (f["System.IterationPath"] as? String) ?: cleanIterationPath ?: project,
                     boardOrder = boardOrder,
                     tags = cleanTags
                 )
@@ -1619,20 +1689,148 @@ class AzureDevOpsRepository(context: Context) {
     }
 
     /**
-     * Fetches work item type -> category reference name (e.g. Microsoft.EpicCategory,
-     * Microsoft.FeatureCategory, Microsoft.RequirementCategory, Microsoft.TaskCategory)
-     * for a project so hierarchy levels can be determined accurately.
+     * Removes the parent-child hierarchy relation between [parentId] and [childId] in Azure DevOps
+     * without deleting either work item.
      */
-    suspend fun fetchProjectCategoryMap(
+    suspend fun unlinkChildWorkItemOnServer(
+        organization: String,
+        pat: String,
+        parentId: Int,
+        childId: Int
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val normalizedOrg = extractOrganization(organization)
+        if (normalizedOrg.isBlank() || pat.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Missing Azure DevOps credentials."))
+        }
+        try {
+            val service = AzureDevOpsClient.createService(pat)
+
+            // 1. Try removing System.LinkTypes.Hierarchy-Reverse from the child work item
+            val childResp = service.getWorkItems(
+                organization = normalizedOrg,
+                ids = childId.toString(),
+                fields = null,
+                expand = "relations"
+            )
+            val childRaw = childResp.body()?.value?.firstOrNull { it.id == childId }
+            val childRelations = childRaw?.relations.orEmpty()
+            val reverseIdx = childRelations.indexOfFirst { rel ->
+                rel.rel.equals("System.LinkTypes.Hierarchy-Reverse", ignoreCase = true) &&
+                    (rel.url?.trimEnd('/')?.substringAfterLast('/')?.toIntOrNull() == parentId)
+            }.takeIf { it >= 0 } ?: childRelations.indexOfFirst { rel ->
+                rel.rel.equals("System.LinkTypes.Hierarchy-Reverse", ignoreCase = true)
+            }
+
+            if (reverseIdx >= 0) {
+                val removeOps = listOf(
+                    JsonPatchOperation(
+                        op = "remove",
+                        path = "/relations/$reverseIdx",
+                        value = null
+                    )
+                )
+                val patchResp = service.updateWorkItem(
+                    organization = normalizedOrg,
+                    id = childId,
+                    patchBody = AzureDevOpsClient.createPatchRequestBody(removeOps)
+                )
+                if (patchResp.isSuccessful) {
+                    return@withContext Result.success(Unit)
+                }
+            }
+
+            // 2. Fallback: try removing System.LinkTypes.Hierarchy-Forward from the parent work item
+            val parentResp = service.getWorkItems(
+                organization = normalizedOrg,
+                ids = parentId.toString(),
+                fields = null,
+                expand = "relations"
+            )
+            val parentRaw = parentResp.body()?.value?.firstOrNull { it.id == parentId }
+            val parentRelations = parentRaw?.relations.orEmpty()
+            val forwardIdx = parentRelations.indexOfFirst { rel ->
+                rel.rel.equals("System.LinkTypes.Hierarchy-Forward", ignoreCase = true) &&
+                    (rel.url?.trimEnd('/')?.substringAfterLast('/')?.toIntOrNull() == childId)
+            }
+
+            if (forwardIdx >= 0) {
+                val removeOps = listOf(
+                    JsonPatchOperation(
+                        op = "remove",
+                        path = "/relations/$forwardIdx",
+                        value = null
+                    )
+                )
+                val patchResp = service.updateWorkItem(
+                    organization = normalizedOrg,
+                    id = parentId,
+                    patchBody = AzureDevOpsClient.createPatchRequestBody(removeOps)
+                )
+                if (patchResp.isSuccessful) {
+                    return@withContext Result.success(Unit)
+                }
+            }
+
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    data class ProjectBacklogMetadata(
+        val categoryMap: Map<String, String>,
+        val orderedBacklogLevels: List<List<String>>
+    )
+
+    /**
+     * Resolves the authoritative Azure Boards Backlog Levels (Portfolio Backlogs -> Requirement Backlog ->
+     * Iteration Backlog) and work item type category mappings for [project].
+     *
+     * Handles:
+     * 1. Inherited & completely customized work item types via Process Work Item Type Behaviors
+     *    (`_apis/work/processes/{processId}/workitemtypes?$expand=states,behaviors`) and Process Behaviors
+     *    (`_apis/work/processes/{processId}/behaviors`).
+     * 2. Project Backlog Configuration (`_apis/work/backlogconfiguration` & `_apis/work/backlogs`),
+     *    including `hiddenBacklogs` and `bugsBehavior`.
+     * 3. Disabled work item types (`isDisabled == true`): when an organization disables all work item
+     *    types in the Iteration Backlog (or hides the Iteration Backlog), the Iteration Backlog tier
+     *    becomes empty and is omitted, automatically making Requirement Backlog the last active level.
+     */
+    suspend fun fetchProjectBacklogMetadata(
         organization: String,
         project: String,
-        pat: String
-    ): Map<String, String> = withContext(Dispatchers.IO) {
+        pat: String,
+        activeTypesHint: List<String> = emptyList()
+    ): ProjectBacklogMetadata = withContext(Dispatchers.IO) {
         val normalizedOrg = extractOrganization(organization)
-        if (normalizedOrg.isBlank() || project.isBlank() || pat.isBlank()) return@withContext emptyMap()
+        if (normalizedOrg.isBlank() || project.isBlank() || pat.isBlank()) {
+            return@withContext ProjectBacklogMetadata(emptyMap(), emptyList())
+        }
         try {
             val service = AzureDevOpsClient.createService(pat)
             coroutineScope {
+                val projectDetailDeferred = async {
+                    runCatching {
+                        service.getProjectDetail(
+                            organization = normalizedOrg,
+                            project = project,
+                            includeCapabilities = true
+                        )
+                    }.getOrNull()
+                }
+                val processesDeferred = async {
+                    runCatching {
+                        service.getProcesses(organization = normalizedOrg)
+                    }.getOrNull()
+                }
+                val witListDeferred = async {
+                    runCatching {
+                        service.getProjectWorkItemTypes(
+                            organization = normalizedOrg,
+                            project = project
+                        )
+                    }.getOrNull()
+                }
                 val categoriesDeferred = async {
                     runCatching {
                         service.getWorkItemTypeCategories(
@@ -1649,71 +1847,426 @@ class AzureDevOpsRepository(context: Context) {
                         )
                     }.getOrNull()
                 }
+                val backlogConfigDeferred = async {
+                    runCatching {
+                        service.getProjectBacklogConfiguration(
+                            organization = normalizedOrg,
+                            project = project
+                        )
+                    }.getOrNull()
+                }
 
+                val projectDetailResp = projectDetailDeferred.await()
+                val processesResp = processesDeferred.await()
+                val witListResp = witListDeferred.await()
                 val categoriesResp = categoriesDeferred.await()
                 val backlogsResp = backlogsDeferred.await()
-                val result = mutableMapOf<String, String>()
+                val backlogConfigResp = backlogConfigDeferred.await()
 
-                val relevantCategories = listOf(
-                    "Microsoft.BugCategory",
-                    "Microsoft.TaskCategory",
-                    "Microsoft.RequirementCategory",
-                    "Microsoft.FeatureCategory",
-                    "Microsoft.EpicCategory"
-                )
-                if (categoriesResp?.isSuccessful == true) {
-                    val categories = categoriesResp.body()?.value.orEmpty()
-                    // Iterate from lowest priority to highest so higher-tier categories win
-                    for (targetCat in relevantCategories) {
-                        val matchedCat = categories.firstOrNull {
-                            it.referenceName?.trim()?.equals(targetCat, ignoreCase = true) == true
-                        } ?: continue
-                        for (witRef in matchedCat.workItemTypes.orEmpty()) {
-                            val witName = witRef.name?.trim().orEmpty()
-                            if (witName.isNotBlank()) {
-                                result[witName] = targetCat
+                val processIdFromProject = projectDetailResp?.body()
+                    ?.capabilities
+                    ?.processTemplate
+                    ?.templateTypeId
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+
+                val processIdFromList = processesResp?.body()?.value.orEmpty()
+                    .firstOrNull { proc ->
+                        proc.projects.orEmpty().any { pRef ->
+                            pRef.name?.equals(project, ignoreCase = true) == true ||
+                                pRef.id?.equals(project, ignoreCase = true) == true
+                        }
+                    }
+                    ?.typeId
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+
+                val resolvedProcessId = processIdFromProject ?: processIdFromList
+
+                val (processWorkItemTypes, processBehaviors) = if (!resolvedProcessId.isNullOrBlank()) {
+                    val pWitsDef = async {
+                        runCatching {
+                            service.getProcessWorkItemTypes(
+                                organization = normalizedOrg,
+                                processId = resolvedProcessId,
+                                expand = "states,behaviors"
+                            )
+                        }.getOrNull()?.body()?.value.orEmpty()
+                    }
+                    val pBehaviorsDef = async {
+                        runCatching {
+                            service.getProcessBehaviors(
+                                organization = normalizedOrg,
+                                processId = resolvedProcessId
+                            )
+                        }.getOrNull()?.body()?.value.orEmpty()
+                    }
+                    pWitsDef.await() to pBehaviorsDef.await()
+                } else {
+                    emptyList<com.example.data.model.ProcessWorkItemType>() to
+                        emptyList<com.example.data.model.ProcessBehaviorDefinition>()
+                }
+
+                val projectWorkItemTypes = witListResp?.body()?.value.orEmpty()
+
+                val disabledTypeNamesLower = buildSet {
+                    processWorkItemTypes.filter { it.isDisabled == true }
+                        .mapNotNull { it.name?.trim()?.lowercase() }
+                        .forEach { add(it) }
+                    projectWorkItemTypes.filter { it.isDisabled == true }
+                        .mapNotNull { it.name?.trim()?.lowercase() }
+                        .forEach { add(it) }
+                }
+
+                val enabledCanonicalByLower = linkedMapOf<String, String>()
+                for (pWit in processWorkItemTypes) {
+                    val name = pWit.name?.trim().orEmpty()
+                    if (name.isNotBlank()) {
+                        registerAzureTypeColor(name, pWit.color)
+                        registerAzureTypeIcon(name, pWit.icon)
+                    }
+                    if (name.isNotBlank() &&
+                        pWit.isDisabled != true &&
+                        name.lowercase() !in disabledTypeNamesLower &&
+                        !isExcludedNonWorkItemType(name)
+                    ) {
+                        enabledCanonicalByLower[name.lowercase()] = name
+                    }
+                }
+                for (wWit in projectWorkItemTypes) {
+                    val name = wWit.name?.trim().orEmpty()
+                    if (name.isNotBlank()) {
+                        registerAzureTypeColor(name, wWit.color)
+                        registerAzureTypeIcon(name, wWit.icon?.id)
+                    }
+                }
+                if (enabledCanonicalByLower.isEmpty()) {
+                    for (wWit in projectWorkItemTypes) {
+                        val name = wWit.name?.trim().orEmpty()
+                        if (name.isNotBlank() &&
+                            wWit.isDisabled != true &&
+                            name.lowercase() !in disabledTypeNamesLower &&
+                            !isExcludedNonWorkItemType(name)
+                        ) {
+                            enabledCanonicalByLower.putIfAbsent(name.lowercase(), name)
+                        }
+                    }
+                }
+                for (hint in activeTypesHint) {
+                    val name = hint.trim()
+                    if (name.isNotBlank() &&
+                        name.lowercase() !in disabledTypeNamesLower &&
+                        !isExcludedNonWorkItemType(name)
+                    ) {
+                        enabledCanonicalByLower.putIfAbsent(name.lowercase(), name)
+                    }
+                }
+
+                fun resolveEnabledTypeName(rawName: String?): String? {
+                    val clean = rawName?.trim()?.takeIf { it.isNotBlank() } ?: return null
+                    val lower = clean.lowercase()
+                    if (lower in disabledTypeNamesLower || isExcludedNonWorkItemType(clean)) {
+                        return null
+                    }
+                    return if (enabledCanonicalByLower.isNotEmpty()) {
+                        enabledCanonicalByLower[lower]
+                    } else {
+                        clean
+                    }
+                }
+
+                val backlogConfig = backlogConfigResp?.body()
+                val hiddenBacklogSet = backlogConfig?.hiddenBacklogs.orEmpty()
+                    .map { it.trim().lowercase() }
+                    .filter { it.isNotEmpty() }
+                    .toSet()
+
+                fun isBacklogHidden(id: String?, name: String?): Boolean {
+                    val idLow = id?.trim()?.lowercase()
+                    val nameLow = name?.trim()?.lowercase()
+                    return (idLow != null && idLow in hiddenBacklogSet) ||
+                        (nameLow != null && nameLow in hiddenBacklogSet)
+                }
+
+                // 1. Collect Portfolio Backlog buckets (rank -> list of enabled type names)
+                val portfolioBucketsByKey = linkedMapOf<String, Pair<Int, MutableList<String>>>()
+                val requirementTypes = mutableListOf<String>()
+                val iterationTypes = mutableListOf<String>()
+
+                var isIterationBacklogExplicitlyHidden = false
+
+                // Source A: Process Behaviors + Process Work Item Types (authoritative for customized/inherited processes)
+                if (processWorkItemTypes.isNotEmpty()) {
+                    val behaviorById = processBehaviors.associateBy {
+                        it.referenceName?.trim()?.lowercase().orEmpty()
+                    }
+                    for (pWit in processWorkItemTypes) {
+                        if (pWit.isDisabled == true) continue
+                        val resolvedName = resolveEnabledTypeName(pWit.name) ?: continue
+                        val witBehaviors = pWit.behaviors.orEmpty()
+                        for (witBehavior in witBehaviors) {
+                            val bId = witBehavior.behavior?.id?.trim()?.takeIf { it.isNotBlank() } ?: continue
+                            val bIdLower = bId.lowercase()
+                            val bDef = behaviorById[bIdLower]
+                            val parentRefLower = (bDef?.inherits?.behaviorRefName ?: bDef?.inherits?.id)
+                                ?.trim()?.lowercase().orEmpty()
+                            val rank = bDef?.rank
+
+                            when {
+                                bIdLower == "system.taskbacklogbehavior" ||
+                                    parentRefLower == "system.taskbacklogbehavior" ||
+                                    bIdLower.endsWith(".taskbacklogbehavior") -> {
+                                    if (!isBacklogHidden(bId, bDef?.name)) {
+                                        iterationTypes.add(resolvedName)
+                                    } else {
+                                        isIterationBacklogExplicitlyHidden = true
+                                    }
+                                }
+                                bIdLower == "system.requirementbacklogbehavior" ||
+                                    parentRefLower == "system.requirementbacklogbehavior" ||
+                                    bIdLower.endsWith(".requirementbacklogbehavior") -> {
+                                    if (!isBacklogHidden(bId, bDef?.name)) {
+                                        requirementTypes.add(resolvedName)
+                                    }
+                                }
+                                bIdLower == "system.portfoliobacklogbehavior" ||
+                                    parentRefLower == "system.portfoliobacklogbehavior" ||
+                                    bIdLower.contains("portfolio") ||
+                                    (rank != null && rank > 100) -> {
+                                    if (!isBacklogHidden(bId, bDef?.name)) {
+                                        val effectiveRank = rank ?: 200
+                                        val bucket = portfolioBucketsByKey.getOrPut(bIdLower) {
+                                            effectiveRank to mutableListOf()
+                                        }
+                                        bucket.second.add(resolvedName)
+                                    }
+                                }
                             }
                         }
                     }
                 }
 
-                // Also incorporate explicit project Backlog Level ranks (highest rank = biggest portfolio tier)
+                // Source B: Project Backlog Configuration (_apis/work/backlogconfiguration)
+                if (backlogConfig != null) {
+                    val configPortfolios = backlogConfig.portfolioBacklogs.orEmpty()
+                        .sortedByDescending { it.rank ?: 0 }
+                    for ((idx, pLevel) in configPortfolios.withIndex()) {
+                        if (isBacklogHidden(pLevel.id, pLevel.name)) continue
+                        val key = pLevel.id?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+                            ?: "portfolio_cfg_$idx"
+                        val effectiveRank = pLevel.rank ?: (500 - idx * 50)
+                        val bucket = portfolioBucketsByKey.getOrPut(key) {
+                            effectiveRank to mutableListOf()
+                        }
+                        for (witRef in pLevel.workItemTypes.orEmpty()) {
+                            val resolved = resolveEnabledTypeName(witRef.name) ?: continue
+                            bucket.second.add(resolved)
+                        }
+                    }
+
+                    val reqLevel = backlogConfig.requirementBacklog
+                    if (reqLevel != null && !isBacklogHidden(reqLevel.id, reqLevel.name)) {
+                        for (witRef in reqLevel.workItemTypes.orEmpty()) {
+                            val resolved = resolveEnabledTypeName(witRef.name) ?: continue
+                            requirementTypes.add(resolved)
+                        }
+                    }
+
+                    val taskLevel = backlogConfig.taskBacklog
+                    if (taskLevel != null) {
+                        if (isBacklogHidden(taskLevel.id, taskLevel.name)) {
+                            isIterationBacklogExplicitlyHidden = true
+                        } else {
+                            for (witRef in taskLevel.workItemTypes.orEmpty()) {
+                                val resolved = resolveEnabledTypeName(witRef.name) ?: continue
+                                iterationTypes.add(resolved)
+                            }
+                        }
+                    }
+                }
+
+                // Source C: Project Backlogs (_apis/work/backlogs)
                 if (backlogsResp?.isSuccessful == true) {
                     val backlogs = backlogsResp.body()?.value.orEmpty()
                         .sortedByDescending { it.rank ?: 0 }
-                    if (backlogs.isNotEmpty()) {
-                        val portfolioBacklogs = backlogs.filter { it.type.equals("portfolio", ignoreCase = true) }
-                            .sortedByDescending { it.rank ?: 0 }
-                        for ((idx, bLevel) in portfolioBacklogs.withIndex()) {
-                            val mappedCat = if (idx == 0) "Microsoft.EpicCategory" else "Microsoft.FeatureCategory"
-                            for (witRef in bLevel.workItemTypes.orEmpty()) {
-                                val witName = witRef.name?.trim().orEmpty()
-                                if (witName.isNotBlank() && !result.containsKey(witName)) {
-                                    result[witName] = mappedCat
+                    val portfolioList = backlogs.filter { it.type.equals("portfolio", ignoreCase = true) }
+                        .sortedByDescending { it.rank ?: 0 }
+                    for ((idx, bLevel) in portfolioList.withIndex()) {
+                        if (isBacklogHidden(bLevel.id, bLevel.name)) continue
+                        val key = bLevel.id?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+                            ?: "portfolio_bl_$idx"
+                        val effectiveRank = bLevel.rank ?: (500 - idx * 50)
+                        val bucket = portfolioBucketsByKey.getOrPut(key) {
+                            effectiveRank to mutableListOf()
+                        }
+                        for (witRef in bLevel.workItemTypes.orEmpty()) {
+                            val resolved = resolveEnabledTypeName(witRef.name) ?: continue
+                            bucket.second.add(resolved)
+                        }
+                    }
+                    for (bLevel in backlogs) {
+                        if (isBacklogHidden(bLevel.id, bLevel.name)) continue
+                        when (bLevel.type?.trim()?.lowercase()) {
+                            "requirement" -> {
+                                for (witRef in bLevel.workItemTypes.orEmpty()) {
+                                    val resolved = resolveEnabledTypeName(witRef.name) ?: continue
+                                    requirementTypes.add(resolved)
                                 }
                             }
-                        }
-                        for (bLevel in backlogs) {
-                            val bType = bLevel.type?.trim()?.lowercase()
-                            val mappedCat = when (bType) {
-                                "requirement" -> "Microsoft.RequirementCategory"
-                                "task" -> "Microsoft.TaskCategory"
-                                else -> null
-                            } ?: continue
-                            for (witRef in bLevel.workItemTypes.orEmpty()) {
-                                val witName = witRef.name?.trim().orEmpty()
-                                if (witName.isNotBlank() && !result.containsKey(witName)) {
-                                    result[witName] = mappedCat
+                            "task" -> {
+                                if (!isIterationBacklogExplicitlyHidden) {
+                                    for (witRef in bLevel.workItemTypes.orEmpty()) {
+                                        val resolved = resolveEnabledTypeName(witRef.name) ?: continue
+                                        iterationTypes.add(resolved)
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                result
+
+                // Source D: Work Item Type Categories (_apis/wit/workitemtypecategories) filtered by enabled types
+                val bugTypesFromCategory = mutableListOf<String>()
+                if (categoriesResp?.isSuccessful == true) {
+                    val categories = categoriesResp.body()?.value.orEmpty()
+                    for (cat in categories) {
+                        val refName = cat.referenceName?.trim().orEmpty()
+                        val refLower = refName.lowercase()
+                        val enabledInCat = cat.workItemTypes.orEmpty()
+                            .mapNotNull { resolveEnabledTypeName(it.name) }
+                        if (enabledInCat.isEmpty()) continue
+
+                        when {
+                            refLower == "microsoft.epiccategory" -> {
+                                if (portfolioBucketsByKey.none { (_, pair) ->
+                                        pair.second.any { existing ->
+                                            enabledInCat.any { it.equals(existing, ignoreCase = true) }
+                                        }
+                                    }
+                                ) {
+                                    val bucket = portfolioBucketsByKey.getOrPut("microsoft.epiccategory") {
+                                        300 to mutableListOf()
+                                    }
+                                    bucket.second.addAll(enabledInCat)
+                                }
+                            }
+                            refLower == "microsoft.featurecategory" -> {
+                                if (portfolioBucketsByKey.none { (_, pair) ->
+                                        pair.second.any { existing ->
+                                            enabledInCat.any { it.equals(existing, ignoreCase = true) }
+                                        }
+                                    }
+                                ) {
+                                    val bucket = portfolioBucketsByKey.getOrPut("microsoft.featurecategory") {
+                                        200 to mutableListOf()
+                                    }
+                                    bucket.second.addAll(enabledInCat)
+                                }
+                            }
+                            refLower == "microsoft.requirementcategory" -> {
+                                requirementTypes.addAll(enabledInCat)
+                            }
+                            refLower == "microsoft.taskcategory" -> {
+                                if (!isIterationBacklogExplicitlyHidden) {
+                                    iterationTypes.addAll(enabledInCat)
+                                }
+                            }
+                            refLower == "microsoft.bugcategory" -> {
+                                bugTypesFromCategory.addAll(enabledInCat)
+                            }
+                        }
+                    }
+                }
+
+                // Handle Bugs behavior according to Azure Boards configuration:
+                // - "asRequirements": Bug is part of Requirement Backlog
+                // - "asTasks" (or default when Iteration Backlog has active task types): Bug is part of Iteration Backlog
+                // - "off" or when Iteration Backlog is disabled: Bug is not added as a lower Iteration level
+                val bugsBehavior = backlogConfig?.bugsBehavior?.trim()?.lowercase()
+                if (bugTypesFromCategory.isNotEmpty()) {
+                    when {
+                        bugsBehavior == "asrequirements" -> {
+                            requirementTypes.addAll(bugTypesFromCategory)
+                        }
+                        bugsBehavior == "off" -> {
+                            // Managed off backlogs -> treated as unmapped
+                        }
+                        iterationTypes.isNotEmpty() || bugsBehavior == "astasks" -> {
+                            if (!isIterationBacklogExplicitlyHidden && iterationTypes.isNotEmpty()) {
+                                iterationTypes.addAll(bugTypesFromCategory)
+                            }
+                        }
+                    }
+                }
+
+                // 2. Assemble ordered active Backlog Levels from highest Portfolio down to Requirement and Iteration
+                val orderedBacklogLevels = mutableListOf<List<String>>()
+                val assignedLower = mutableSetOf<String>()
+                val categoryMap = linkedMapOf<String, String>()
+
+                val sortedPortfolioBuckets = portfolioBucketsByKey.values
+                    .sortedByDescending { it.first }
+
+                var portfolioTierIndex = 0
+                for ((_, typesInBucket) in sortedPortfolioBuckets) {
+                    val distinctLevelTypes = typesInBucket
+                        .filter { assignedLower.add(it.lowercase()) }
+                        .distinctBy { it.lowercase() }
+                    if (distinctLevelTypes.isNotEmpty()) {
+                        orderedBacklogLevels.add(distinctLevelTypes)
+                        for (t in distinctLevelTypes) {
+                            categoryMap[t] = "Portfolio:$portfolioTierIndex"
+                        }
+                        portfolioTierIndex++
+                    }
+                }
+
+                val distinctRequirementTypes = requirementTypes
+                    .filter { assignedLower.add(it.lowercase()) }
+                    .distinctBy { it.lowercase() }
+                if (distinctRequirementTypes.isNotEmpty()) {
+                    orderedBacklogLevels.add(distinctRequirementTypes)
+                    for (t in distinctRequirementTypes) {
+                        categoryMap[t] = "Microsoft.RequirementCategory"
+                    }
+                }
+
+                val distinctIterationTypes = iterationTypes
+                    .filter { assignedLower.add(it.lowercase()) }
+                    .distinctBy { it.lowercase() }
+                if (distinctIterationTypes.isNotEmpty()) {
+                    orderedBacklogLevels.add(distinctIterationTypes)
+                    for (t in distinctIterationTypes) {
+                        categoryMap[t] = "Microsoft.TaskCategory"
+                    }
+                }
+
+                // Mark any remaining enabled work item types that are not on any Backlog level as "Unmapped"
+                for (enabledType in enabledCanonicalByLower.values) {
+                    if (enabledType.lowercase() !in assignedLower) {
+                        categoryMap[enabledType] = "Unmapped"
+                    }
+                }
+
+                ProjectBacklogMetadata(
+                    categoryMap = categoryMap,
+                    orderedBacklogLevels = orderedBacklogLevels
+                )
             }
         } catch (e: Exception) {
-            emptyMap()
+            ProjectBacklogMetadata(emptyMap(), emptyList())
         }
+    }
+
+    /**
+     * Fetches work item type -> category reference name for a project.
+     */
+    suspend fun fetchProjectCategoryMap(
+        organization: String,
+        project: String,
+        pat: String
+    ): Map<String, String> {
+        return fetchProjectBacklogMetadata(organization, project, pat).categoryMap
     }
 
     private fun isSubtaskTypeName(type: String): Boolean {
@@ -1721,136 +2274,177 @@ class AzureDevOpsRepository(context: Context) {
         return n.contains("subtask") || n.contains("sub-task") || n.contains("زیرکار")
     }
 
+    private fun hasExactWordOrPersianToken(text: String, token: String): Boolean {
+        val cleanText = text.lowercase().trim()
+        val cleanToken = token.lowercase().trim()
+        if (cleanText == cleanToken) return true
+        val words = cleanText.split(Regex("[\\s\\-_/.(),]+")).filter { it.isNotEmpty() }
+        return cleanToken in words
+    }
+
     /**
-     * Returns true if [type] is explicitly a leaf (last-level) work item type in the project
-     * (e.g., Task / کار / Bug at Task level / Subtask) and therefore cannot have child work items.
+     * Classifies a work item type into a fallback backlog tier score when server Backlog metadata
+     * has not been loaded yet:
+     * - 0..20 : Portfolio Backlog tiers (Initiative / Epic / Feature)
+     * - 30    : Requirement Backlog tier (User Story / PBI / Requirement / داستان کاربر / پروژه)
+     * - 40    : Iteration Backlog tier (Task / کار / وظیفه / اقدام)
+     * - null  : Unmapped / custom type not recognizable by standard name alone
      */
-    fun isLeafWorkItemType(
-        type: String,
-        categoryMap: Map<String, String> = emptyMap(),
-        activeTypes: List<String> = emptyList()
-    ): Boolean {
-        val cleanType = type.trim()
-        if (cleanType.isBlank()) return true
-        if (isSubtaskTypeName(cleanType)) return true
-
-        val hasSubtaskTierInProject = activeTypes.any { isSubtaskTypeName(it) }
-        if (hasSubtaskTierInProject) return false
-
-        val catRef = categoryMap.entries.firstOrNull { it.key.equals(cleanType, ignoreCase = true) }?.value
-        if (catRef.equals("Microsoft.TaskCategory", ignoreCase = true)) {
-            return true
+    private fun fallbackBacklogTierScoreByName(type: String): Int? {
+        val n = type.lowercase().trim()
+        return when {
+            n.contains("initiative") || n.contains("theme") -> 0
+            n.contains("epic") || hasExactWordOrPersianToken(n, "هدف") || hasExactWordOrPersianToken(n, "اهداف") ||
+                n.contains("حماسه") || hasExactWordOrPersianToken(n, "goal") ||
+                hasExactWordOrPersianToken(n, "objective") || hasExactWordOrPersianToken(n, "کلان") -> 10
+            n.contains("feature") || n.contains("ویژگی") || n.contains("قابلیت") ||
+                n.contains("امکانات") || n.contains("deliverable") -> 20
+            n.contains("user story") || n.contains("story") || n.contains("product backlog item") ||
+                n.contains("backlog item") || n.contains("requirement") || n.contains("داستان کاربر") ||
+                n.contains("داستان") || n.contains("نیازمندی") || hasExactWordOrPersianToken(n, "پروژه") ||
+                n.contains("خواسته") -> 30
+            isSubtaskTypeName(n) -> 50
+            hasExactWordOrPersianToken(n, "task") || hasExactWordOrPersianToken(n, "tasks") ||
+                hasExactWordOrPersianToken(n, "کار") || hasExactWordOrPersianToken(n, "کارها") ||
+                hasExactWordOrPersianToken(n, "وظیفه") || hasExactWordOrPersianToken(n, "اقدام") -> 40
+            else -> null
         }
-
-        val n = cleanType.lowercase()
-        val isTaskByName = n.contains("task") || n.contains("کار") || n.contains("وظیفه") || n.contains("اقدام")
-        if (isTaskByName) return true
-
-        val isBugByNameOrCat = catRef.equals("Microsoft.BugCategory", ignoreCase = true) ||
-            n.contains("bug") || n.contains("باگ") || n.contains("خطا") || n.contains("ایراد")
-        if (isBugByNameOrCat && !catRef.equals("Microsoft.RequirementCategory", ignoreCase = true)) {
-            return true
-        }
-
-        return false
     }
 
     private fun typeDisplayTieBreakerWithinLevel(type: String): Int {
+        val tier = fallbackBacklogTierScoreByName(type)
         val n = type.lowercase().trim()
         return when {
-            n.contains("user story") || n.contains("story") || n.contains("product backlog item") ||
-                n.contains("backlog item") || n.contains("requirement") || n.contains("داستان") ||
-                n.contains("نیازمندی") || n.contains("پروژه") || n.contains("خواسته") -> 0
-            n.contains("issue") || n.contains("مسئله") || n.contains("impediment") || n.contains("مانع") -> 1
-            n.contains("task") || n.contains("کار") || n.contains("وظیفه") || n.contains("اقدام") -> 0
+            tier == 30 -> 0
+            tier == 40 -> 0
             n.contains("bug") || n.contains("باگ") || n.contains("خطا") || n.contains("ایراد") -> 1
+            n.contains("issue") || n.contains("مسئله") || n.contains("impediment") || n.contains("مانع") -> 1
             else -> 2
         }
     }
 
-    private fun baseHierarchyScore(
-        type: String,
-        categoryRef: String?,
-        projectWorkItems: List<WorkItem> = emptyList()
-    ): Int {
-        val n = type.lowercase().trim()
-        // All types belonging to the same hierarchy tier share the exact same tier score
-        // so that same-level types (e.g., Task & Bug, or User Story & Issue) are grouped
-        // into the same hierarchy level rather than creating false parent -> child levels.
-        val nameScore = when {
-            n.contains("initiative") || n.contains("theme") -> 0
-            n.contains("epic") || n.contains("هدف") || n.contains("اهداف") || n.contains("حماسه") ||
-                n.contains("goal") || n.contains("objective") || n.contains("کلان") -> 10
-            n.contains("feature") || n.contains("ویژگی") || n.contains("قابلیت") ||
-                n.contains("امکانات") || n.contains("deliverable") -> 20
-            n.contains("user story") || n.contains("story") || n.contains("product backlog item") ||
-                n.contains("backlog item") || n.contains("requirement") || n.contains("داستان") ||
-                n.contains("نیازمندی") || n.contains("پروژه") || n.contains("خواسته") ||
-                n.contains("issue") || n.contains("مسئله") || n.contains("impediment") || n.contains("مانع") -> 30
-            isSubtaskTypeName(n) -> 50
-            n.contains("task") || n.contains("کار") || n.contains("وظیفه") || n.contains("اقدام") ||
-                n.contains("bug") || n.contains("باگ") || n.contains("خطا") || n.contains("ایراد") -> 40
-            else -> null
-        }
-        val catScore = when {
-            categoryRef.equals("Microsoft.EpicCategory", ignoreCase = true) -> 10
-            categoryRef.equals("Microsoft.FeatureCategory", ignoreCase = true) -> 20
-            categoryRef.equals("Microsoft.RequirementCategory", ignoreCase = true) -> 30
-            categoryRef.equals("Microsoft.TaskCategory", ignoreCase = true) -> 40
-            categoryRef.equals("Microsoft.BugCategory", ignoreCase = true) -> 40
-            else -> null
-        }
-        if (catScore != null && nameScore != null) {
-            return if (nameScore == 0 || nameScore == 50) nameScore else catScore
-        }
-        if (catScore != null) return catScore
-        if (nameScore != null) return nameScore
-
-        // For custom types not matched by category or name, inspect whether items of this type act as parents or leaves
-        val itemsOfType = projectWorkItems.filter { it.workItemType.equals(type, ignoreCase = true) }
-        if (itemsOfType.isNotEmpty()) {
-            val hasChildren = itemsOfType.any { it.childIds.isNotEmpty() }
-            val hasParents = itemsOfType.any { it.parentId != null }
-            return when {
-                hasChildren && !hasParents -> 10
-                hasChildren && hasParents -> 25
-                !hasChildren && hasParents -> 40
-                else -> 25
-            }
-        }
-        return 25
-    }
-
     /**
-     * Resolves the ordered hierarchy levels of active work item types for a project,
-     * from biggest / top level (index 0) down to smallest / leaf level (lastIndex).
+     * Resolves the ordered active Backlog Levels (from highest Portfolio Backlog down to
+     * Requirement Backlog and Iteration Backlog) for a project.
+     *
+     * Rules:
+     * 1. Only enabled/active work item types in [activeTypes] are included in each level.
+     * 2. If the Iteration Backlog is disabled (or has zero active types), the Requirement Backlog
+     *    is automatically the last level (`lastIndex`) in the returned list.
+     * 3. Unmapped work item types (types not assigned to any Portfolio, Requirement, or Iteration
+     *    backlog level) are excluded from the returned backlog levels so they are treated as
+     *    last-level (leaf) items that cannot have children.
      */
-    fun resolveOrderedHierarchyLevels(
+    fun resolveOrderedBacklogLevels(
         activeTypes: List<String>,
         categoryMap: Map<String, String> = emptyMap(),
+        explicitBacklogLevels: List<List<String>> = emptyList(),
         projectWorkItems: List<WorkItem> = emptyList()
     ): List<List<String>> {
-        val cleanedTypes = activeTypes.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
-        if (cleanedTypes.isEmpty()) return emptyList()
+        val cleanedActive = activeTypes.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
+        val activeByLower = cleanedActive.associateBy { it.lowercase() }
 
-        val tierScores = mutableMapOf<String, Int>()
-        val isKnownTier = mutableMapOf<String, Boolean>()
-        for (type in cleanedTypes) {
-            val catRef = categoryMap.entries.firstOrNull { it.key.equals(type, ignoreCase = true) }?.value
-            tierScores[type] = baseHierarchyScore(type, catRef, projectWorkItems)
-            isKnownTier[type] = catRef != null || baseHierarchyScore(type, null) != 25
+        // 1. Authoritative explicit Backlog Levels from Azure Boards Process Behaviors & Backlog Configuration
+        if (explicitBacklogLevels.isNotEmpty()) {
+            val filteredLevels = explicitBacklogLevels.mapNotNull { level ->
+                val activeInLevel = level.mapNotNull { rawName ->
+                    val clean = rawName.trim()
+                    if (clean.isEmpty()) null
+                    else if (activeByLower.isNotEmpty()) activeByLower[clean.lowercase()]
+                    else clean
+                }.distinctBy { it.lowercase() }
+                activeInLevel.takeIf { it.isNotEmpty() }
+            }
+            if (filteredLevels.isNotEmpty()) {
+                return filteredLevels
+            }
         }
 
-        // Refine tiers for unknown custom types using observed parent -> child relationships in projectWorkItems,
-        // without splitting or demoting known standard tiers.
+        // 2. Category Map resolution (Portfolio:0..N / Epic / Feature -> Requirement -> Task/Iteration)
+        if (categoryMap.isNotEmpty()) {
+            val candidateTypes = if (cleanedActive.isNotEmpty()) {
+                cleanedActive
+            } else {
+                categoryMap.keys.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
+            }
+
+            val portfolioTiers = sortedMapOf<Int, MutableList<String>>()
+            val requirementTier = mutableListOf<String>()
+            val taskTier = mutableListOf<String>()
+            val bugTierCandidates = mutableListOf<String>()
+
+            for (type in candidateTypes) {
+                val catRef = categoryMap.entries
+                    .firstOrNull { it.key.equals(type, ignoreCase = true) }
+                    ?.value
+                    ?.trim()
+                    ?: continue
+                val catLower = catRef.lowercase()
+                when {
+                    catLower.startsWith("portfolio:") -> {
+                        val idx = catLower.substringAfter("portfolio:").toIntOrNull() ?: 0
+                        portfolioTiers.getOrPut(idx) { mutableListOf() }.add(type)
+                    }
+                    catLower == "microsoft.epiccategory" -> {
+                        portfolioTiers.getOrPut(0) { mutableListOf() }.add(type)
+                    }
+                    catLower == "microsoft.featurecategory" -> {
+                        portfolioTiers.getOrPut(1) { mutableListOf() }.add(type)
+                    }
+                    catLower == "microsoft.requirementcategory" -> {
+                        requirementTier.add(type)
+                    }
+                    catLower == "microsoft.taskcategory" -> {
+                        taskTier.add(type)
+                    }
+                    catLower == "microsoft.bugcategory" -> {
+                        bugTierCandidates.add(type)
+                    }
+                    // "unmapped" or non-backlog categories are intentionally omitted
+                }
+            }
+
+            // Include Bug in Iteration tier only when Iteration Backlog is active (has Task types)
+            if (taskTier.isNotEmpty() && bugTierCandidates.isNotEmpty()) {
+                taskTier.addAll(bugTierCandidates)
+            }
+
+            val levels = mutableListOf<List<String>>()
+            for ((_, pList) in portfolioTiers) {
+                val distinct = pList.distinctBy { it.lowercase() }
+                if (distinct.isNotEmpty()) levels.add(distinct)
+            }
+            if (requirementTier.isNotEmpty()) {
+                levels.add(requirementTier.distinctBy { it.lowercase() })
+            }
+            if (taskTier.isNotEmpty()) {
+                levels.add(taskTier.distinctBy { it.lowercase() })
+            }
+            if (levels.isNotEmpty()) {
+                return levels
+            }
+        }
+
+        // 3. Fallback resolution before server metadata arrives:
+        //    Combine observed parent -> child links in projectWorkItems with exact-token backlog name tiers.
+        if (cleanedActive.isEmpty()) return emptyList()
+
+        val tierScores = mutableMapOf<String, Int>()
+        for (type in cleanedActive) {
+            val scoreByName = fallbackBacklogTierScoreByName(type)
+            if (scoreByName != null) {
+                tierScores[type] = scoreByName
+            }
+        }
+
         if (projectWorkItems.isNotEmpty()) {
             val byId = projectWorkItems.associateBy { it.id }
             val edgeCounts = mutableMapOf<Pair<String, String>, Int>()
             for (item in projectWorkItems) {
                 val pId = item.parentId ?: continue
                 val parent = byId[pId] ?: continue
-                val pType = cleanedTypes.firstOrNull { it.equals(parent.workItemType, ignoreCase = true) } ?: continue
-                val cType = cleanedTypes.firstOrNull { it.equals(item.workItemType, ignoreCase = true) } ?: continue
+                val pType = cleanedActive.firstOrNull { it.equals(parent.workItemType, ignoreCase = true) } ?: continue
+                val cType = cleanedActive.firstOrNull { it.equals(item.workItemType, ignoreCase = true) } ?: continue
                 if (!pType.equals(cType, ignoreCase = true)) {
                     val key = pType to cType
                     edgeCounts[key] = (edgeCounts[key] ?: 0) + 1
@@ -1861,29 +2455,37 @@ class AzureDevOpsRepository(context: Context) {
                 val backward = edgeCounts[c to p] ?: 0
                 forward >= backward
             }
-            repeat(cleanedTypes.size) {
+            for ((pType, cType) in directedEdges) {
+                if (!tierScores.containsKey(pType) && !tierScores.containsKey(cType)) {
+                    tierScores[pType] = 20
+                    tierScores[cType] = 30
+                } else if (tierScores.containsKey(pType) && !tierScores.containsKey(cType)) {
+                    tierScores[cType] = (tierScores[pType] ?: 20) + 10
+                } else if (!tierScores.containsKey(pType) && tierScores.containsKey(cType)) {
+                    tierScores[pType] = (tierScores[cType] ?: 30) - 10
+                }
+            }
+            repeat(cleanedActive.size) {
                 for ((pType, cType) in directedEdges) {
-                    val pScore = tierScores[pType] ?: 25
-                    val cScore = tierScores[cType] ?: 25
-                    if (pScore >= cScore && (isKnownTier[pType] != true || isKnownTier[cType] != true)) {
-                        if (isKnownTier[cType] == true && isKnownTier[pType] != true) {
-                            tierScores[pType] = cScore - 5
-                        } else if (isKnownTier[pType] == true && isKnownTier[cType] != true) {
-                            tierScores[cType] = pScore + 5
-                        } else {
-                            tierScores[cType] = pScore + 5
-                        }
+                    val pScore = tierScores[pType] ?: continue
+                    val cScore = tierScores[cType] ?: continue
+                    if (pScore >= cScore) {
+                        tierScores[cType] = pScore + 10
                     }
                 }
             }
         }
 
-        return cleanedTypes
-            .groupBy { tierScores[it] ?: 25 }
+        // Only include types that belong to a recognized backlog tier or observed hierarchy chain
+        val mappedTypes = cleanedActive.filter { tierScores.containsKey(it) }
+        if (mappedTypes.isEmpty()) return emptyList()
+
+        return mappedTypes
+            .groupBy { tierScores[it] ?: 30 }
             .toSortedMap()
             .values
             .map { levelList ->
-                levelList.distinct().sortedWith(
+                levelList.distinctBy { it.lowercase() }.sortedWith(
                     compareBy<String> { typeDisplayTieBreakerWithinLevel(it) }
                         .thenBy { it.lowercase() }
                 )
@@ -1891,18 +2493,85 @@ class AzureDevOpsRepository(context: Context) {
     }
 
     /**
-     * Orders work item types from biggest (highest in hierarchy, e.g. Epic / هدف)
-     * to smallest (lowest in hierarchy, e.g. Task / کار / Bug).
+     * Returns true if [type] is at the last active Backlog Level (e.g., Iteration Backlog by default,
+     * or Requirement Backlog when Iteration Backlog is disabled) OR is an unmapped work item type
+     * not assigned to any Backlog Level, and therefore cannot have children.
+     */
+    fun isLeafWorkItemType(
+        type: String,
+        categoryMap: Map<String, String> = emptyMap(),
+        activeTypes: List<String> = emptyList(),
+        explicitBacklogLevels: List<List<String>> = emptyList(),
+        projectWorkItems: List<WorkItem> = emptyList()
+    ): Boolean {
+        val cleanType = type.trim()
+        if (cleanType.isBlank()) return true
+        if (isSubtaskTypeName(cleanType)) return true
+
+        val backlogLevels = resolveOrderedBacklogLevels(
+            activeTypes = activeTypes,
+            categoryMap = categoryMap,
+            explicitBacklogLevels = explicitBacklogLevels,
+            projectWorkItems = projectWorkItems
+        )
+        if (backlogLevels.size <= 1) return true
+
+        val levelIdx = backlogLevels.indexOfFirst { level ->
+            level.any { it.equals(cleanType, ignoreCase = true) }
+        }
+        // Unmapped types (levelIdx < 0) and last-level backlog types (levelIdx >= backlogLevels.lastIndex) are leaf items
+        return levelIdx < 0 || levelIdx >= backlogLevels.lastIndex
+    }
+
+    /**
+     * Resolves all active work item types grouped by hierarchy level for display ordering,
+     * placing ordered Backlog Levels first (Portfolio -> Requirement -> Iteration) followed
+     * by any unmapped active work item types at the end.
+     */
+    fun resolveOrderedHierarchyLevels(
+        activeTypes: List<String>,
+        categoryMap: Map<String, String> = emptyMap(),
+        projectWorkItems: List<WorkItem> = emptyList(),
+        explicitBacklogLevels: List<List<String>> = emptyList()
+    ): List<List<String>> {
+        val cleanedTypes = activeTypes.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
+        if (cleanedTypes.isEmpty()) return emptyList()
+
+        val backlogLevels = resolveOrderedBacklogLevels(
+            activeTypes = cleanedTypes,
+            categoryMap = categoryMap,
+            explicitBacklogLevels = explicitBacklogLevels,
+            projectWorkItems = projectWorkItems
+        )
+        val inBacklogLower = backlogLevels.flatten().map { it.lowercase() }.toSet()
+        val unmappedTypes = cleanedTypes.filter { it.lowercase() !in inBacklogLower }
+            .sortedWith(
+                compareBy<String> { typeDisplayTieBreakerWithinLevel(it) }
+                    .thenBy { it.lowercase() }
+            )
+
+        return if (unmappedTypes.isNotEmpty()) {
+            backlogLevels + listOf(unmappedTypes)
+        } else {
+            backlogLevels
+        }
+    }
+
+    /**
+     * Orders work item types from biggest (highest Portfolio Backlog, e.g. Epic / هدف)
+     * to smallest (Iteration Backlog, e.g. Task / کار, followed by any unmapped types).
      */
     fun orderWorkItemTypesBiggestToSmallest(
         activeTypes: List<String>,
         categoryMap: Map<String, String> = emptyMap(),
-        projectWorkItems: List<WorkItem> = emptyList()
+        projectWorkItems: List<WorkItem> = emptyList(),
+        explicitBacklogLevels: List<List<String>> = emptyList()
     ): List<String> {
         return resolveOrderedHierarchyLevels(
             activeTypes = activeTypes,
             categoryMap = categoryMap,
-            projectWorkItems = projectWorkItems
+            projectWorkItems = projectWorkItems,
+            explicitBacklogLevels = explicitBacklogLevels
         ).flatten()
     }
 
@@ -2028,6 +2697,7 @@ class AzureDevOpsRepository(context: Context) {
                     val name: String,
                     val referenceName: String?,
                     val color: String?,
+                    val icon: String?,
                     val expandedProcessStates: List<com.example.data.model.ProcessStateDefinition>,
                     val inlineWitStates: List<com.example.data.model.WorkItemStateDefinition>
                 )
@@ -2047,6 +2717,7 @@ class AzureDevOpsRepository(context: Context) {
                         name = name,
                         referenceName = pWit.referenceName?.trim()?.takeIf { it.isNotBlank() },
                         color = pWit.color,
+                        icon = pWit.icon,
                         expandedProcessStates = pWit.states.orEmpty(),
                         inlineWitStates = emptyList()
                     )
@@ -2067,6 +2738,7 @@ class AzureDevOpsRepository(context: Context) {
                         candidateByLowerName[key] = existing.copy(
                             referenceName = existing.referenceName ?: wWit.referenceName?.trim()?.takeIf { it.isNotBlank() },
                             color = existing.color ?: wWit.color,
+                            icon = existing.icon ?: wWit.icon?.id,
                             inlineWitStates = wWit.states.orEmpty()
                         )
                     } else if (processWorkItemTypes.isEmpty()) {
@@ -2075,6 +2747,7 @@ class AzureDevOpsRepository(context: Context) {
                             name = name,
                             referenceName = wWit.referenceName?.trim()?.takeIf { it.isNotBlank() },
                             color = wWit.color,
+                            icon = wWit.icon?.id,
                             expandedProcessStates = emptyList(),
                             inlineWitStates = wWit.states.orEmpty()
                         )
@@ -2090,6 +2763,7 @@ class AzureDevOpsRepository(context: Context) {
                 val perTypeResults = candidateByLowerName.values.map { candidate ->
                     async {
                         registerAzureTypeColor(candidate.name, candidate.color)
+                        registerAzureTypeIcon(candidate.name, candidate.icon)
 
                         val processStatesFromEndpoint = if (!resolvedProcessId.isNullOrBlank() && !candidate.referenceName.isNullOrBlank()) {
                             runCatching {
@@ -2219,8 +2893,270 @@ class AzureDevOpsRepository(context: Context) {
         }
     }
 
+    fun formatCommentTimestamp(isoDate: String?): String {
+        val clean = isoDate?.trim().orEmpty()
+        if (clean.length < 10) return ""
+        val datePart = clean.take(10)
+        val timePart = clean.substringAfter('T', "").take(5)
+        return if (timePart.length == 5) "$datePart · $timePart" else datePart
+    }
+
+    private fun mapRawCommentToDomain(
+        raw: com.example.data.model.RawWorkItemComment,
+        fallbackWorkItemId: Int
+    ): com.example.data.model.WorkItemComment? {
+        if (raw.isDeleted == true) return null
+        val cleanedText = cleanHtml(raw.text)?.trim().orEmpty()
+        if (cleanedText.isBlank()) return null
+        val rawDate = raw.createdDate?.trim().orEmpty()
+        val authorName = raw.createdBy?.displayName?.trim()?.takeIf { it.isNotBlank() }
+            ?: raw.createdBy?.uniqueName?.trim()?.takeIf { it.isNotBlank() }
+            ?: "User"
+        return com.example.data.model.WorkItemComment(
+            id = raw.id ?: rawDate.hashCode(),
+            workItemId = raw.workItemId ?: fallbackWorkItemId,
+            text = cleanedText,
+            authorName = authorName,
+            authorEmail = raw.createdBy?.uniqueName?.trim()?.takeIf { it.isNotBlank() },
+            authorAvatar = raw.createdBy?.imageUrl?.trim()?.takeIf { it.isNotBlank() },
+            createdDate = rawDate,
+            formattedDate = formatCommentTimestamp(rawDate)
+        )
+    }
+
+    /**
+     * Fetches discussion comments for [workItemId] ordered newest-first.
+     */
+    suspend fun fetchWorkItemComments(
+        organization: String,
+        pat: String,
+        project: String,
+        workItemId: Int
+    ): Result<List<com.example.data.model.WorkItemComment>> = withContext(Dispatchers.IO) {
+        val normalizedOrg = extractOrganization(organization)
+        if (normalizedOrg.isBlank() || pat.isBlank() || project.isBlank() || workItemId <= 0) {
+            return@withContext Result.success(emptyList())
+        }
+        try {
+            val service = AzureDevOpsClient.createService(pat)
+            val response = service.getWorkItemComments(
+                organization = normalizedOrg,
+                project = project.trim(),
+                workItemId = workItemId,
+                top = 100,
+                order = "desc"
+            )
+            if (!response.isSuccessful) {
+                return@withContext Result.failure(
+                    Exception("Failed to load comments (${response.code()}): ${response.message()}")
+                )
+            }
+            val comments = response.body()?.comments.orEmpty()
+                .mapNotNull { mapRawCommentToDomain(it, workItemId) }
+                .sortedWith(
+                    compareByDescending<com.example.data.model.WorkItemComment> { it.createdDate }
+                        .thenByDescending { it.id }
+                )
+            Result.success(comments)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Posts a new comment on [workItemId] in Azure Boards (with fallback to System.History patch).
+     */
+    suspend fun addWorkItemCommentOnServer(
+        organization: String,
+        pat: String,
+        project: String,
+        workItemId: Int,
+        commentText: String
+    ): Result<com.example.data.model.WorkItemComment> = withContext(Dispatchers.IO) {
+        val normalizedOrg = extractOrganization(organization)
+        val trimmedText = commentText.trim()
+        if (normalizedOrg.isBlank() || pat.isBlank() || workItemId <= 0 || trimmedText.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Comment text cannot be empty."))
+        }
+        try {
+            val service = AzureDevOpsClient.createService(pat)
+            val htmlBody = trimmedText
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\n", "<br/>")
+
+            if (project.isNotBlank()) {
+                val commentResp = runCatching {
+                    service.addWorkItemComment(
+                        organization = normalizedOrg,
+                        project = project.trim(),
+                        workItemId = workItemId,
+                        request = com.example.data.model.AddWorkItemCommentRequest(text = htmlBody)
+                    )
+                }.getOrNull()
+
+                if (commentResp?.isSuccessful == true && commentResp.body() != null) {
+                    val mapped = mapRawCommentToDomain(commentResp.body()!!, workItemId)
+                    if (mapped != null) {
+                        return@withContext Result.success(mapped)
+                    }
+                }
+            }
+
+            // Fallback: PATCH /fields/System.History on the work item
+            val patchOps = listOf(
+                JsonPatchOperation(
+                    op = "add",
+                    path = "/fields/System.History",
+                    value = htmlBody
+                )
+            )
+            val patchResp = service.updateWorkItem(
+                organization = normalizedOrg,
+                id = workItemId,
+                patchBody = AzureDevOpsClient.createPatchRequestBody(patchOps)
+            )
+            if (!patchResp.isSuccessful) {
+                return@withContext Result.failure(
+                    Exception("Failed to post comment (${patchResp.code()}): ${patchResp.message()}")
+                )
+            }
+
+            val nowIso = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US).apply {
+                timeZone = java.util.TimeZone.getTimeZone("UTC")
+            }.format(java.util.Date())
+
+            Result.success(
+                com.example.data.model.WorkItemComment(
+                    id = (System.currentTimeMillis() and 0x7FFFFFFF).toInt(),
+                    workItemId = workItemId,
+                    text = trimmedText,
+                    authorName = "You",
+                    createdDate = nowIso,
+                    formattedDate = formatCommentTimestamp(nowIso)
+                )
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Fetches the authoritative Area and Iteration classification trees for [project] from
+     * Azure DevOps (`_apis/wit/classificationnodes?$depth=10`) and returns `(areaPaths, iterationPaths)`
+     * as canonical backslash-separated paths (e.g. `Project`, `Project\Team A`, `Project\Team A\Backend`).
+     */
+    suspend fun fetchProjectClassificationPaths(
+        organization: String,
+        project: String,
+        pat: String
+    ): Pair<List<String>, List<String>> = withContext(Dispatchers.IO) {
+        val normalizedOrg = extractOrganization(organization)
+        val cleanProject = project.trim()
+        if (normalizedOrg.isBlank() || cleanProject.isBlank() || pat.isBlank()) {
+            return@withContext emptyList<String>() to emptyList()
+        }
+
+        val areaPaths = linkedSetOf<String>()
+        val iterationPaths = linkedSetOf<String>()
+
+        fun collectFromTree(
+            node: com.example.data.model.RawClassificationNode?,
+            parentPath: String?,
+            isRootStructureNode: Boolean,
+            targetSet: MutableSet<String>
+        ) {
+            if (node == null) return
+            val nodeName = node.name?.trim().orEmpty()
+            val currentPath = when {
+                parentPath == null || isRootStructureNode -> cleanProject
+                nodeName.isNotBlank() -> "$parentPath\\$nodeName"
+                else -> parentPath
+            }
+            if (currentPath.isNotBlank()) {
+                targetSet.add(currentPath)
+            }
+            node.children.orEmpty().forEach { child ->
+                collectFromTree(
+                    node = child,
+                    parentPath = currentPath,
+                    isRootStructureNode = false,
+                    targetSet = targetSet
+                )
+            }
+        }
+
+        try {
+            val service = AzureDevOpsClient.createService(pat)
+            coroutineScope {
+                val combinedDeferred = async {
+                    runCatching {
+                        service.getProjectClassificationNodes(
+                            organization = normalizedOrg,
+                            project = cleanProject,
+                            depth = 10
+                        )
+                    }.getOrNull()
+                }
+                val combinedResp = combinedDeferred.await()
+                val rootNodes = combinedResp?.body()?.value.orEmpty()
+
+                if (rootNodes.isNotEmpty()) {
+                    for (root in rootNodes) {
+                        val structureType = root.structureType?.trim()?.lowercase().orEmpty()
+                        when {
+                            structureType.contains("area") ->
+                                collectFromTree(root, null, isRootStructureNode = true, targetSet = areaPaths)
+                            structureType.contains("iteration") ->
+                                collectFromTree(root, null, isRootStructureNode = true, targetSet = iterationPaths)
+                        }
+                    }
+                }
+
+                if (areaPaths.isEmpty() || iterationPaths.isEmpty()) {
+                    val areasDef = async {
+                        if (areaPaths.isEmpty()) {
+                            runCatching {
+                                service.getProjectClassificationTreeByGroup(
+                                    organization = normalizedOrg,
+                                    project = cleanProject,
+                                    structureGroup = "areas",
+                                    depth = 10
+                                )
+                            }.getOrNull()?.body()
+                        } else null
+                    }
+                    val iterationsDef = async {
+                        if (iterationPaths.isEmpty()) {
+                            runCatching {
+                                service.getProjectClassificationTreeByGroup(
+                                    organization = normalizedOrg,
+                                    project = cleanProject,
+                                    structureGroup = "iterations",
+                                    depth = 10
+                                )
+                            }.getOrNull()?.body()
+                        } else null
+                    }
+                    areasDef.await()?.let { areaRoot ->
+                        collectFromTree(areaRoot, null, isRootStructureNode = true, targetSet = areaPaths)
+                    }
+                    iterationsDef.await()?.let { iterationRoot ->
+                        collectFromTree(iterationRoot, null, isRootStructureNode = true, targetSet = iterationPaths)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            // Ignore network errors; fallback paths from work items will still populate the hierarchy
+        }
+
+        areaPaths.toList() to iterationPaths.toList()
+    }
+
     private fun cleanHtml(html: String?): String? {
         if (html.isNullOrBlank()) return null
         return HtmlCompat.fromHtml(html, HtmlCompat.FROM_HTML_MODE_COMPACT).toString().trim()
     }
 }
+

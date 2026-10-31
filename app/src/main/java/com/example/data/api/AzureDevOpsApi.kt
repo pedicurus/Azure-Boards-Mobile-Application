@@ -105,6 +105,13 @@ interface AzureDevOpsService {
         @Query("api-version") apiVersion: String = "7.0"
     ): Response<com.example.data.model.BacklogsResponse>
 
+    @GET("{organization}/{project}/_apis/work/backlogconfiguration")
+    suspend fun getProjectBacklogConfiguration(
+        @Path("organization") organization: String,
+        @Path("project") project: String,
+        @Query("api-version") apiVersion: String = "7.0"
+    ): Response<com.example.data.model.BacklogConfigurationResponse>
+
     @GET("{organization}/_apis/work/processes")
     suspend fun getProcesses(
         @Path("organization") organization: String,
@@ -116,9 +123,16 @@ interface AzureDevOpsService {
     suspend fun getProcessWorkItemTypes(
         @Path("organization") organization: String,
         @Path("processId") processId: String,
-        @Query("\$expand") expand: String = "states",
+        @Query("\$expand") expand: String = "states,behaviors",
         @Query("api-version") apiVersion: String = "7.0"
     ): Response<com.example.data.model.ProcessWorkItemTypesResponse>
+
+    @GET("{organization}/_apis/work/processes/{processId}/behaviors")
+    suspend fun getProcessBehaviors(
+        @Path("organization") organization: String,
+        @Path("processId") processId: String,
+        @Query("api-version") apiVersion: String = "7.0"
+    ): Response<com.example.data.model.ProcessBehaviorsResponse>
 
     @GET("{organization}/_apis/work/processes/{processId}/workItemTypes/{witRefName}/states")
     suspend fun getProcessWorkItemTypeStates(
@@ -127,6 +141,42 @@ interface AzureDevOpsService {
         @Path("witRefName") witRefName: String,
         @Query("api-version") apiVersion: String = "7.0"
     ): Response<com.example.data.model.ProcessStatesResponse>
+
+    @GET("{organization}/{project}/_apis/wit/workItems/{workItemId}/comments")
+    suspend fun getWorkItemComments(
+        @Path("organization") organization: String,
+        @Path("project") project: String,
+        @Path("workItemId") workItemId: Int,
+        @Query("\$top") top: Int = 50,
+        @Query("order") order: String = "desc",
+        @Query("api-version") apiVersion: String = "7.0-preview.3"
+    ): Response<com.example.data.model.WorkItemCommentsResponse>
+
+    @POST("{organization}/{project}/_apis/wit/workItems/{workItemId}/comments")
+    suspend fun addWorkItemComment(
+        @Path("organization") organization: String,
+        @Path("project") project: String,
+        @Path("workItemId") workItemId: Int,
+        @Query("api-version") apiVersion: String = "7.0-preview.3",
+        @Body request: com.example.data.model.AddWorkItemCommentRequest
+    ): Response<com.example.data.model.RawWorkItemComment>
+
+    @GET("{organization}/{project}/_apis/wit/classificationnodes")
+    suspend fun getProjectClassificationNodes(
+        @Path("organization") organization: String,
+        @Path("project") project: String,
+        @Query("\$depth") depth: Int = 10,
+        @Query("api-version") apiVersion: String = "7.0"
+    ): Response<com.example.data.model.ClassificationNodesResponse>
+
+    @GET("{organization}/{project}/_apis/wit/classificationnodes/{structureGroup}")
+    suspend fun getProjectClassificationTreeByGroup(
+        @Path("organization") organization: String,
+        @Path("project") project: String,
+        @Path("structureGroup") structureGroup: String,
+        @Query("\$depth") depth: Int = 10,
+        @Query("api-version") apiVersion: String = "7.0"
+    ): Response<com.example.data.model.RawClassificationNode>
 }
 
 object AzureDevOpsClient {

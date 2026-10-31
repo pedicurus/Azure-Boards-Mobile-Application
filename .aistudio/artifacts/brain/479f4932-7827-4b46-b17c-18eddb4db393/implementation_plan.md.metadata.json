@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for 3-character type-to-search autocomplete for Assignee and Tags across the Home page, Work Item Detail sheet, and Create New Item sheet.",
-  "updatedAt":  "2026-10-30T09:24:17.840193560Z",
+  "summary":  "Implementation plan for adding hierarchical Areas and Iterations to the Home filter bar (with a Hide/Unhide Filters toggle next to the Project title), the Work Item Detail page, and the Create New Work Item page before the Description section.",
+  "updatedAt":  "2026-10-31T17:45:14.695196477Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.model.CachedOrganizationSnapshot
 import com.example.data.model.OrganizationAccount
 import com.example.data.model.WorkItem
+import com.example.data.model.WorkItemComment
 import com.example.data.repository.AzureDevOpsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -60,6 +61,12 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
     private val _assigneeFilter = MutableStateFlow<String?>(null)
     val assigneeFilter: StateFlow<String?> = _assigneeFilter.asStateFlow()
 
+    private val _areaFilter = MutableStateFlow<String?>(null)
+    val areaFilter: StateFlow<String?> = _areaFilter.asStateFlow()
+
+    private val _iterationFilter = MutableStateFlow<String?>(null)
+    val iterationFilter: StateFlow<String?> = _iterationFilter.asStateFlow()
+
     private val _organizations = MutableStateFlow<List<OrganizationAccount>>(repository.getSavedOrganizations())
     val organizations: StateFlow<List<OrganizationAccount>> = _organizations.asStateFlow()
 
@@ -110,6 +117,9 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
 
     private val _projectProcessMap = MutableStateFlow<Map<String, Map<String, List<String>>>>(emptyMap())
     private val _projectCategoryMap = MutableStateFlow<Map<String, Map<String, String>>>(emptyMap())
+    private val _projectBacklogLevelsMap = MutableStateFlow<Map<String, List<List<String>>>>(emptyMap())
+    private val _projectAreasMap = MutableStateFlow<Map<String, List<String>>>(emptyMap())
+    private val _projectIterationsMap = MutableStateFlow<Map<String, List<String>>>(emptyMap())
 
     private fun processKey(org: String, project: String): String =
         "${org.trim().lowercase()}|${project.trim().lowercase()}"
@@ -148,6 +158,124 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
             it.key.equals(pTrim, ignoreCase = true) ||
                 it.key.endsWith("|${pTrim.lowercase()}", ignoreCase = true)
         }?.value
+    }
+
+    private fun findBacklogLevels(
+        org: String?,
+        project: String?,
+        map: Map<String, List<List<String>>> = _projectBacklogLevelsMap.value
+    ): List<List<String>>? {
+        if (project.isNullOrBlank()) return null
+        val pTrim = project.trim()
+        if (!org.isNullOrBlank()) {
+            val key = processKey(org, pTrim)
+            map[key]?.let { return it }
+            map.entries.firstOrNull { it.key.equals(key, ignoreCase = true) }?.value?.let { return it }
+        }
+        return map.entries.firstOrNull {
+            it.key.equals(pTrim, ignoreCase = true) ||
+                it.key.endsWith("|${pTrim.lowercase()}", ignoreCase = true)
+        }?.value
+    }
+
+    private fun findProjectAreas(
+        org: String?,
+        project: String?,
+        map: Map<String, List<String>> = _projectAreasMap.value
+    ): List<String>? {
+        if (project.isNullOrBlank()) return null
+        val pTrim = project.trim()
+        if (!org.isNullOrBlank()) {
+            val key = processKey(org, pTrim)
+            map[key]?.let { return it }
+            map.entries.firstOrNull { it.key.equals(key, ignoreCase = true) }?.value?.let { return it }
+        }
+        return map.entries.firstOrNull {
+            it.key.equals(pTrim, ignoreCase = true) ||
+                it.key.endsWith("|${pTrim.lowercase()}", ignoreCase = true)
+        }?.value
+    }
+
+    private fun findProjectIterations(
+        org: String?,
+        project: String?,
+        map: Map<String, List<String>> = _projectIterationsMap.value
+    ): List<String>? {
+        if (project.isNullOrBlank()) return null
+        val pTrim = project.trim()
+        if (!org.isNullOrBlank()) {
+            val key = processKey(org, pTrim)
+            map[key]?.let { return it }
+            map.entries.firstOrNull { it.key.equals(key, ignoreCase = true) }?.value?.let { return it }
+        }
+        return map.entries.firstOrNull {
+            it.key.equals(pTrim, ignoreCase = true) ||
+                it.key.endsWith("|${pTrim.lowercase()}", ignoreCase = true)
+        }?.value
+    }
+
+    private fun normalizeClassificationPath(rawPath: String?): String {
+        if (rawPath.isNullOrBlank()) return ""
+        return rawPath
+            .replace('/', '\\')
+            .split('\\')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString("\\")
+    }
+
+    private fun expandAndSortHierarchyPaths(
+        rootProject: String?,
+        rawPaths: Collection<String>
+    ): List<String> {
+        val byLower = LinkedHashMap<String, String>()
+        val cleanRoot = normalizeClassificationPath(rootProject)
+        if (cleanRoot.isNotEmpty()) {
+            byLower[cleanRoot.lowercase()] = cleanRoot
+        }
+
+        for (raw in rawPaths) {
+            val normalized = normalizeClassificationPath(raw)
+            if (normalized.isEmpty()) continue
+            val segments = normalized.split('\\')
+            var prefix = ""
+            for (seg in segments) {
+                prefix = if (prefix.isEmpty()) seg else "$prefix\\$seg"
+                val key = prefix.lowercase()
+                if (!byLower.containsKey(key)) {
+                    byLower[key] = prefix
+                }
+            }
+        }
+
+        return byLower.values.sortedWith { a, b ->
+            val aIsRoot = cleanRoot.isNotEmpty() && a.equals(cleanRoot, ignoreCase = true)
+            val bIsRoot = cleanRoot.isNotEmpty() && b.equals(cleanRoot, ignoreCase = true)
+            when {
+                aIsRoot && !bIsRoot -> -1
+                !aIsRoot && bIsRoot -> 1
+                else -> a.lowercase().compareTo(b.lowercase())
+            }
+        }
+    }
+
+    /**
+     * Azure Boards UNDER operator semantics: returns true if [itemPath] equals [selectedFilterPath]
+     * or is a descendant child path under [selectedFilterPath] (e.g. `Project\Sub` matches `Project\Sub\Leaf`).
+     */
+    private fun matchesClassificationHierarchy(
+        itemPath: String?,
+        selectedFilterPath: String?
+    ): Boolean {
+        if (selectedFilterPath.isNullOrBlank() || selectedFilterPath.equals("All", ignoreCase = true)) {
+            return true
+        }
+        val normFilter = normalizeClassificationPath(selectedFilterPath)
+        if (normFilter.isEmpty()) return true
+        val normItem = normalizeClassificationPath(itemPath)
+        if (normItem.isEmpty()) return false
+        return normItem.equals(normFilter, ignoreCase = true) ||
+            normItem.startsWith("$normFilter\\", ignoreCase = true)
     }
 
     private fun getDefaultProjectForOrgInternal(organization: String?): String? {
@@ -230,6 +358,15 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
 
     private val _selectedWorkItem = MutableStateFlow<WorkItem?>(null)
     val selectedWorkItem: StateFlow<WorkItem?> = _selectedWorkItem.asStateFlow()
+
+    private val commentsByWorkItemId = ConcurrentHashMap<Int, List<WorkItemComment>>()
+    private val _selectedWorkItemComments = MutableStateFlow<List<WorkItemComment>>(emptyList())
+    val selectedWorkItemComments: StateFlow<List<WorkItemComment>> = _selectedWorkItemComments.asStateFlow()
+
+    private val _isLoadingComments = MutableStateFlow(false)
+    val isLoadingComments: StateFlow<Boolean> = _isLoadingComments.asStateFlow()
+
+    private var activeCommentsJob: Job? = null
 
     val selectedWorkItemChildren: StateFlow<List<WorkItem>> = combine(
         _selectedWorkItem,
@@ -347,17 +484,19 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     val availableTypes: StateFlow<List<String>> = combine(
-        _connectionStatus,
-        _allWorkItems,
-        _selectedProject,
-        _projectProcessMap,
-        _projectCategoryMap
-    ) { status, items, rawProject, processMap, categoryMap ->
+        combine(_connectionStatus, _allWorkItems, _selectedProject) { status, items, rawProject ->
+            Triple(status, items, rawProject)
+        },
+        combine(_projectProcessMap, _projectCategoryMap, _projectBacklogLevelsMap) { processMap, categoryMap, backlogLevelsMap ->
+            Triple(processMap, categoryMap, backlogLevelsMap)
+        }
+    ) { (status, items, rawProject), (processMap, categoryMap, backlogLevelsMap) ->
         val project = resolveEffectiveProject(rawProject, items)
         if (project.isNullOrBlank()) return@combine emptyList()
         val activeOrg = (status as? ConnectionStatus.Connected)?.organization ?: _defaultOrganization.value
         val matchedProcessMap = findProcessHierarchy(activeOrg, project, processMap)
         val matchedCategoryMap = findCategoryMap(activeOrg, project, categoryMap).orEmpty()
+        val matchedBacklogLevels = findBacklogLevels(activeOrg, project, backlogLevelsMap).orEmpty()
         val projectItems = items.filter { it.teamProject?.equals(project, ignoreCase = true) == true }
         val fromApi = matchedProcessMap?.keys
             ?.filterNot { AzureDevOpsRepository.isExcludedNonWorkItemType(it) }
@@ -373,7 +512,8 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         repository.orderWorkItemTypesBiggestToSmallest(
             activeTypes = rawTypes,
             categoryMap = matchedCategoryMap,
-            projectWorkItems = projectItems
+            projectWorkItems = projectItems,
+            explicitBacklogLevels = matchedBacklogLevels
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -445,6 +585,72 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
             .map { it.key }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val projectAreas: StateFlow<List<String>> = combine(
+        _connectionStatus,
+        _allWorkItems,
+        _selectedProject,
+        _projectAreasMap
+    ) { status, items, rawProject, areasMap ->
+        val project = resolveEffectiveProject(rawProject, items)
+        if (project.isNullOrBlank()) return@combine emptyList()
+        val activeOrg = (status as? ConnectionStatus.Connected)?.organization ?: _defaultOrganization.value
+        val fromApi = findProjectAreas(activeOrg, project, areasMap).orEmpty()
+        val fromItems = items
+            .filter { it.teamProject?.equals(project, ignoreCase = true) == true }
+            .mapNotNull { it.areaPath?.trim() }
+            .filter { it.isNotBlank() }
+        expandAndSortHierarchyPaths(project, fromApi + fromItems)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val projectIterations: StateFlow<List<String>> = combine(
+        _connectionStatus,
+        _allWorkItems,
+        _selectedProject,
+        _projectIterationsMap
+    ) { status, items, rawProject, iterationsMap ->
+        val project = resolveEffectiveProject(rawProject, items)
+        if (project.isNullOrBlank()) return@combine emptyList()
+        val activeOrg = (status as? ConnectionStatus.Connected)?.organization ?: _defaultOrganization.value
+        val fromApi = findProjectIterations(activeOrg, project, iterationsMap).orEmpty()
+        val fromItems = items
+            .filter { it.teamProject?.equals(project, ignoreCase = true) == true }
+            .mapNotNull { it.iterationPath?.trim() }
+            .filter { it.isNotBlank() }
+        expandAndSortHierarchyPaths(project, fromApi + fromItems)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun getAreasForProject(project: String?): List<String> {
+        val resolvedProj = resolveEffectiveProject(project ?: _selectedProject.value, _allWorkItems.value)
+            ?: project
+            ?: _selectedProject.value
+            ?: ""
+        if (resolvedProj.isBlank()) return emptyList()
+        val activeOrg = (_connectionStatus.value as? ConnectionStatus.Connected)?.organization
+            ?: _defaultOrganization.value
+        val fromApi = findProjectAreas(activeOrg, resolvedProj).orEmpty()
+        val fromItems = _allWorkItems.value
+            .filter { it.teamProject?.equals(resolvedProj, ignoreCase = true) == true }
+            .mapNotNull { it.areaPath?.trim() }
+            .filter { it.isNotBlank() }
+        return expandAndSortHierarchyPaths(resolvedProj, fromApi + fromItems)
+    }
+
+    fun getIterationsForProject(project: String?): List<String> {
+        val resolvedProj = resolveEffectiveProject(project ?: _selectedProject.value, _allWorkItems.value)
+            ?: project
+            ?: _selectedProject.value
+            ?: ""
+        if (resolvedProj.isBlank()) return emptyList()
+        val activeOrg = (_connectionStatus.value as? ConnectionStatus.Connected)?.organization
+            ?: _defaultOrganization.value
+        val fromApi = findProjectIterations(activeOrg, resolvedProj).orEmpty()
+        val fromItems = _allWorkItems.value
+            .filter { it.teamProject?.equals(resolvedProj, ignoreCase = true) == true }
+            .mapNotNull { it.iterationPath?.trim() }
+            .filter { it.isNotBlank() }
+        return expandAndSortHierarchyPaths(resolvedProj, fromApi + fromItems)
+    }
+
     val remainingItemsCount: StateFlow<Int> = combine(
         _allWorkItems,
         _selectedProject
@@ -505,16 +711,19 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         combine(_typeFilter, _stateFilter, _assigneeFilter) { type, state, assignee ->
             Triple(type, state, assignee)
         },
+        combine(_areaFilter, _iterationFilter) { area, iteration ->
+            area to iteration
+        },
         combine(_proposedDisplayLimit, _stateDisplayLimits) { propLimit, stateLimits ->
             propLimit to stateLimits
         }
-    ) { (items, query, rawProject), (type, state, assignee), (propLimit, stateLimits) ->
+    ) { (items, query, rawProject), (type, state, assignee), (area, iteration), (propLimit, stateLimits) ->
         val project = resolveEffectiveProject(rawProject, items)
         val cleanQuery = query.trim()
         val numericQuery = cleanQuery.removePrefix("#").trim()
 
         // 1. Active Search Mode:
-        //    Search across ALL Work Item Types, States, and Assignees in the current project
+        //    Search across ALL Work Item Types, States, Assignees, Areas, and Iterations in the current project
         //    (with automatic organization-wide fallback if an exact ID or item is in another project),
         //    ranked by relevance so any item that exists in Azure is immediately shown.
         if (cleanQuery.isNotEmpty()) {
@@ -523,6 +732,8 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                     (numericQuery.isNotEmpty() && item.id.toString().contains(numericQuery)) ||
                     (item.description?.contains(cleanQuery, ignoreCase = true) == true) ||
                     (item.assignedToName?.contains(cleanQuery, ignoreCase = true) == true) ||
+                    (item.areaPath?.contains(cleanQuery, ignoreCase = true) == true) ||
+                    (item.iterationPath?.contains(cleanQuery, ignoreCase = true) == true) ||
                     item.workItemType.contains(cleanQuery, ignoreCase = true) ||
                     item.state.contains(cleanQuery, ignoreCase = true) ||
                     item.tags.any { it.contains(cleanQuery, ignoreCase = true) }
@@ -569,8 +780,10 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                     item.assignedToName.isNullOrBlank() || item.assignedToName.equals("Unassigned", ignoreCase = true)
                 else -> item.assignedToName?.trim()?.equals(assignee.trim(), ignoreCase = true) == true
             }
+            val matchesArea = matchesClassificationHierarchy(item.areaPath, area)
+            val matchesIteration = matchesClassificationHierarchy(item.iterationPath, iteration)
 
-            matchesProject && matchesType && matchesState && matchesAssignee
+            matchesProject && matchesType && matchesState && matchesAssignee && matchesArea && matchesIteration
         }
 
         val boardOrderComparator = compareBy<WorkItem>(
@@ -640,6 +853,15 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
             }
             if (cachedMeta.categoryMapByProject.isNotEmpty()) {
                 _projectCategoryMap.value = _projectCategoryMap.value + cachedMeta.categoryMapByProject
+            }
+            if (cachedMeta.backlogLevelsByProject.isNotEmpty()) {
+                _projectBacklogLevelsMap.value = _projectBacklogLevelsMap.value + cachedMeta.backlogLevelsByProject
+            }
+            if (cachedMeta.areasByProject.isNotEmpty()) {
+                _projectAreasMap.value = _projectAreasMap.value + cachedMeta.areasByProject
+            }
+            if (cachedMeta.iterationsByProject.isNotEmpty()) {
+                _projectIterationsMap.value = _projectIterationsMap.value + cachedMeta.iterationsByProject
             }
         }
 
@@ -933,9 +1155,13 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         if (normOrg.isBlank() || project.isBlank() || pat.isBlank()) return
         coroutineScope {
             val hierarchyDef = async { repository.fetchProjectProcessHierarchy(normOrg, project, pat) }
-            val catMapDef = async { repository.fetchProjectCategoryMap(normOrg, project, pat) }
+            val backlogMetaDef = async { repository.fetchProjectBacklogMetadata(normOrg, project, pat) }
+            val classificationDef = async { repository.fetchProjectClassificationPaths(normOrg, project, pat) }
             val hierarchy = hierarchyDef.await()
-            val catMap = catMapDef.await()
+            val backlogMeta = backlogMetaDef.await()
+            val (areaPaths, iterationPaths) = classificationDef.await()
+            val catMap = backlogMeta.categoryMap
+            val backlogLevels = backlogMeta.orderedBacklogLevels
             val key = processKey(normOrg, project)
             if (hierarchy.isNotEmpty()) {
                 _projectProcessMap.value = _projectProcessMap.value + (key to hierarchy) + (project to hierarchy)
@@ -943,11 +1169,23 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
             if (catMap.isNotEmpty()) {
                 _projectCategoryMap.value = _projectCategoryMap.value + (key to catMap) + (project to catMap)
             }
-            if (hierarchy.isNotEmpty() || catMap.isNotEmpty()) {
+            if (backlogLevels.isNotEmpty()) {
+                _projectBacklogLevelsMap.value = _projectBacklogLevelsMap.value + (key to backlogLevels) + (project to backlogLevels)
+            }
+            if (areaPaths.isNotEmpty()) {
+                _projectAreasMap.value = _projectAreasMap.value + (key to areaPaths) + (project to areaPaths)
+            }
+            if (iterationPaths.isNotEmpty()) {
+                _projectIterationsMap.value = _projectIterationsMap.value + (key to iterationPaths) + (project to iterationPaths)
+            }
+            if (hierarchy.isNotEmpty() || catMap.isNotEmpty() || backlogLevels.isNotEmpty() || areaPaths.isNotEmpty() || iterationPaths.isNotEmpty()) {
                 repository.saveCachedOrganizationMetadata(
                     organization = normOrg,
                     processHierarchyByProject = _projectProcessMap.value,
-                    categoryMapByProject = _projectCategoryMap.value
+                    categoryMapByProject = _projectCategoryMap.value,
+                    backlogLevelsByProject = _projectBacklogLevelsMap.value,
+                    areasByProject = _projectAreasMap.value,
+                    iterationsByProject = _projectIterationsMap.value
                 )
             }
         }
@@ -1240,6 +1478,8 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         _typeFilter.value = null
         _stateFilter.value = null
         _assigneeFilter.value = null
+        _areaFilter.value = null
+        _iterationFilter.value = null
         _selectedWorkItem.value = null
         _workItemsOrg.value = account.organization
         _allWorkItems.value = emptyList()
@@ -1399,6 +1639,8 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                     _typeFilter.value = null
                     _stateFilter.value = null
                     _assigneeFilter.value = null
+                    _areaFilter.value = null
+                    _iterationFilter.value = null
                     _selectedWorkItem.value = null
                     _stateDisplayLimits.value = emptyMap()
                     exhaustedStateQueries.clear()
@@ -1827,7 +2069,13 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         _typeFilter.value = null
         _stateFilter.value = null
         _assigneeFilter.value = null
+        _areaFilter.value = null
+        _iterationFilter.value = null
         _selectedWorkItem.value = null
+        activeCommentsJob?.cancel()
+        commentsByWorkItemId.clear()
+        _selectedWorkItemComments.value = emptyList()
+        _isLoadingComments.value = false
         _errorMessage.value = null
         _connectionStatus.value = ConnectionStatus.Disconnected
     }
@@ -1839,8 +2087,13 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
     fun setProject(project: String?) {
         val trimmed = project?.trim()
         if (trimmed.isNullOrBlank()) return
+        val isDifferentProject = !_selectedProject.value.equals(trimmed, ignoreCase = true)
         userManuallySelectedProject = true
         userManuallySelectedType = false
+        if (isDifferentProject) {
+            _areaFilter.value = null
+            _iterationFilter.value = null
+        }
         _selectedProject.value = trimmed
         ensureProjectProcessLoaded(trimmed)
     }
@@ -1877,8 +2130,13 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         val activeOrg = (_connectionStatus.value as? ConnectionStatus.Connected)?.organization
             ?: _defaultOrganization.value
         if (activeOrg != null && activeOrg.equals(normOrg, ignoreCase = true)) {
+            val isDifferentProject = !_selectedProject.value.equals(trimmedProj, ignoreCase = true)
             userManuallySelectedProject = false
             userManuallySelectedType = false
+            if (isDifferentProject) {
+                _areaFilter.value = null
+                _iterationFilter.value = null
+            }
             _selectedProject.value = trimmedProj
             ensureProjectProcessLoaded(trimmedProj)
         }
@@ -1966,11 +2224,151 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun setAreaFilter(areaPath: String?) {
+        _areaFilter.value = if (areaPath.isNullOrBlank() || areaPath.equals("All", ignoreCase = true)) {
+            null
+        } else {
+            normalizeClassificationPath(areaPath).ifBlank { null }
+        }
+    }
+
+    fun setIterationFilter(iterationPath: String?) {
+        _iterationFilter.value = if (iterationPath.isNullOrBlank() || iterationPath.equals("All", ignoreCase = true)) {
+            null
+        } else {
+            normalizeClassificationPath(iterationPath).ifBlank { null }
+        }
+    }
+
     fun selectWorkItem(item: WorkItem?) {
         if (item != null && _searchQuery.value.isNotEmpty()) {
             _searchQuery.value = ""
         }
         _selectedWorkItem.value = item
+        activeCommentsJob?.cancel()
+
+        if (item == null) {
+            _selectedWorkItemComments.value = emptyList()
+            _isLoadingComments.value = false
+            return
+        }
+
+        val cachedComments = commentsByWorkItemId[item.id].orEmpty()
+        _selectedWorkItemComments.value = cachedComments
+
+        val acc = getActiveAccount()
+        val org = acc?.organization ?: repository.getConfiguredUrl()
+        val pat = acc?.pat ?: repository.getConfiguredPat()
+        val project = item.teamProject ?: _selectedProject.value ?: ""
+        if (org.isBlank() || pat.isBlank() || project.isBlank()) {
+            _isLoadingComments.value = false
+            return
+        }
+
+        activeCommentsJob = viewModelScope.launch {
+            if (cachedComments.isEmpty()) {
+                _isLoadingComments.value = true
+            }
+            val result = repository.fetchWorkItemComments(
+                organization = org,
+                pat = pat,
+                project = project,
+                workItemId = item.id
+            )
+            result.onSuccess { serverComments ->
+                val pendingLocal = commentsByWorkItemId[item.id]
+                    .orEmpty()
+                    .filter { it.id < 0 && serverComments.none { s -> s.text == it.text } }
+                val merged = (pendingLocal + serverComments)
+                    .distinctBy { if (it.id > 0) "id_${it.id}" else "local_${it.id}_${it.text}" }
+                    .sortedWith(
+                        compareByDescending<WorkItemComment> { it.createdDate }
+                            .thenByDescending { if (it.id < 0) Int.MAX_VALUE else it.id }
+                    )
+                commentsByWorkItemId[item.id] = merged
+                if (_selectedWorkItem.value?.id == item.id) {
+                    _selectedWorkItemComments.value = merged
+                }
+            }
+            if (_selectedWorkItem.value?.id == item.id) {
+                _isLoadingComments.value = false
+            }
+        }
+    }
+
+    /**
+     * Adds a comment to [workItem] in the Discussion section with instant optimistic UI update
+     * (prepended newest-first) and background persistence to Azure DevOps.
+     */
+    fun addCommentToWorkItem(
+        workItem: WorkItem,
+        commentText: String,
+        onResult: (Result<WorkItemComment>) -> Unit = {}
+    ) {
+        val trimmed = commentText.trim()
+        if (trimmed.isBlank()) {
+            onResult(Result.failure(IllegalArgumentException("Comment cannot be empty.")))
+            return
+        }
+
+        val nowIso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date())
+        val formattedNow = SimpleDateFormat("MMM d, yyyy · HH:mm", Locale.US).format(Date())
+        val tempId = -((System.currentTimeMillis() % 1_000_000L).toInt().coerceAtLeast(1))
+
+        val optimisticComment = WorkItemComment(
+            id = tempId,
+            workItemId = workItem.id,
+            text = trimmed,
+            authorName = "You",
+            authorEmail = null,
+            authorAvatar = null,
+            createdDate = nowIso,
+            formattedDate = formattedNow
+        )
+
+        val currentList = commentsByWorkItemId[workItem.id].orEmpty()
+        val updatedOptimistic = listOf(optimisticComment) + currentList
+        commentsByWorkItemId[workItem.id] = updatedOptimistic
+        if (_selectedWorkItem.value?.id == workItem.id) {
+            _selectedWorkItemComments.value = updatedOptimistic
+        }
+
+        val acc = getActiveAccount()
+        val org = acc?.organization ?: repository.getConfiguredUrl()
+        val pat = acc?.pat ?: repository.getConfiguredPat()
+        val project = workItem.teamProject ?: _selectedProject.value ?: ""
+
+        if (org.isBlank() || pat.isBlank() || project.isBlank()) {
+            onResult(Result.success(optimisticComment))
+            return
+        }
+
+        viewModelScope.launch {
+            val result = repository.addWorkItemCommentOnServer(
+                organization = org,
+                pat = pat,
+                project = project,
+                workItemId = workItem.id,
+                commentText = trimmed
+            )
+            result.fold(
+                onSuccess = { serverComment ->
+                    val existing = commentsByWorkItemId[workItem.id].orEmpty()
+                    val replaced = existing.map { c ->
+                        if (c.id == tempId) serverComment else c
+                    }.distinctBy { if (it.id > 0) "id_${it.id}" else "local_${it.id}" }
+                    commentsByWorkItemId[workItem.id] = replaced
+                    if (_selectedWorkItem.value?.id == workItem.id) {
+                        _selectedWorkItemComments.value = replaced
+                    }
+                    onResult(Result.success(serverComment))
+                },
+                onFailure = { err ->
+                    // Keep the optimistic comment visible or report error if desired
+                    onResult(Result.failure(err))
+                }
+            )
+        }
     }
 
     fun updateWorkItem(updatedItem: WorkItem) {
@@ -2003,6 +2401,8 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         val onlyTextChanged = currentInMemory != null &&
             currentInMemory.state == normalizedUpdated.state &&
             currentInMemory.assignedToName == normalizedUpdated.assignedToName &&
+            currentInMemory.areaPath == normalizedUpdated.areaPath &&
+            currentInMemory.iterationPath == normalizedUpdated.iterationPath &&
             currentInMemory.tags == normalizedUpdated.tags &&
             (currentInMemory.description != normalizedUpdated.description ||
                 currentInMemory.title != normalizedUpdated.title)
@@ -2053,8 +2453,13 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     /**
-     * Returns the list of valid child work item types for a given [workItemType] in [project].
-     * Always returns an empty list when [workItemType] is at the last hierarchy level.
+     * Returns the list of valid child work item types for a given [workItemType] in [project]:
+     * - Resolves the project's ordered active Backlog Levels (Portfolio Backlogs -> Requirement Backlog ->
+     *   Iteration Backlog).
+     * - When Iteration Backlog is disabled, Requirement Backlog is automatically the last active level.
+     * - If [workItemType] is in the last active Backlog Level OR is an unmapped work item type
+     *   not assigned to any Backlog Level, returns `emptyList()` to prevent creating children.
+     * - Otherwise returns strictly the work item types in the next immediate active Backlog Level below.
      */
     fun getAllowedChildTypesForType(project: String?, workItemType: String): List<String> {
         val cleanType = workItemType.trim()
@@ -2079,40 +2484,37 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
             .filterNot { AzureDevOpsRepository.isExcludedNonWorkItemType(it) }
             .distinct()
 
-        val combinedTypes = (activeTypesFromProcess + activeTypesFromItems)
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .distinctBy { it.lowercase() }
-
+        // When Process API types are loaded for the project, use only enabled process types
+        // so disabled types (e.g., disabled Iteration Backlog / Task types) never appear as active.
         val activeTypes = when {
-            combinedTypes.isNotEmpty() -> combinedTypes
+            activeTypesFromProcess.isNotEmpty() -> activeTypesFromProcess
+            activeTypesFromItems.isNotEmpty() -> activeTypesFromItems
             availableTypes.value.isNotEmpty() -> availableTypes.value
             else -> repository.getKnownProjectProcessHierarchy(resolvedProject).keys.toList()
         }
 
         val catMap = findCategoryMap(activeOrg, resolvedProject).orEmpty()
+        val explicitBacklogLevels = findBacklogLevels(activeOrg, resolvedProject).orEmpty()
 
-        // Explicit check: if this work item type is a leaf / last-level type (e.g. Task / کار / Bug at Task level),
-        // it can never have children.
-        if (repository.isLeafWorkItemType(cleanType, catMap, activeTypes)) {
-            return emptyList()
-        }
-
-        val levels = repository.resolveOrderedHierarchyLevels(
+        val backlogLevels = repository.resolveOrderedBacklogLevels(
             activeTypes = activeTypes,
             categoryMap = catMap,
+            explicitBacklogLevels = explicitBacklogLevels,
             projectWorkItems = projectItems
         )
-        if (levels.size <= 1) return emptyList()
+        if (backlogLevels.size <= 1) return emptyList()
 
-        val levelIdx = levels.indexOfFirst { levelTypes ->
+        val levelIdx = backlogLevels.indexOfFirst { levelTypes ->
             levelTypes.any { it.equals(cleanType, ignoreCase = true) }
         }
-        if (levelIdx < 0 || levelIdx >= levels.lastIndex) {
+        // Unmapped types (levelIdx < 0) and types in the last active backlog level (levelIdx >= backlogLevels.lastIndex)
+        // cannot have children.
+        if (levelIdx < 0 || levelIdx >= backlogLevels.lastIndex) {
             return emptyList()
         }
 
-        return levels.drop(levelIdx + 1).flatten()
+        // Return strictly the next immediate active backlog level below the parent
+        return backlogLevels[levelIdx + 1]
     }
 
     /**
@@ -2127,6 +2529,8 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         assignedToName: String?,
         description: String?,
         tags: List<String>,
+        areaPath: String? = null,
+        iterationPath: String? = null,
         onResult: (Result<WorkItem>) -> Unit = {}
     ) {
         val trimmedTitle = title.trim()
@@ -2158,6 +2562,12 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         }
         val cleanTags = tags.map { it.trim() }.filter { it.isNotBlank() }.distinct()
         val cleanDesc = description?.trim()?.takeIf { it.isNotBlank() }
+        val resolvedArea = normalizeClassificationPath(areaPath).ifBlank {
+            resolvedProject.ifBlank { "" }
+        }.ifBlank { null }
+        val resolvedIteration = normalizeClassificationPath(iterationPath).ifBlank {
+            resolvedProject.ifBlank { "" }
+        }.ifBlank { null }
 
         val acc = getActiveAccount()
         val org = acc?.organization ?: repository.getConfiguredUrl()
@@ -2179,8 +2589,8 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                 createdDate = nowIso,
                 changedDate = nowIso,
                 description = cleanDesc,
-                areaPath = resolvedProject.ifBlank { null },
-                iterationPath = resolvedProject.ifBlank { null },
+                areaPath = resolvedArea,
+                iterationPath = resolvedIteration,
                 boardOrder = nextBoardOrder,
                 tags = cleanTags
             )
@@ -2210,11 +2620,15 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                 assignedToName = cleanAssignee,
                 resolvedAssigneeIdentity = resolvedEmail,
                 description = cleanDesc,
-                tags = cleanTags
+                tags = cleanTags,
+                areaPath = resolvedArea,
+                iterationPath = resolvedIteration
             )
             result.fold(
                 onSuccess = { serverCreated ->
                     val finalCreated = serverCreated.copy(
+                        areaPath = serverCreated.areaPath ?: resolvedArea,
+                        iterationPath = serverCreated.iterationPath ?: resolvedIteration,
                         boardOrder = serverCreated.boardOrder ?: nextBoardOrder
                     )
                     serverSyncedItems[finalCreated.id] = finalCreated
@@ -2480,6 +2894,51 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                         onResult(Result.failure(err))
                     }
                 }
+            )
+        }
+    }
+
+    /**
+     * Unlinks [childId] from [parent] without deleting either work item, updating UI state
+     * immediately and syncing the hierarchy link removal to Azure DevOps.
+     */
+    fun removeChildWorkItem(
+        parent: WorkItem,
+        childId: Int
+    ) {
+        val acc = getActiveAccount()
+        val org = acc?.organization ?: repository.getConfiguredUrl()
+        val pat = acc?.pat ?: repository.getConfiguredPat()
+
+        _allWorkItems.value = _allWorkItems.value.map { item ->
+            when {
+                item.id == parent.id -> {
+                    val updatedParent = item.copy(childIds = item.childIds.filterNot { it == childId })
+                    serverSyncedItems[updatedParent.id] = updatedParent
+                    updatedParent
+                }
+                item.id == childId && item.parentId == parent.id -> {
+                    val updatedChild = item.copy(parentId = null)
+                    serverSyncedItems[updatedChild.id] = updatedChild
+                    updatedChild
+                }
+                else -> item
+            }
+        }
+
+        if (_selectedWorkItem.value?.id == parent.id) {
+            _selectedWorkItem.value = _allWorkItems.value.firstOrNull { it.id == parent.id }
+        }
+        persistCurrentItemsInBackground(org)
+
+        if (org.isBlank() || pat.isBlank()) return
+
+        viewModelScope.launch {
+            repository.unlinkChildWorkItemOnServer(
+                organization = org,
+                pat = pat,
+                parentId = parent.id,
+                childId = childId
             )
         }
     }

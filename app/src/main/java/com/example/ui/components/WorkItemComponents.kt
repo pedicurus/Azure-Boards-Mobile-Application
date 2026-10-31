@@ -22,12 +22,17 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
@@ -37,8 +42,17 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PersonOutline
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Sell
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -75,10 +89,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.WorkItem
+import com.example.data.model.WorkItemComment
 import com.example.ui.theme.NeumorphicBg
 import com.example.ui.theme.NeumorphicTeal
 import com.example.ui.theme.NeumorphicTealLight
@@ -91,6 +107,23 @@ import com.example.ui.theme.getAzureStateBadgeText
 import com.example.ui.theme.getAzureStateColor
 import com.example.ui.theme.getAzureTypeColor
 import com.example.ui.theme.getAzureTypeTextColor
+import com.example.ui.theme.getAzureTypeVectorIcon
+
+@Composable
+fun AzureWorkItemTypeSymbol(
+    workItemType: String,
+    iconSize: Dp = 16.dp,
+    modifier: Modifier = Modifier
+) {
+    val typeColor = getAzureTypeColor(workItemType)
+    val typeIcon = getAzureTypeVectorIcon(workItemType)
+    Icon(
+        imageVector = typeIcon,
+        contentDescription = workItemType,
+        tint = typeColor,
+        modifier = modifier.size(iconSize)
+    )
+}
 
 /**
  * Returns true if the text is predominantly ("almost") Persian/Arabic script,
@@ -127,6 +160,8 @@ fun FigmaItemDetailView(
     availableStates: List<String> = emptyList(),
     availableAssignees: List<String> = emptyList(),
     availableTags: List<String> = emptyList(),
+    availableAreas: List<String> = emptyList(),
+    availableIterations: List<String> = emptyList(),
     allWorkItems: List<WorkItem> = emptyList(),
     childWorkItems: List<WorkItem> = emptyList(),
     allowedChildTypes: List<String> = emptyList(),
@@ -134,14 +169,51 @@ fun FigmaItemDetailView(
     getStatesForChildType: (String) -> List<String> = { emptyList() },
     onAddChildWorkItem: (title: String, childType: String, initialState: String) -> Unit = { _, _, _ -> },
     onAddExistingChildWorkItem: (childId: Int, onResult: (Result<WorkItem>) -> Unit) -> Unit = { _, _ -> },
+    onRemoveChildWorkItem: (childId: Int) -> Unit = {},
+    comments: List<WorkItemComment> = emptyList(),
+    isLoadingComments: Boolean = false,
+    onAddComment: (commentText: String, onResult: (Result<WorkItemComment>) -> Unit) -> Unit = { _, _ -> },
     onUpdateWorkItem: (WorkItem) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    var currentTitle by remember(workItem.id) {
+        mutableStateOf(workItem.title)
+    }
+    var isEditingTitle by remember(workItem.id) {
+        mutableStateOf(false)
+    }
+    val titleFocusRequester = remember { FocusRequester() }
+    var showAllChildren by remember(workItem.id) {
+        mutableStateOf(false)
+    }
+    var showAllComments by remember(workItem.id) {
+        mutableStateOf(false)
+    }
+    var commentFieldValue by remember(workItem.id) {
+        mutableStateOf(TextFieldValue(""))
+    }
+    var isPostingComment by remember(workItem.id) {
+        mutableStateOf(false)
+    }
+    val commentFocusRequester = remember { FocusRequester() }
     var currentState by remember(workItem.id, workItem.state) {
         mutableStateOf(workItem.state)
     }
     var currentAssignee by remember(workItem.id, workItem.assignedToName) {
         mutableStateOf(workItem.assignedToName?.trim()?.takeIf { it.isNotBlank() } ?: "Unassigned")
+    }
+    val defaultRootPath = workItem.teamProject?.trim()?.takeIf { it.isNotBlank() }
+        ?: availableAreas.firstOrNull()
+        ?: "Project"
+    var currentAreaPath by remember(workItem.id, workItem.areaPath) {
+        mutableStateOf(
+            normalizeHierarchyPathUI(workItem.areaPath).ifBlank { defaultRootPath }
+        )
+    }
+    var currentIterationPath by remember(workItem.id, workItem.iterationPath) {
+        mutableStateOf(
+            normalizeHierarchyPathUI(workItem.iterationPath).ifBlank { defaultRootPath }
+        )
     }
     var currentTags by remember(workItem.id, workItem.tags) {
         mutableStateOf(workItem.tags.map { it.trim() }.filter { it.isNotBlank() })
@@ -152,6 +224,8 @@ fun FigmaItemDetailView(
 
     var stateMenuExpanded by remember { mutableStateOf(false) }
     var assigneeMenuExpanded by remember { mutableStateOf(false) }
+    var showAreaPickerDialog by remember { mutableStateOf(false) }
+    var showIterationPickerDialog by remember { mutableStateOf(false) }
     var tagMenuExpanded by remember { mutableStateOf(false) }
     var showAddTagDialog by remember { mutableStateOf(false) }
     var customTagInput by remember { mutableStateOf("") }
@@ -260,8 +334,8 @@ fun FigmaItemDetailView(
                     .padding(horizontal = 20.dp, vertical = 22.dp)
                     .verticalScroll(rememberScrollState())
             ) {
-                // Title and Counter/ID
-                val isDetailTitleRtl = isAlmostPersian(workItem.title)
+                // Title (touch to edit) and Counter/ID
+                val isDetailTitleRtl = isAlmostPersian(currentTitle.ifBlank { workItem.title })
                 Row(
                     verticalAlignment = Alignment.Top,
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -271,27 +345,122 @@ fun FigmaItemDetailView(
                         CompositionLocalProvider(
                             LocalLayoutDirection provides if (isDetailTitleRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
                         ) {
-                            Text(
-                                text = workItem.title,
-                                color = TextPrimary,
-                                fontSize = 22.sp,
-                                fontWeight = FontWeight.Bold,
-                                lineHeight = 28.sp,
-                                textAlign = if (isDetailTitleRtl) TextAlign.Right else TextAlign.Left,
-                                style = TextStyle(
-                                    textDirection = if (isDetailTitleRtl) TextDirection.Rtl else TextDirection.Ltr
-                                ),
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                            if (isEditingTitle) {
+                                LaunchedEffect(Unit) {
+                                    titleFocusRequester.requestFocus()
+                                }
+                                OutlinedTextField(
+                                    value = currentTitle,
+                                    onValueChange = { updatedTitle ->
+                                        currentTitle = updatedTitle
+                                        val effectiveTitle = updatedTitle.trim().ifBlank { workItem.title }
+                                        onUpdateWorkItem(
+                                            workItem.copy(
+                                                title = effectiveTitle,
+                                                state = currentState,
+                                                assignedToName = currentAssignee.takeUnless { it.equals("Unassigned", ignoreCase = true) },
+                                                areaPath = currentAreaPath,
+                                                iterationPath = currentIterationPath,
+                                                tags = currentTags,
+                                                description = currentDescription
+                                            )
+                                        )
+                                    },
+                                    placeholder = {
+                                        Text(
+                                            text = "Enter title...",
+                                            color = NeumorphicTextSecondary,
+                                            fontSize = 18.sp
+                                        )
+                                    },
+                                    textStyle = TextStyle(
+                                        color = TextPrimary,
+                                        fontSize = 20.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        lineHeight = 26.sp,
+                                        textAlign = if (isDetailTitleRtl) TextAlign.Right else TextAlign.Left,
+                                        textDirection = if (isDetailTitleRtl) TextDirection.Rtl else TextDirection.Ltr
+                                    ),
+                                    trailingIcon = {
+                                        IconButton(
+                                            onClick = {
+                                                if (currentTitle.isBlank()) {
+                                                    currentTitle = workItem.title
+                                                }
+                                                isEditingTitle = false
+                                            },
+                                            modifier = Modifier.testTag("detail_title_done_button")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Check,
+                                                contentDescription = "Finish editing title",
+                                                tint = NeumorphicTeal,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    },
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                    keyboardActions = KeyboardActions(
+                                        onDone = {
+                                            if (currentTitle.isBlank()) {
+                                                currentTitle = workItem.title
+                                            }
+                                            isEditingTitle = false
+                                        }
+                                    ),
+                                    shape = RoundedCornerShape(14.dp),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = NeumorphicTeal,
+                                        unfocusedBorderColor = SurfaceBorder,
+                                        focusedContainerColor = SurfaceCard,
+                                        unfocusedContainerColor = SurfaceCard,
+                                        focusedTextColor = TextPrimary,
+                                        unfocusedTextColor = TextPrimary
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .focusRequester(titleFocusRequester)
+                                        .testTag("detail_title_input")
+                                )
+                            } else {
+                                Text(
+                                    text = currentTitle.ifBlank { workItem.title },
+                                    color = TextPrimary,
+                                    fontSize = 22.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    lineHeight = 28.sp,
+                                    textAlign = if (isDetailTitleRtl) TextAlign.Right else TextAlign.Left,
+                                    style = TextStyle(
+                                        textDirection = if (isDetailTitleRtl) TextDirection.Rtl else TextDirection.Ltr
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { isEditingTitle = true }
+                                        .padding(vertical = 2.dp)
+                                        .testTag("detail_title_text")
+                                )
+                            }
                         }
                     }
                     Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        text = "#${workItem.id}",
-                        color = NeumorphicTeal,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        modifier = Modifier.padding(top = 3.dp)
+                    ) {
+                        AzureWorkItemTypeSymbol(
+                            workItemType = workItem.workItemType,
+                            iconSize = 18.dp,
+                            modifier = Modifier.testTag("detail_type_symbol_${workItem.id}")
+                        )
+                        Text(
+                            text = "#${workItem.id}",
+                            color = NeumorphicTeal,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))
@@ -395,8 +564,11 @@ fun FigmaItemDetailView(
                                         currentState = stateOption
                                         onUpdateWorkItem(
                                             workItem.copy(
+                                                title = currentTitle.trim().ifBlank { workItem.title },
                                                 state = stateOption,
                                                 assignedToName = currentAssignee.takeUnless { it.equals("Unassigned", ignoreCase = true) },
+                                                areaPath = currentAreaPath,
+                                                iterationPath = currentIterationPath,
                                                 tags = currentTags,
                                                 description = currentDescription
                                             )
@@ -457,7 +629,18 @@ fun FigmaItemDetailView(
 
                 Spacer(modifier = Modifier.height(18.dp))
 
-                // 2. Description section (Editable, with RTL support for Persian text)
+                // 2. Area & Iteration Section (placed before Description section)
+                ClassificationHierarchySection(
+                    areaPath = currentAreaPath,
+                    iterationPath = currentIterationPath,
+                    onAreaClick = { showAreaPickerDialog = true },
+                    onIterationClick = { showIterationPickerDialog = true },
+                    testTagPrefix = "detail"
+                )
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // 3. Description section (Editable, with RTL support for Persian text)
                 Text(
                     text = "Description",
                     color = TextPrimary,
@@ -476,8 +659,11 @@ fun FigmaItemDetailView(
                             currentDescription = updatedText
                             onUpdateWorkItem(
                                 workItem.copy(
+                                    title = currentTitle.trim().ifBlank { workItem.title },
                                     state = currentState,
                                     assignedToName = currentAssignee.takeUnless { it.equals("Unassigned", ignoreCase = true) },
+                                    areaPath = currentAreaPath,
+                                    iterationPath = currentIterationPath,
                                     tags = currentTags,
                                     description = currentDescription
                                 )
@@ -568,8 +754,11 @@ fun FigmaItemDetailView(
                                             currentTags = currentTags.filterNot { it == tag }
                                             onUpdateWorkItem(
                                                 workItem.copy(
+                                                    title = currentTitle.trim().ifBlank { workItem.title },
                                                     state = currentState,
                                                     assignedToName = currentAssignee.takeUnless { it.equals("Unassigned", ignoreCase = true) },
+                                                    areaPath = currentAreaPath,
+                                                    iterationPath = currentIterationPath,
                                                     tags = currentTags,
                                                     description = currentDescription
                                                 )
@@ -683,19 +872,463 @@ fun FigmaItemDetailView(
                             )
                         }
                     } else {
+                        val displayedChildren = if (showAllChildren) {
+                            childWorkItems
+                        } else {
+                            childWorkItems.take(3)
+                        }
                         Column(
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("detail_children_section")
                         ) {
-                            childWorkItems.forEach { child ->
+                            displayedChildren.forEach { child ->
                                 ChildWorkItemStatusRow(
                                     child = child,
                                     availableStates = getChildStates(child),
                                     onStateChange = { newState ->
                                         onUpdateWorkItem(child.copy(state = newState))
+                                    },
+                                    onRemoveChild = {
+                                        onRemoveChildWorkItem(child.id)
                                     }
+                                )
+                            }
+
+                            if (!showAllChildren && childWorkItems.size > 3) {
+                                OutlinedButton(
+                                    onClick = { showAllChildren = true },
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+                                    colors = ButtonDefaults.outlinedButtonColors(
+                                        containerColor = Color(0xFFF8FAFC),
+                                        contentColor = NeumorphicTeal
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("detail_more_children_button")
+                                ) {
+                                    Text(
+                                        text = "More Children",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Discussion Section (placed directly below Children section)
+                Spacer(modifier = Modifier.height(22.dp))
+                HorizontalDivider(color = SurfaceBorder, thickness = 1.dp)
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // Pre-indexed people directory for O(1)-allocation @mention autocomplete
+                val indexedMentionPeople = remember(availableAssignees, allWorkItems, comments) {
+                    buildMentionPeopleIndex(
+                        availableAssignees = availableAssignees,
+                        allWorkItems = allWorkItems,
+                        comments = comments
+                    )
+                }
+
+                val activeMentionToken = remember(commentFieldValue.text, commentFieldValue.selection) {
+                    extractActiveMentionToken(commentFieldValue)
+                }
+
+                // Trigger people suggestions only when user types '@' followed by >= 3 characters
+                val matchingMentionPeople = remember(activeMentionToken, indexedMentionPeople) {
+                    val token = activeMentionToken ?: return@remember emptyList()
+                    val cleanQuery = token.query.trim()
+                    if (cleanQuery.length < 3) return@remember emptyList()
+                    val lowerQuery = cleanQuery.lowercase()
+                    indexedMentionPeople.asSequence()
+                        .filter { candidate ->
+                            candidate.lowerName.contains(lowerQuery) ||
+                                (candidate.lowerEmail != null && candidate.lowerEmail.contains(lowerQuery))
+                        }
+                        .take(6)
+                        .toList()
+                }
+
+                // Discussion Header Row
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("detail_discussion_header")
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Forum,
+                            contentDescription = null,
+                            tint = NeumorphicTeal,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "Discussion",
+                            color = TextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (comments.isNotEmpty()) {
+                            Surface(
+                                color = Color(0xFFEEF2F8),
+                                shape = RoundedCornerShape(10.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFCBD5E1))
+                            ) {
+                                Text(
+                                    text = comments.size.toString(),
+                                    color = Color(0xFF0F172A),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    if (isLoadingComments) {
+                        CircularProgressIndicator(
+                            color = NeumorphicTeal,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier
+                                .size(16.dp)
+                                .testTag("detail_discussion_loading")
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Top Comment Composer Box (placed at top of Discussion section, above comments)
+                val isCommentInputRtl = isAlmostPersian(commentFieldValue.text.ifBlank { workItem.title })
+                Surface(
+                    color = Color(0xFFF8FAFC),
+                    shape = RoundedCornerShape(16.dp),
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        if (matchingMentionPeople.isNotEmpty()) NeumorphicTeal else SurfaceBorder
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("detail_discussion_composer_card")
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp)
+                    ) {
+                        CompositionLocalProvider(
+                            LocalLayoutDirection provides if (isCommentInputRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+                        ) {
+                            OutlinedTextField(
+                                value = commentFieldValue,
+                                onValueChange = { updatedValue ->
+                                    commentFieldValue = updatedValue
+                                },
+                                placeholder = {
+                                    Text(
+                                        text = "Add a comment... Use @ + 3 chars to mention people",
+                                        color = NeumorphicTextSecondary,
+                                        fontSize = 13.sp,
+                                        textAlign = if (isCommentInputRtl) TextAlign.Right else TextAlign.Left,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                },
+                                textStyle = TextStyle(
+                                    color = TextPrimary,
+                                    fontSize = 14.sp,
+                                    lineHeight = 20.sp,
+                                    textAlign = if (isCommentInputRtl) TextAlign.Right else TextAlign.Left,
+                                    textDirection = if (isCommentInputRtl) TextDirection.Rtl else TextDirection.Ltr
+                                ),
+                                minLines = 2,
+                                maxLines = 5,
+                                shape = RoundedCornerShape(12.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = NeumorphicTeal,
+                                    unfocusedBorderColor = SurfaceBorder,
+                                    focusedContainerColor = SurfaceCard,
+                                    unfocusedContainerColor = SurfaceCard,
+                                    focusedTextColor = TextPrimary,
+                                    unfocusedTextColor = TextPrimary,
+                                    cursorColor = NeumorphicTeal
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .focusRequester(commentFocusRequester)
+                                    .testTag("detail_comment_input")
+                            )
+                        }
+
+                        // High-Performance @Mention Autocomplete Dropdown (shown when >= 3 chars after '@')
+                        if (matchingMentionPeople.isNotEmpty() && activeMentionToken != null) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Surface(
+                                color = SurfaceCard,
+                                shape = RoundedCornerShape(12.dp),
+                                shadowElevation = 4.dp,
+                                border = androidx.compose.foundation.BorderStroke(1.dp, NeumorphicTeal.copy(alpha = 0.35f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("detail_mention_suggestions_list")
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 4.dp)
+                                    ) {
+                                        Text(
+                                            text = "People matching \"@${activeMentionToken.query.trim()}\"",
+                                            color = NeumorphicTeal,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "Tap to mention",
+                                            color = NeumorphicTextSecondary,
+                                            fontSize = 10.sp
+                                        )
+                                    }
+                                    HorizontalDivider(color = SurfaceBorder.copy(alpha = 0.6f), thickness = 0.5.dp)
+
+                                    matchingMentionPeople.forEachIndexed { index, candidate ->
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    val currentText = commentFieldValue.text
+                                                    val safeStart = activeMentionToken.startIndex.coerceIn(0, currentText.length)
+                                                    val safeEnd = activeMentionToken.endIndex.coerceIn(safeStart, currentText.length)
+                                                    val mentionInsertion = "@${candidate.displayName} "
+                                                    val newText = buildString(currentText.length + mentionInsertion.length) {
+                                                        append(currentText, 0, safeStart)
+                                                        append(mentionInsertion)
+                                                        append(currentText, safeEnd, currentText.length)
+                                                    }
+                                                    val newCursor = safeStart + mentionInsertion.length
+                                                    commentFieldValue = TextFieldValue(
+                                                        text = newText,
+                                                        selection = TextRange(newCursor)
+                                                    )
+                                                }
+                                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                                                .testTag("detail_mention_option_${candidate.displayName}")
+                                        ) {
+                                            Box(
+                                                contentAlignment = Alignment.Center,
+                                                modifier = Modifier
+                                                    .size(28.dp)
+                                                    .clip(CircleShape)
+                                                    .background(NeumorphicTeal.copy(alpha = 0.14f))
+                                            ) {
+                                                Text(
+                                                    text = candidate.initial,
+                                                    color = NeumorphicTeal,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(10.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = candidate.displayName,
+                                                    color = TextPrimary,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                if (!candidate.email.isNullOrBlank()) {
+                                                    Text(
+                                                        text = candidate.email,
+                                                        color = NeumorphicTextSecondary,
+                                                        fontSize = 11.sp,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        if (index < matchingMentionPeople.lastIndex) {
+                                            HorizontalDivider(
+                                                color = SurfaceBorder.copy(alpha = 0.5f),
+                                                thickness = 0.5.dp,
+                                                modifier = Modifier.padding(horizontal = 12.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // Composer Action Bar: '@ Mention' helper chip on left, 'Comment' submit button on right
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Surface(
+                                onClick = {
+                                    val text = commentFieldValue.text
+                                    val cursor = commentFieldValue.selection.end.coerceIn(0, text.length)
+                                    val needsSpace = cursor > 0 && !text[cursor - 1].isWhitespace()
+                                    val prefix = if (needsSpace) " @" else "@"
+                                    val updatedText = buildString(text.length + prefix.length) {
+                                        append(text, 0, cursor)
+                                        append(prefix)
+                                        append(text, cursor, text.length)
+                                    }
+                                    val newCursor = cursor + prefix.length
+                                    commentFieldValue = TextFieldValue(
+                                        text = updatedText,
+                                        selection = TextRange(newCursor)
+                                    )
+                                    commentFocusRequester.requestFocus()
+                                },
+                                color = SurfaceCard,
+                                shape = RoundedCornerShape(10.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+                                modifier = Modifier.testTag("detail_insert_mention_button")
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.AlternateEmail,
+                                        contentDescription = "Mention someone",
+                                        tint = NeumorphicTeal,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "Mention",
+                                        color = TextPrimary,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+
+                            val canSubmitComment = commentFieldValue.text.trim().isNotEmpty() && !isPostingComment
+                            Button(
+                                onClick = {
+                                    val textToSubmit = commentFieldValue.text.trim()
+                                    if (textToSubmit.isNotEmpty() && !isPostingComment) {
+                                        isPostingComment = true
+                                        commentFieldValue = TextFieldValue("")
+                                        onAddComment(textToSubmit) {
+                                            isPostingComment = false
+                                        }
+                                    }
+                                },
+                                enabled = canSubmitComment,
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                    horizontal = 14.dp,
+                                    vertical = 7.dp
+                                ),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = NeumorphicTeal,
+                                    contentColor = Color.White,
+                                    disabledContainerColor = Color(0xFFE2E8F0),
+                                    disabledContentColor = Color(0xFF94A3B8)
+                                ),
+                                modifier = Modifier
+                                    .height(34.dp)
+                                    .testTag("detail_post_comment_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Send,
+                                    contentDescription = "Post comment",
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Comment",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Discussion Comments List (Newest First, Max 3 Initially + "More Comments" button)
+                val knownPeopleNames = remember(indexedMentionPeople) {
+                    indexedMentionPeople.map { it.displayName }
+                }
+
+                if (comments.isEmpty()) {
+                    Surface(
+                        color = Color(0xFFF8FAFC),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("detail_discussion_empty")
+                    ) {
+                        Text(
+                            text = if (isLoadingComments) "Loading discussion..." else "No comments yet. Start the discussion above.",
+                            color = NeumorphicTextSecondary,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                        )
+                    }
+                } else {
+                    val displayedComments = remember(comments, showAllComments) {
+                        if (showAllComments) comments else comments.take(3)
+                    }
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("detail_discussion_section")
+                    ) {
+                        displayedComments.forEach { comment ->
+                            DiscussionCommentCard(
+                                comment = comment,
+                                knownPeopleNames = knownPeopleNames
+                            )
+                        }
+
+                        if (!showAllComments && comments.size > 3) {
+                            OutlinedButton(
+                                onClick = { showAllComments = true },
+                                shape = RoundedCornerShape(12.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = Color(0xFFF8FAFC),
+                                    contentColor = NeumorphicTeal
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("detail_more_comments_button")
+                            ) {
+                                Text(
+                                    text = "More Comments (${comments.size - 3})",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
                                 )
                             }
                         }
@@ -914,8 +1547,12 @@ fun FigmaItemDetailView(
                             ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
+                                    AzureWorkItemTypeSymbol(
+                                        workItemType = matchedCandidate.workItemType,
+                                        iconSize = 15.dp
+                                    )
                                     Text(
                                         text = "#${matchedCandidate.id}",
                                         color = NeumorphicTeal,
@@ -923,7 +1560,7 @@ fun FigmaItemDetailView(
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        text = "· ${matchedCandidate.workItemType} · ${matchedCandidate.state}",
+                                        text = "· ${matchedCandidate.state}",
                                         color = NeumorphicTextSecondary,
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Medium
@@ -1179,8 +1816,11 @@ fun FigmaItemDetailView(
                 currentAssignee = selected
                 onUpdateWorkItem(
                     workItem.copy(
+                        title = currentTitle.trim().ifBlank { workItem.title },
                         state = currentState,
                         assignedToName = selected.takeUnless { it.equals("Unassigned", ignoreCase = true) },
+                        areaPath = currentAreaPath,
+                        iterationPath = currentIterationPath,
                         tags = currentTags,
                         description = currentDescription
                     )
@@ -1190,11 +1830,71 @@ fun FigmaItemDetailView(
         )
     }
 
+    if (showAreaPickerDialog) {
+        HierarchyTreePickerDialog(
+            title = "Select Area",
+            fieldLabel = "Area",
+            icon = Icons.Default.AccountTree,
+            availablePaths = availableAreas,
+            selectedPath = currentAreaPath,
+            fallbackRootProject = defaultRootPath,
+            allowAllOption = false,
+            testTagPrefix = "detail_area",
+            onSelectPath = { chosenArea ->
+                val resolved = normalizeHierarchyPathUI(chosenArea).ifBlank { defaultRootPath }
+                currentAreaPath = resolved
+                onUpdateWorkItem(
+                    workItem.copy(
+                        title = currentTitle.trim().ifBlank { workItem.title },
+                        state = currentState,
+                        assignedToName = currentAssignee.takeUnless { it.equals("Unassigned", ignoreCase = true) },
+                        areaPath = resolved,
+                        iterationPath = currentIterationPath,
+                        tags = currentTags,
+                        description = currentDescription
+                    )
+                )
+                showAreaPickerDialog = false
+            },
+            onDismiss = { showAreaPickerDialog = false }
+        )
+    }
+
+    if (showIterationPickerDialog) {
+        HierarchyTreePickerDialog(
+            title = "Select Iteration",
+            fieldLabel = "Iteration",
+            icon = Icons.Default.CalendarToday,
+            availablePaths = availableIterations,
+            selectedPath = currentIterationPath,
+            fallbackRootProject = defaultRootPath,
+            allowAllOption = false,
+            testTagPrefix = "detail_iteration",
+            onSelectPath = { chosenIteration ->
+                val resolved = normalizeHierarchyPathUI(chosenIteration).ifBlank { defaultRootPath }
+                currentIterationPath = resolved
+                onUpdateWorkItem(
+                    workItem.copy(
+                        title = currentTitle.trim().ifBlank { workItem.title },
+                        state = currentState,
+                        assignedToName = currentAssignee.takeUnless { it.equals("Unassigned", ignoreCase = true) },
+                        areaPath = currentAreaPath,
+                        iterationPath = resolved,
+                        tags = currentTags,
+                        description = currentDescription
+                    )
+                )
+                showIterationPickerDialog = false
+            },
+            onDismiss = { showIterationPickerDialog = false }
+        )
+    }
+
     if (showAddTagDialog) {
         TagSearchAndAddDialog(
             customTagInput = customTagInput,
             onCustomTagInputChange = { customTagInput = it },
-            fallbackRtlText = workItem.title,
+            fallbackRtlText = currentTitle.ifBlank { workItem.title },
             currentTags = currentTags,
             projectTagOptions = projectTagOptions,
             inputTestTag = "detail_new_tag_input",
@@ -1204,8 +1904,11 @@ fun FigmaItemDetailView(
                     currentTags = currentTags + tagOption
                     onUpdateWorkItem(
                         workItem.copy(
+                            title = currentTitle.trim().ifBlank { workItem.title },
                             state = currentState,
                             assignedToName = currentAssignee.takeUnless { it.equals("Unassigned", ignoreCase = true) },
+                            areaPath = currentAreaPath,
+                            iterationPath = currentIterationPath,
                             tags = currentTags,
                             description = currentDescription
                         )
@@ -1219,8 +1922,11 @@ fun FigmaItemDetailView(
                     currentTags = currentTags + canonical
                     onUpdateWorkItem(
                         workItem.copy(
+                            title = currentTitle.trim().ifBlank { workItem.title },
                             state = currentState,
                             assignedToName = currentAssignee.takeUnless { it.equals("Unassigned", ignoreCase = true) },
+                            areaPath = currentAreaPath,
+                            iterationPath = currentIterationPath,
                             tags = currentTags,
                             description = currentDescription
                         )
@@ -1289,22 +1995,13 @@ fun WorkItemCard(
                 Spacer(modifier = Modifier.width(10.dp))
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
-                    val typeColor = getAzureTypeColor(workItem.workItemType)
-                    Surface(
-                        color = typeColor.copy(alpha = 0.14f),
-                        shape = RoundedCornerShape(8.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, typeColor.copy(alpha = 0.35f))
-                    ) {
-                        Text(
-                            text = workItem.workItemType,
-                            color = Color(0xFF1E293B),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
-                        )
-                    }
+                    AzureWorkItemTypeSymbol(
+                        workItemType = workItem.workItemType,
+                        iconSize = 16.dp,
+                        modifier = Modifier.testTag("work_item_type_symbol_${workItem.id}")
+                    )
                     Text(
                         text = "#${workItem.id}",
                         color = NeumorphicTeal,
@@ -1395,6 +2092,7 @@ fun ChildWorkItemStatusRow(
     child: WorkItem,
     availableStates: List<String>,
     onStateChange: (String) -> Unit,
+    onRemoveChild: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var currentChildState by remember(child.id, child.state) {
@@ -1436,19 +2134,18 @@ fun ChildWorkItemStatusRow(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
+                    AzureWorkItemTypeSymbol(
+                        workItemType = child.workItemType,
+                        iconSize = 15.dp,
+                        modifier = Modifier.testTag("child_type_symbol_${child.id}")
+                    )
                     Text(
                         text = "#${child.id}",
                         color = NeumorphicTeal,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = child.workItemType,
-                        color = NeumorphicTextSecondary,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium
                     )
                 }
                 Spacer(modifier = Modifier.height(4.dp))
@@ -1473,95 +2170,121 @@ fun ChildWorkItemStatusRow(
 
             Spacer(modifier = Modifier.width(12.dp))
 
-            // Interactive status selector dropdown for the child work item
-            Box {
-                val stateColor = getAzureStateColor(currentChildState)
-                val stateBg = getAzureStateBadgeBg(currentChildState)
-                val stateText = getAzureStateBadgeText(currentChildState)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Interactive status selector dropdown for the child work item
+                Box {
+                    val stateColor = getAzureStateColor(currentChildState)
+                    val stateBg = getAzureStateBadgeBg(currentChildState)
+                    val stateText = getAzureStateBadgeText(currentChildState)
 
-                Surface(
-                    onClick = { stateMenuExpanded = true },
-                    color = stateBg,
-                    shape = RoundedCornerShape(14.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, stateColor.copy(alpha = 0.45f)),
-                    modifier = Modifier.testTag("child_state_selector_${child.id}")
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    Surface(
+                        onClick = { stateMenuExpanded = true },
+                        color = stateBg,
+                        shape = RoundedCornerShape(14.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, stateColor.copy(alpha = 0.45f)),
+                        modifier = Modifier.testTag("child_state_selector_${child.id}")
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(7.dp)
-                                .clip(CircleShape)
-                                .background(stateColor)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = currentChildState,
-                            color = stateText,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(
-                            imageVector = Icons.Default.KeyboardArrowDown,
-                            contentDescription = "Change child status",
-                            tint = stateText,
-                            modifier = Modifier.size(15.dp)
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(stateColor)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = currentChildState,
+                                color = stateText,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Default.KeyboardArrowDown,
+                                contentDescription = "Change child status",
+                                tint = stateText,
+                                modifier = Modifier.size(15.dp)
+                            )
+                        }
+                    }
+
+                    DropdownMenu(
+                        expanded = stateMenuExpanded,
+                        onDismissRequest = { stateMenuExpanded = false },
+                        containerColor = SurfaceCard,
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder)
+                    ) {
+                        stateOptions.forEach { stateOption ->
+                            val isSelected = stateOption.equals(currentChildState, ignoreCase = true)
+                            val optionColor = getAzureStateColor(stateOption)
+                            val optionReadableText = getAzureStateBadgeText(stateOption)
+                            DropdownMenuItem(
+                                text = {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(8.dp)
+                                                    .clip(CircleShape)
+                                                    .background(optionColor)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = stateOption,
+                                                color = if (isSelected) optionReadableText else TextPrimary,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                                fontSize = 13.sp
+                                            )
+                                        }
+                                        if (isSelected) {
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Icon(
+                                                imageVector = Icons.Default.Check,
+                                                contentDescription = null,
+                                                tint = optionReadableText,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    stateMenuExpanded = false
+                                    currentChildState = stateOption
+                                    onStateChange(stateOption)
+                                }
+                            )
+                        }
                     }
                 }
 
-                DropdownMenu(
-                    expanded = stateMenuExpanded,
-                    onDismissRequest = { stateMenuExpanded = false },
-                    containerColor = SurfaceCard,
-                    shape = RoundedCornerShape(12.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder)
-                ) {
-                    stateOptions.forEach { stateOption ->
-                        val isSelected = stateOption.equals(currentChildState, ignoreCase = true)
-                        val optionColor = getAzureStateColor(stateOption)
-                        val optionReadableText = getAzureStateBadgeText(stateOption)
-                        DropdownMenuItem(
-                            text = {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(8.dp)
-                                                .clip(CircleShape)
-                                                .background(optionColor)
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(
-                                            text = stateOption,
-                                            color = if (isSelected) optionReadableText else TextPrimary,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                            fontSize = 13.sp
-                                        )
-                                    }
-                                    if (isSelected) {
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Icon(
-                                            imageVector = Icons.Default.Check,
-                                            contentDescription = null,
-                                            tint = optionReadableText,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    }
-                                }
-                            },
-                            onClick = {
-                                stateMenuExpanded = false
-                                currentChildState = stateOption
-                                onStateChange(stateOption)
-                            }
+                // Simple 'X' button to unlink/remove child from its parent
+                if (onRemoveChild != null) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFFEEF2F8))
+                            .border(1.dp, Color(0xFFCBD5E1), CircleShape)
+                            .clickable { onRemoveChild() }
+                            .testTag("remove_child_button_${child.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Remove child #${child.id}",
+                            tint = Color(0xFF475569),
+                            modifier = Modifier.size(15.dp)
                         )
                     }
                 }
@@ -1578,6 +2301,8 @@ fun WorkItemDetailSheet(
     availableStates: List<String> = emptyList(),
     availableAssignees: List<String> = emptyList(),
     availableTags: List<String> = emptyList(),
+    availableAreas: List<String> = emptyList(),
+    availableIterations: List<String> = emptyList(),
     allWorkItems: List<WorkItem> = emptyList(),
     childWorkItems: List<WorkItem> = emptyList(),
     allowedChildTypes: List<String> = emptyList(),
@@ -1585,6 +2310,10 @@ fun WorkItemDetailSheet(
     getStatesForChildType: (String) -> List<String> = { emptyList() },
     onAddChildWorkItem: (title: String, childType: String, initialState: String) -> Unit = { _, _, _ -> },
     onAddExistingChildWorkItem: (childId: Int, onResult: (Result<WorkItem>) -> Unit) -> Unit = { _, _ -> },
+    onRemoveChildWorkItem: (childId: Int) -> Unit = {},
+    comments: List<WorkItemComment> = emptyList(),
+    isLoadingComments: Boolean = false,
+    onAddComment: (commentText: String, onResult: (Result<WorkItemComment>) -> Unit) -> Unit = { _, _ -> },
     onUpdateWorkItem: (WorkItem) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -1600,6 +2329,8 @@ fun WorkItemDetailSheet(
             availableStates = availableStates,
             availableAssignees = availableAssignees,
             availableTags = availableTags,
+            availableAreas = availableAreas,
+            availableIterations = availableIterations,
             allWorkItems = allWorkItems,
             childWorkItems = childWorkItems,
             allowedChildTypes = allowedChildTypes,
@@ -1607,8 +2338,261 @@ fun WorkItemDetailSheet(
             getStatesForChildType = getStatesForChildType,
             onAddChildWorkItem = onAddChildWorkItem,
             onAddExistingChildWorkItem = onAddExistingChildWorkItem,
+            onRemoveChildWorkItem = onRemoveChildWorkItem,
+            comments = comments,
+            isLoadingComments = isLoadingComments,
+            onAddComment = onAddComment,
             onUpdateWorkItem = onUpdateWorkItem
         )
+    }
+}
+
+private data class MentionCandidate(
+    val displayName: String,
+    val email: String?,
+    val lowerName: String,
+    val lowerEmail: String?,
+    val initial: String
+)
+
+private data class MentionToken(
+    val startIndex: Int,
+    val endIndex: Int,
+    val query: String
+)
+
+private fun buildMentionPeopleIndex(
+    availableAssignees: List<String>,
+    allWorkItems: List<WorkItem>,
+    comments: List<WorkItemComment>
+): List<MentionCandidate> {
+    val byLowerName = LinkedHashMap<String, Pair<String, String?>>()
+
+    fun register(rawName: String?, rawEmail: String?) {
+        val cleanName = rawName?.trim().orEmpty()
+        if (cleanName.isBlank() ||
+            cleanName.equals("Unassigned", ignoreCase = true) ||
+            cleanName.equals("All", ignoreCase = true) ||
+            cleanName.equals("You", ignoreCase = true)
+        ) {
+            return
+        }
+        val key = cleanName.lowercase()
+        val cleanEmail = rawEmail?.trim()?.takeIf { it.isNotBlank() }
+        val existing = byLowerName[key]
+        if (existing == null || (existing.second == null && cleanEmail != null)) {
+            byLowerName[key] = cleanName to cleanEmail
+        }
+    }
+
+    for (name in availableAssignees) {
+        register(name, null)
+    }
+    for (item in allWorkItems) {
+        register(item.assignedToName, item.assignedToEmail)
+    }
+    for (comment in comments) {
+        register(comment.authorName, comment.authorEmail)
+    }
+
+    return byLowerName.values
+        .map { (name, email) ->
+            val firstChar = name.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "?"
+            MentionCandidate(
+                displayName = name,
+                email = email,
+                lowerName = name.lowercase(),
+                lowerEmail = email?.lowercase(),
+                initial = firstChar
+            )
+        }
+        .sortedBy { it.lowerName }
+}
+
+private fun extractActiveMentionToken(textFieldValue: TextFieldValue): MentionToken? {
+    val text = textFieldValue.text
+    if (text.isEmpty()) return null
+    val cursor = textFieldValue.selection.end.coerceIn(0, text.length)
+    if (cursor == 0) return null
+
+    var idx = cursor - 1
+    while (idx >= 0) {
+        val ch = text[idx]
+        if (ch == '\n' || ch == '\r') {
+            return null
+        }
+        if (ch == '@') {
+            val validBoundary = idx == 0 ||
+                text[idx - 1].isWhitespace() ||
+                text[idx - 1] in listOf('(', '[', '{', ',', ';', ':', '-', '/')
+            if (!validBoundary) return null
+
+            val query = text.substring(idx + 1, cursor)
+            // Stop treating as an active mention if user typed two consecutive spaces or finished a long phrase
+            if (query.contains("  ") || query.length > 35) return null
+            return MentionToken(
+                startIndex = idx,
+                endIndex = cursor,
+                query = query
+            )
+        }
+        idx--
+    }
+    return null
+}
+
+private fun formatCommentWithMentions(
+    text: String,
+    knownPeopleNames: List<String>
+): AnnotatedString {
+    if (!text.contains('@')) {
+        return AnnotatedString(text)
+    }
+    return buildAnnotatedString {
+        append(text)
+        val sortedNames = knownPeopleNames.sortedByDescending { it.length }
+        var searchIndex = 0
+        while (searchIndex < text.length) {
+            val atIndex = text.indexOf('@', searchIndex)
+            if (atIndex < 0) break
+
+            val afterAt = text.substring(atIndex + 1)
+            val matchedKnownName = sortedNames.firstOrNull { candidateName ->
+                afterAt.startsWith(candidateName, ignoreCase = true) &&
+                    (afterAt.length == candidateName.length ||
+                        !afterAt[candidateName.length].isLetterOrDigit())
+            }
+
+            if (matchedKnownName != null) {
+                val endIdx = atIndex + 1 + matchedKnownName.length
+                addStyle(
+                    style = SpanStyle(
+                        color = NeumorphicTeal,
+                        fontWeight = FontWeight.Bold,
+                        background = NeumorphicTeal.copy(alpha = 0.12f)
+                    ),
+                    start = atIndex,
+                    end = endIdx
+                )
+                searchIndex = endIdx
+            } else {
+                // Highlight single-token @handle if not in knownPeopleNames
+                var tokenEnd = atIndex + 1
+                while (tokenEnd < text.length &&
+                    (text[tokenEnd].isLetterOrDigit() || text[tokenEnd] in listOf('_', '.', '-'))
+                ) {
+                    tokenEnd++
+                }
+                if (tokenEnd > atIndex + 1) {
+                    addStyle(
+                        style = SpanStyle(
+                            color = NeumorphicTeal,
+                            fontWeight = FontWeight.Bold,
+                            background = NeumorphicTeal.copy(alpha = 0.12f)
+                        ),
+                        start = atIndex,
+                        end = tokenEnd
+                    )
+                    searchIndex = tokenEnd
+                } else {
+                    searchIndex = atIndex + 1
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiscussionCommentCard(
+    comment: WorkItemComment,
+    knownPeopleNames: List<String>,
+    modifier: Modifier = Modifier
+) {
+    val isRtl = isAlmostPersian(comment.text)
+    val initial = remember(comment.authorName) {
+        comment.authorName.trim().firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "U"
+    }
+    val annotatedBody = remember(comment.text, knownPeopleNames) {
+        formatCommentWithMentions(comment.text, knownPeopleNames)
+    }
+
+    Surface(
+        color = Color(0xFFF8FAFC),
+        shape = RoundedCornerShape(14.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("discussion_comment_card_${comment.id}")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .background(NeumorphicTeal.copy(alpha = 0.14f))
+                    ) {
+                        Text(
+                            text = initial,
+                            color = NeumorphicTeal,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = comment.authorName,
+                        color = TextPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                Text(
+                    text = comment.formattedDate,
+                    color = NeumorphicTextSecondary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            CompositionLocalProvider(
+                LocalLayoutDirection provides if (isRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+            ) {
+                Text(
+                    text = annotatedBody,
+                    color = TextPrimary,
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    textAlign = TextAlign.Start,
+                    style = TextStyle(
+                        textDirection = if (isRtl) TextDirection.Rtl else TextDirection.Ltr
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("discussion_comment_text_${comment.id}")
+                )
+            }
+        }
     }
 }
 
@@ -1620,6 +2604,10 @@ fun FigmaCreateWorkItemView(
     initialType: String?,
     availableAssignees: List<String>,
     availableTags: List<String>,
+    availableAreas: List<String> = emptyList(),
+    availableIterations: List<String> = emptyList(),
+    initialAreaPath: String? = null,
+    initialIterationPath: String? = null,
     allWorkItems: List<WorkItem>,
     getStatesForType: (String?, String) -> List<String>,
     getAllowedChildTypesForType: (String?, String) -> List<String>,
@@ -1632,6 +2620,8 @@ fun FigmaCreateWorkItemView(
         assignedToName: String?,
         description: String?,
         tags: List<String>,
+        areaPath: String?,
+        iterationPath: String?,
         onResult: (Result<WorkItem>) -> Unit
     ) -> Unit,
     onAddChildWorkItem: (parent: WorkItem, title: String, childType: String, initialState: String) -> Unit,
@@ -1673,6 +2663,19 @@ fun FigmaCreateWorkItemView(
     var isSaving by remember { mutableStateOf(false) }
 
     var currentAssignee by remember { mutableStateOf("Unassigned") }
+    val defaultRootPath = project?.trim()?.takeIf { it.isNotBlank() }
+        ?: availableAreas.firstOrNull()
+        ?: "Project"
+    var currentAreaPath by remember(project) {
+        mutableStateOf(
+            normalizeHierarchyPathUI(initialAreaPath).ifBlank { defaultRootPath }
+        )
+    }
+    var currentIterationPath by remember(project) {
+        mutableStateOf(
+            normalizeHierarchyPathUI(initialIterationPath).ifBlank { defaultRootPath }
+        )
+    }
     var currentTags by remember { mutableStateOf<List<String>>(emptyList()) }
     var currentDescription by remember { mutableStateOf("") }
 
@@ -1698,6 +2701,8 @@ fun FigmaCreateWorkItemView(
 
     var stateMenuExpanded by remember { mutableStateOf(false) }
     var assigneeMenuExpanded by remember { mutableStateOf(false) }
+    var showAreaPickerDialog by remember { mutableStateOf(false) }
+    var showIterationPickerDialog by remember { mutableStateOf(false) }
     var tagMenuExpanded by remember { mutableStateOf(false) }
     var showAddTagDialog by remember { mutableStateOf(false) }
     var customTagInput by remember { mutableStateOf("") }
@@ -1742,6 +2747,8 @@ fun FigmaCreateWorkItemView(
         updatedTitle: String = titleInput,
         updatedState: String = currentState,
         updatedAssignee: String = currentAssignee,
+        updatedAreaPath: String = currentAreaPath,
+        updatedIterationPath: String = currentIterationPath,
         updatedTags: List<String> = currentTags,
         updatedDescription: String = currentDescription
     ) {
@@ -1750,6 +2757,8 @@ fun FigmaCreateWorkItemView(
             title = updatedTitle.trim().ifBlank { existing.title },
             state = updatedState,
             assignedToName = updatedAssignee.takeUnless { it.equals("Unassigned", ignoreCase = true) },
+            areaPath = updatedAreaPath,
+            iterationPath = updatedIterationPath,
             tags = updatedTags,
             description = updatedDescription
         )
@@ -1813,7 +2822,9 @@ fun FigmaCreateWorkItemView(
                             currentState,
                             currentAssignee.takeUnless { it.equals("Unassigned", ignoreCase = true) },
                             currentDescription,
-                            currentTags
+                            currentTags,
+                            currentAreaPath,
+                            currentIterationPath
                         ) { result ->
                             isSaving = false
                             result.fold(
@@ -2168,7 +3179,18 @@ fun FigmaCreateWorkItemView(
 
                 Spacer(modifier = Modifier.height(18.dp))
 
-                // 4. Description Section (matching Detail page)
+                // 4. Area & Iteration Section (placed before Description section)
+                ClassificationHierarchySection(
+                    areaPath = currentAreaPath,
+                    iterationPath = currentIterationPath,
+                    onAreaClick = { showAreaPickerDialog = true },
+                    onIterationClick = { showIterationPickerDialog = true },
+                    testTagPrefix = "create"
+                )
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // 5. Description Section (matching Detail page)
                 Text(
                     text = "Description",
                     color = TextPrimary,
@@ -2570,7 +3592,9 @@ fun FigmaCreateWorkItemView(
                                     currentState,
                                     currentAssignee.takeUnless { it.equals("Unassigned", ignoreCase = true) },
                                     currentDescription,
-                                    currentTags
+                                    currentTags,
+                                    currentAreaPath,
+                                    currentIterationPath
                                 ) { result ->
                                     isSaving = false
                                     result.fold(
@@ -2617,6 +3641,46 @@ fun FigmaCreateWorkItemView(
                 pushUpdateIfAlreadySaved(updatedAssignee = selected)
             },
             onDismiss = { assigneeMenuExpanded = false }
+        )
+    }
+
+    if (showAreaPickerDialog) {
+        HierarchyTreePickerDialog(
+            title = "Select Area",
+            fieldLabel = "Area",
+            icon = Icons.Default.AccountTree,
+            availablePaths = availableAreas,
+            selectedPath = currentAreaPath,
+            fallbackRootProject = defaultRootPath,
+            allowAllOption = false,
+            testTagPrefix = "create_area",
+            onSelectPath = { chosenArea ->
+                val resolved = normalizeHierarchyPathUI(chosenArea).ifBlank { defaultRootPath }
+                currentAreaPath = resolved
+                pushUpdateIfAlreadySaved(updatedAreaPath = resolved)
+                showAreaPickerDialog = false
+            },
+            onDismiss = { showAreaPickerDialog = false }
+        )
+    }
+
+    if (showIterationPickerDialog) {
+        HierarchyTreePickerDialog(
+            title = "Select Iteration",
+            fieldLabel = "Iteration",
+            icon = Icons.Default.CalendarToday,
+            availablePaths = availableIterations,
+            selectedPath = currentIterationPath,
+            fallbackRootProject = defaultRootPath,
+            allowAllOption = false,
+            testTagPrefix = "create_iteration",
+            onSelectPath = { chosenIteration ->
+                val resolved = normalizeHierarchyPathUI(chosenIteration).ifBlank { defaultRootPath }
+                currentIterationPath = resolved
+                pushUpdateIfAlreadySaved(updatedIterationPath = resolved)
+                showIterationPickerDialog = false
+            },
+            onDismiss = { showIterationPickerDialog = false }
         )
     }
 
@@ -3121,6 +4185,10 @@ fun WorkItemCreateSheet(
     initialType: String?,
     availableAssignees: List<String>,
     availableTags: List<String>,
+    availableAreas: List<String> = emptyList(),
+    availableIterations: List<String> = emptyList(),
+    initialAreaPath: String? = null,
+    initialIterationPath: String? = null,
     allWorkItems: List<WorkItem>,
     getStatesForType: (String?, String) -> List<String>,
     getAllowedChildTypesForType: (String?, String) -> List<String>,
@@ -3133,6 +4201,8 @@ fun WorkItemCreateSheet(
         assignedToName: String?,
         description: String?,
         tags: List<String>,
+        areaPath: String?,
+        iterationPath: String?,
         onResult: (Result<WorkItem>) -> Unit
     ) -> Unit,
     onAddChildWorkItem: (parent: WorkItem, title: String, childType: String, initialState: String) -> Unit,
@@ -3151,6 +4221,10 @@ fun WorkItemCreateSheet(
             initialType = initialType,
             availableAssignees = availableAssignees,
             availableTags = availableTags,
+            availableAreas = availableAreas,
+            availableIterations = availableIterations,
+            initialAreaPath = initialAreaPath,
+            initialIterationPath = initialIterationPath,
             allWorkItems = allWorkItems,
             getStatesForType = getStatesForType,
             getAllowedChildTypesForType = getAllowedChildTypesForType,
@@ -3162,4 +4236,799 @@ fun WorkItemCreateSheet(
         )
     }
 }
+
+fun normalizeHierarchyPathUI(rawPath: String?): String {
+    if (rawPath.isNullOrBlank()) return ""
+    return rawPath
+        .replace('/', '\\')
+        .split('\\')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .joinToString("\\")
+}
+
+fun extractHierarchyLeafName(rawPath: String?): String {
+    val norm = normalizeHierarchyPathUI(rawPath)
+    if (norm.isEmpty()) return "Root"
+    return norm.substringAfterLast('\\')
+}
+
+fun formatHierarchyBreadcrumb(rawPath: String?): String {
+    val norm = normalizeHierarchyPathUI(rawPath)
+    if (norm.isEmpty()) return ""
+    return norm.split('\\').joinToString(" › ")
+}
+
+fun extractParentBreadcrumb(rawPath: String?): String? {
+    val norm = normalizeHierarchyPathUI(rawPath)
+    if (!norm.contains('\\')) return null
+    return norm.substringBeforeLast('\\').split('\\').joinToString(" › ")
+}
+
+@Composable
+fun ClassificationHierarchySection(
+    areaPath: String,
+    iterationPath: String,
+    onAreaClick: () -> Unit,
+    onIterationClick: () -> Unit,
+    testTagPrefix: String,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("${testTagPrefix}_classification_section")
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = "Area & Iteration",
+                color = TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = "Tap to browse tree",
+                color = NeumorphicTextSecondary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            ClassificationNodeCard(
+                label = "Area",
+                icon = Icons.Default.AccountTree,
+                fullPath = areaPath,
+                onClick = onAreaClick,
+                testTag = "${testTagPrefix}_area_selector",
+                modifier = Modifier.weight(1f)
+            )
+
+            ClassificationNodeCard(
+                label = "Iteration",
+                icon = Icons.Default.CalendarToday,
+                fullPath = iterationPath,
+                onClick = onIterationClick,
+                testTag = "${testTagPrefix}_iteration_selector",
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ClassificationNodeCard(
+    label: String,
+    icon: ImageVector,
+    fullPath: String,
+    onClick: () -> Unit,
+    testTag: String,
+    modifier: Modifier = Modifier
+) {
+    val leafName = remember(fullPath) { extractHierarchyLeafName(fullPath) }
+    val parentBreadcrumb = remember(fullPath) { extractParentBreadcrumb(fullPath) }
+    val fullBreadcrumb = remember(fullPath) { formatHierarchyBreadcrumb(fullPath) }
+    val isRtl = isAlmostPersian(fullPath)
+
+    Surface(
+        onClick = onClick,
+        color = Color(0xFFF8FAFC),
+        shape = RoundedCornerShape(14.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+        modifier = modifier.testTag(testTag)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(20.dp)
+                            .clip(CircleShape)
+                            .background(NeumorphicTeal.copy(alpha = 0.14f))
+                    ) {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = label,
+                            tint = NeumorphicTeal,
+                            modifier = Modifier.size(12.dp)
+                        )
+                    }
+                    Text(
+                        text = label,
+                        color = NeumorphicTextSecondary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Icon(
+                    imageVector = Icons.Default.KeyboardArrowDown,
+                    contentDescription = "Select $label",
+                    tint = NeumorphicTextSecondary,
+                    modifier = Modifier.size(15.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            CompositionLocalProvider(
+                LocalLayoutDirection provides if (isRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+            ) {
+                Text(
+                    text = leafName,
+                    color = TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Start,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = parentBreadcrumb ?: fullBreadcrumb.ifBlank { "Root" },
+                    color = if (parentBreadcrumb != null) NeumorphicTeal else NeumorphicTextSecondary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Start,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+    }
+}
+
+data class HierarchyTreeNode(
+    val fullPath: String,
+    val name: String,
+    val depth: Int,
+    val parentPath: String?,
+    val children: List<HierarchyTreeNode>
+)
+
+private fun buildHierarchyTreeNodes(
+    availablePaths: List<String>,
+    selectedPath: String?,
+    fallbackRootProject: String?
+): List<HierarchyTreeNode> {
+    val canonicalByLower = LinkedHashMap<String, String>()
+
+    fun addWithAncestors(raw: String?) {
+        val norm = normalizeHierarchyPathUI(raw)
+        if (norm.isEmpty()) return
+        val parts = norm.split('\\')
+        var prefix = ""
+        for (part in parts) {
+            prefix = if (prefix.isEmpty()) part else "$prefix\\$part"
+            val key = prefix.lowercase()
+            if (!canonicalByLower.containsKey(key)) {
+                canonicalByLower[key] = prefix
+            }
+        }
+    }
+
+    addWithAncestors(fallbackRootProject)
+    availablePaths.forEach { addWithAncestors(it) }
+    addWithAncestors(selectedPath)
+
+    if (canonicalByLower.isEmpty()) {
+        addWithAncestors("Project")
+    }
+
+    val allPaths = canonicalByLower.values.toList()
+    val childrenByParentLower = mutableMapOf<String?, MutableList<String>>()
+
+    for (path in allPaths) {
+        val parentLower = if (path.contains('\\')) {
+            path.substringBeforeLast('\\').lowercase()
+        } else {
+            null
+        }
+        val effectiveParentLower = if (parentLower != null && canonicalByLower.containsKey(parentLower)) {
+            parentLower
+        } else {
+            null
+        }
+        childrenByParentLower.getOrPut(effectiveParentLower) { mutableListOf() }.add(path)
+    }
+
+    fun buildNode(path: String, depth: Int): HierarchyTreeNode {
+        val leafName = path.substringAfterLast('\\')
+        val parentPath = if (path.contains('\\')) path.substringBeforeLast('\\') else null
+        val childPaths = childrenByParentLower[path.lowercase()]
+            .orEmpty()
+            .sortedBy { it.substringAfterLast('\\').lowercase() }
+        return HierarchyTreeNode(
+            fullPath = path,
+            name = leafName,
+            depth = depth,
+            parentPath = parentPath,
+            children = childPaths.map { childPath -> buildNode(childPath, depth + 1) }
+        )
+    }
+
+    val rootPaths = childrenByParentLower[null]
+        .orEmpty()
+        .sortedWith { a, b ->
+            val cleanRoot = normalizeHierarchyPathUI(fallbackRootProject)
+            val aIsProj = cleanRoot.isNotEmpty() && a.equals(cleanRoot, ignoreCase = true)
+            val bIsProj = cleanRoot.isNotEmpty() && b.equals(cleanRoot, ignoreCase = true)
+            when {
+                aIsProj && !bIsProj -> -1
+                !aIsProj && bIsProj -> 1
+                else -> a.lowercase().compareTo(b.lowercase())
+            }
+        }
+
+    return rootPaths.map { buildNode(it, 0) }
+}
+
+private fun computeInitialExpandedLowerPaths(
+    roots: List<HierarchyTreeNode>,
+    selectedPath: String?
+): Set<String> {
+    val expanded = mutableSetOf<String>()
+    // Expand root level nodes by default
+    for (root in roots) {
+        expanded.add(root.fullPath.lowercase())
+    }
+    // Expand all ancestors of the currently selected path
+    val normSelected = normalizeHierarchyPathUI(selectedPath)
+    if (normSelected.isNotEmpty()) {
+        val parts = normSelected.split('\\')
+        var prefix = ""
+        for (i in 0 until parts.size) {
+            prefix = if (prefix.isEmpty()) parts[i] else "$prefix\\${parts[i]}"
+            expanded.add(prefix.lowercase())
+        }
+    }
+    return expanded
+}
+
+private fun collectAllExpandableLowerPaths(nodes: List<HierarchyTreeNode>): Set<String> {
+    val result = mutableSetOf<String>()
+    fun walk(node: HierarchyTreeNode) {
+        if (node.children.isNotEmpty()) {
+            result.add(node.fullPath.lowercase())
+            node.children.forEach { walk(it) }
+        }
+    }
+    nodes.forEach { walk(it) }
+    return result
+}
+
+@Composable
+fun HierarchyTreePickerDialog(
+    title: String,
+    fieldLabel: String,
+    icon: ImageVector,
+    availablePaths: List<String>,
+    selectedPath: String?,
+    fallbackRootProject: String?,
+    allowAllOption: Boolean,
+    testTagPrefix: String,
+    onSelectPath: (String?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var searchQuery by remember { mutableStateOf("") }
+    val trimmedQuery = searchQuery.trim()
+    val isQueryRtl = isAlmostPersian(trimmedQuery)
+
+    val rootNodes = remember(availablePaths, selectedPath, fallbackRootProject) {
+        buildHierarchyTreeNodes(
+            availablePaths = availablePaths,
+            selectedPath = selectedPath,
+            fallbackRootProject = fallbackRootProject
+        )
+    }
+
+    val allExpandableLower = remember(rootNodes) {
+        collectAllExpandableLowerPaths(rootNodes)
+    }
+
+    var expandedLowerPaths by remember(rootNodes, selectedPath) {
+        mutableStateOf(computeInitialExpandedLowerPaths(rootNodes, selectedPath))
+    }
+
+    // Flatten visible tree rows based on search query or expanded state
+    val visibleTreeNodes = remember(rootNodes, expandedLowerPaths, trimmedQuery) {
+        val lowerQuery = trimmedQuery.lowercase()
+        val matchedAndAncestorsLower = mutableSetOf<String>()
+
+        if (lowerQuery.isNotEmpty()) {
+            fun checkMatch(node: HierarchyTreeNode): Boolean {
+                val selfMatches = node.name.lowercase().contains(lowerQuery) ||
+                    node.fullPath.lowercase().contains(lowerQuery)
+                var anyChildMatches = false
+                for (child in node.children) {
+                    if (checkMatch(child)) {
+                        anyChildMatches = true
+                    }
+                }
+                if (selfMatches || anyChildMatches) {
+                    matchedAndAncestorsLower.add(node.fullPath.lowercase())
+                }
+                return selfMatches || anyChildMatches
+            }
+            rootNodes.forEach { checkMatch(it) }
+        }
+
+        val flattened = mutableListOf<HierarchyTreeNode>()
+        fun traverse(node: HierarchyTreeNode) {
+            val lowerPath = node.fullPath.lowercase()
+            if (lowerQuery.isNotEmpty() && lowerPath !in matchedAndAncestorsLower) {
+                return
+            }
+            flattened.add(node)
+            val isExpanded = if (lowerQuery.isNotEmpty()) {
+                true
+            } else {
+                lowerPath in expandedLowerPaths
+            }
+            if (isExpanded) {
+                node.children.forEach { traverse(it) }
+            }
+        }
+        rootNodes.forEach { traverse(it) }
+        flattened
+    }
+
+    val normSelected = remember(selectedPath) { normalizeHierarchyPathUI(selectedPath) }
+    val isAllSelected = allowAllOption && normSelected.isEmpty()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .background(NeumorphicTeal.copy(alpha = 0.14f))
+                    ) {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = null,
+                            tint = NeumorphicTeal,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    Text(
+                        text = title,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                }
+
+                if (allExpandableLower.isNotEmpty() && trimmedQuery.isEmpty()) {
+                    val allExpanded = expandedLowerPaths.containsAll(allExpandableLower)
+                    TextButton(
+                        onClick = {
+                            expandedLowerPaths = if (allExpanded) {
+                                emptySet()
+                            } else {
+                                allExpandableLower
+                            }
+                        },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        modifier = Modifier.testTag("${testTagPrefix}_expand_collapse_all_button")
+                    ) {
+                        Text(
+                            text = if (allExpanded) "Collapse All" else "Expand All",
+                            color = NeumorphicTeal,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                // Path Preview Banner
+                Surface(
+                    color = NeumorphicTeal.copy(alpha = 0.08f),
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, NeumorphicTeal.copy(alpha = 0.3f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("${testTagPrefix}_path_preview")
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "Selected $fieldLabel Path",
+                                color = NeumorphicTeal,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (allowAllOption && normSelected.isNotEmpty()) {
+                                Text(
+                                    text = "Includes sub-paths",
+                                    color = NeumorphicTextSecondary,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(2.dp))
+                        val previewText = if (isAllSelected) {
+                            "All ${fieldLabel}s"
+                        } else {
+                            formatHierarchyBreadcrumb(normSelected).ifBlank { "Root" }
+                        }
+                        Text(
+                            text = previewText,
+                            color = TextPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                // Search Bar
+                CompositionLocalProvider(
+                    LocalLayoutDirection provides if (isQueryRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+                ) {
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        placeholder = {
+                            Text(
+                                text = "Search ${fieldLabel.lowercase()} hierarchy...",
+                                color = NeumorphicTextSecondary,
+                                fontSize = 13.sp,
+                                textAlign = if (isQueryRtl) TextAlign.Right else TextAlign.Left,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = null,
+                                tint = NeumorphicTeal,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        trailingIcon = if (searchQuery.isNotEmpty()) {
+                            {
+                                IconButton(onClick = { searchQuery = "" }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Clear,
+                                        contentDescription = "Clear search",
+                                        tint = NeumorphicTextSecondary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        } else null,
+                        textStyle = TextStyle(
+                            color = TextPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            textAlign = if (isQueryRtl) TextAlign.Right else TextAlign.Left,
+                            textDirection = if (isQueryRtl) TextDirection.Rtl else TextDirection.Ltr
+                        ),
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = NeumorphicTeal,
+                            focusedBorderColor = NeumorphicTeal,
+                            unfocusedBorderColor = SurfaceBorder,
+                            focusedContainerColor = SurfaceCard,
+                            unfocusedContainerColor = SurfaceCard
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("${testTagPrefix}_tree_search_input")
+                    )
+                }
+
+                // Optional "All Areas" / "All Iterations" option for Home filter
+                if (allowAllOption) {
+                    Surface(
+                        onClick = {
+                            onSelectPath(null)
+                        },
+                        color = if (isAllSelected) NeumorphicTeal.copy(alpha = 0.12f) else Color(0xFFF8FAFC),
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (isAllSelected) NeumorphicTeal else SurfaceBorder
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("${testTagPrefix}_option_all")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 9.dp)
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "All ${fieldLabel}s",
+                                    color = if (isAllSelected) NeumorphicTeal else TextPrimary,
+                                    fontWeight = if (isAllSelected) FontWeight.Bold else FontWeight.Medium,
+                                    fontSize = 13.sp
+                                )
+                                Text(
+                                    text = "Show work items across all ${fieldLabel.lowercase()} paths",
+                                    color = NeumorphicTextSecondary,
+                                    fontSize = 11.sp
+                                )
+                            }
+                            if (isAllSelected) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = null,
+                                    tint = NeumorphicTeal,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = SurfaceBorder, thickness = 1.dp)
+                }
+
+                // Expandable Indented Hierarchy Tree List
+                if (visibleTreeNodes.isEmpty()) {
+                    Text(
+                        text = "No matching ${fieldLabel.lowercase()} paths found.",
+                        color = NeumorphicTextSecondary,
+                        fontSize = 12.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp)
+                            .testTag("${testTagPrefix}_no_matches")
+                    )
+                } else {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(5.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 280.dp)
+                            .verticalScroll(rememberScrollState())
+                            .testTag("${testTagPrefix}_tree_list")
+                    ) {
+                        visibleTreeNodes.forEach { node ->
+                            val isNodeSelected = !isAllSelected &&
+                                normSelected.equals(node.fullPath, ignoreCase = true)
+                            val isDescendantSelected = !isAllSelected &&
+                                !isNodeSelected &&
+                                normSelected.startsWith("${node.fullPath}\\", ignoreCase = true)
+                            val hasChildren = node.children.isNotEmpty()
+                            val isExpanded = trimmedQuery.isNotEmpty() ||
+                                node.fullPath.lowercase() in expandedLowerPaths
+                            val indentDp = (node.depth.coerceAtMost(6) * 18).dp
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = indentDp)
+                            ) {
+                                Surface(
+                                    onClick = {
+                                        onSelectPath(node.fullPath)
+                                    },
+                                    color = when {
+                                        isNodeSelected -> NeumorphicTeal.copy(alpha = 0.14f)
+                                        isDescendantSelected -> NeumorphicTeal.copy(alpha = 0.05f)
+                                        else -> Color(0xFFF8FAFC)
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = androidx.compose.foundation.BorderStroke(
+                                        width = if (isNodeSelected) 1.5.dp else 1.dp,
+                                        color = when {
+                                            isNodeSelected -> NeumorphicTeal
+                                            isDescendantSelected -> NeumorphicTeal.copy(alpha = 0.4f)
+                                            else -> SurfaceBorder
+                                        }
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("${testTagPrefix}_node_${node.fullPath}")
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(start = 6.dp, end = 10.dp, top = 7.dp, bottom = 7.dp)
+                                    ) {
+                                        if (hasChildren) {
+                                            Box(
+                                                contentAlignment = Alignment.Center,
+                                                modifier = Modifier
+                                                    .size(26.dp)
+                                                    .clip(CircleShape)
+                                                    .clickable {
+                                                        val key = node.fullPath.lowercase()
+                                                        expandedLowerPaths = if (key in expandedLowerPaths) {
+                                                            expandedLowerPaths - key
+                                                        } else {
+                                                            expandedLowerPaths + key
+                                                        }
+                                                    }
+                                                    .testTag("${testTagPrefix}_toggle_${node.fullPath}")
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (isExpanded) {
+                                                        Icons.Default.KeyboardArrowDown
+                                                    } else {
+                                                        Icons.AutoMirrored.Filled.KeyboardArrowRight
+                                                    },
+                                                    contentDescription = if (isExpanded) "Collapse" else "Expand",
+                                                    tint = if (isNodeSelected || isDescendantSelected) {
+                                                        NeumorphicTeal
+                                                    } else {
+                                                        NeumorphicTextSecondary
+                                                    },
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+                                        } else {
+                                            Box(
+                                                contentAlignment = Alignment.Center,
+                                                modifier = Modifier.size(26.dp)
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(6.dp)
+                                                        .clip(CircleShape)
+                                                        .background(
+                                                            if (isNodeSelected) NeumorphicTeal
+                                                            else Color(0xFFCBD5E1)
+                                                        )
+                                                )
+                                            }
+                                        }
+
+                                        Spacer(modifier = Modifier.width(4.dp))
+
+                                        Column(
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = node.name,
+                                                    color = if (isNodeSelected) NeumorphicTeal else TextPrimary,
+                                                    fontWeight = if (isNodeSelected || hasChildren) {
+                                                        FontWeight.Bold
+                                                    } else {
+                                                        FontWeight.Medium
+                                                    },
+                                                    fontSize = 13.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f, fill = false)
+                                                )
+                                                if (hasChildren) {
+                                                    Surface(
+                                                        color = Color(0xFFEEF2F8),
+                                                        shape = RoundedCornerShape(8.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = node.children.size.toString(),
+                                                            color = NeumorphicTextSecondary,
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            if (node.depth > 0) {
+                                                Text(
+                                                    text = formatHierarchyBreadcrumb(node.fullPath),
+                                                    color = NeumorphicTextSecondary,
+                                                    fontSize = 10.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        }
+
+                                        if (isNodeSelected) {
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Icon(
+                                                imageVector = Icons.Default.Check,
+                                                contentDescription = null,
+                                                tint = NeumorphicTeal,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = NeumorphicTextSecondary)
+            }
+        },
+        containerColor = SurfaceCard,
+        shape = RoundedCornerShape(16.dp)
+    )
+}
+
 

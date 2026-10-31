@@ -52,6 +52,8 @@ fun AzureBoardsApp(
     val selectedType by viewModel.typeFilter.collectAsStateWithLifecycle()
     val selectedState by viewModel.stateFilter.collectAsStateWithLifecycle()
     val selectedAssignee by viewModel.assigneeFilter.collectAsStateWithLifecycle()
+    val selectedArea by viewModel.areaFilter.collectAsStateWithLifecycle()
+    val selectedIteration by viewModel.iterationFilter.collectAsStateWithLifecycle()
     val selectedProject by viewModel.selectedProject.collectAsStateWithLifecycle()
     val defaultProject by viewModel.defaultProject.collectAsStateWithLifecycle()
     val availableTypes by viewModel.availableTypes.collectAsStateWithLifecycle()
@@ -59,6 +61,8 @@ fun AzureBoardsApp(
     val availableProjects by viewModel.availableProjects.collectAsStateWithLifecycle()
     val projectAssignees by viewModel.projectAssignees.collectAsStateWithLifecycle()
     val projectFrequentTags by viewModel.projectFrequentTags.collectAsStateWithLifecycle()
+    val projectAreas by viewModel.projectAreas.collectAsStateWithLifecycle()
+    val projectIterations by viewModel.projectIterations.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val isSearchingServer by viewModel.isSearchingServer.collectAsStateWithLifecycle()
@@ -70,6 +74,8 @@ fun AzureBoardsApp(
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val selectedWorkItem by viewModel.selectedWorkItem.collectAsStateWithLifecycle()
     val selectedWorkItemChildren by viewModel.selectedWorkItemChildren.collectAsStateWithLifecycle()
+    val selectedWorkItemComments by viewModel.selectedWorkItemComments.collectAsStateWithLifecycle()
+    val isLoadingComments by viewModel.isLoadingComments.collectAsStateWithLifecycle()
 
     val isConnected = connectionStatus is ConnectionStatus.Connected || organizations.isNotEmpty()
     val activeOrganization = (connectionStatus as? ConnectionStatus.Connected)?.organization
@@ -97,12 +103,18 @@ fun AzureBoardsApp(
                 selectedState = selectedState,
                 selectedProject = selectedProject,
                 selectedAssignee = selectedAssignee,
+                selectedArea = selectedArea,
+                selectedIteration = selectedIteration,
                 availableTypes = availableTypes,
                 availableStates = availableStates,
                 availableProjects = availableProjects,
                 defaultProject = defaultProject,
                 availableAssignees = projectAssignees,
                 availableTags = projectFrequentTags,
+                availableAreas = projectAreas,
+                availableIterations = projectIterations,
+                getAreasForProject = viewModel::getAreasForProject,
+                getIterationsForProject = viewModel::getIterationsForProject,
                 isLoading = isLoading,
                 isLoadingMore = isLoadingMore,
                 isSearchingServer = isSearchingServer,
@@ -114,6 +126,8 @@ fun AzureBoardsApp(
                 onLoadMore = viewModel::loadMoreWorkItems,
                 selectedWorkItem = selectedWorkItem,
                 childWorkItems = selectedWorkItemChildren,
+                selectedWorkItemComments = selectedWorkItemComments,
+                isLoadingComments = isLoadingComments,
                 getAllowedChildTypes = viewModel::getAllowedChildTypesForWorkItem,
                 getAllowedChildTypesForType = viewModel::getAllowedChildTypesForType,
                 getStatesForWorkItem = viewModel::getStatesForWorkItem,
@@ -121,11 +135,15 @@ fun AzureBoardsApp(
                 onCreateWorkItem = viewModel::createWorkItem,
                 onAddChildWorkItem = viewModel::addChildWorkItem,
                 onAddExistingChildWorkItem = viewModel::addExistingChildWorkItem,
+                onRemoveChildWorkItem = viewModel::removeChildWorkItem,
+                onAddComment = viewModel::addCommentToWorkItem,
                 onSearchChange = viewModel::setSearchQuery,
                 onTypeSelect = viewModel::setTypeFilter,
                 onStateSelect = viewModel::setStateFilter,
                 onProjectSelect = viewModel::setProject,
                 onAssigneeSelect = viewModel::setAssigneeFilter,
+                onAreaSelect = viewModel::setAreaFilter,
+                onIterationSelect = viewModel::setIterationFilter,
                 onOrganizationSelect = viewModel::switchOrganization,
                 onDefaultOrganizationSelect = viewModel::setDefaultOrganization,
                 onDefaultProjectSelect = viewModel::setDefaultProject,

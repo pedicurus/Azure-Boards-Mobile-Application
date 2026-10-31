@@ -192,7 +192,7 @@ fun AzureBoardsSettingsDialog(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "Organizations & PAT",
+                        text = "Organizations",
                         fontWeight = FontWeight.SemiBold,
                         color = DialogTextDark,
                         fontSize = 14.sp
@@ -732,15 +732,6 @@ fun AzureBoardsSettingsDialog(
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 13.sp
                                     )
-                                    if (orgName.equals(effectiveDefaultOrg, ignoreCase = true)) {
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = "(Default Org)",
-                                            color = DialogAccentPurple,
-                                            fontWeight = FontWeight.SemiBold,
-                                            fontSize = 11.sp
-                                        )
-                                    }
                                 }
                             }
 

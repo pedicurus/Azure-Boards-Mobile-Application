@@ -1,105 +1,112 @@
-# 3-Character Type-to-Search Autocomplete for Assignee & Tags
+# Hierarchical Areas & Iterations Across Filters, Detail, and Creation
 
-Replace long static dropdown menus for **Assignee** and **Tags** with responsive 3-character type-to-search autocomplete selectors across the **Home**, **Detail**, and **Create New Item** screens so users never have to scroll through all existing options.
+This update introduces Azure Boards **Areas** (`System.AreaPath`) and **Iterations** (`System.IterationPath`) as full hierarchical classification trees across the app—adding a collapsible **Assignee + Area + Iteration** filter bar on the Home screen, a dedicated **Area & Iteration** section before **Description** on both the **Detail** and **Create New Item** pages, and an interactive **Expandable Tree Picker** with search and path breadcrumbs.
 
 ---
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following product and UX decisions were confirmed during interactive planning:
+> The following design and functional choices were confirmed during clarification and govern this implementation:
 
-- **Confirmed Decision 1 — Scope Across Screens**: The 3-character type-to-search autocomplete applies to **Assignee** and **Tags** across the **Home page**, **Work Item Detail sheet**, and **Create New Item sheet**.
-- **Confirmed Decision 2 — Assignee Default Options**: Static options (`All` and `Unassigned` on the Home filter, and `Unassigned` on Detail / Create pages) remain visible immediately before typing, while individual people appear only after typing **at least 3 characters**.
-- **Tags Autocomplete & Custom Tag Creation**: In the Detail and Create New Item sheets, tapping the `+` tag button opens a search input dialog/popover where typing **3+ characters** displays matching existing project tags to select, and also lets the user add the typed text as a new tag if it does not already exist.
+- **Confirmed Decision 1 — Expandable Indented Tree Picker with Search & Path Preview**: Users browse and pick Areas and Iterations using an interactive hierarchical tree modal featuring expand/collapse chevrons for parent nodes, indentation per hierarchy level, a real-time search box, and a full breadcrumb path preview.
+- **Confirmed Decision 2 — Hierarchical Sub-Path Filtering (`Under` Semantics)**: Selecting a parent Area or Iteration in the Home filter bar automatically includes work items assigned to that path **and all of its child sub-paths** (matching Azure Boards `UNDER` query semantics).
+- **Confirmed Decision 3 — Hide/Unhide Filters Button Beside Project Title**: A filter toggle button next to the Project title on the Home screen shows or hides the **Assignee, Area, and Iteration** filter row below the **Create New Items** button (with an active filter count badge when filters are applied while collapsed).
 
 ---
 
 ## 1. Overview & Core Concept
 
-- **What It Does**: Converts Assignee and Tag selection from full-list dropdown menus into lightweight, search-driven pickers that wait until the user types at least 3 characters before displaying matching suggestions.
-- **Target Audience / Persona**: Azure Boards users working in projects with dozens or hundreds of team members and tags who want fast, clutter-free filtering and editing.
-- **Key Value**: Eliminates visual overload and long scrolling lists while keeping quick reset options (`All`, `Unassigned`) one tap away.
+- **What It Does**:
+  - Fetches the authoritative Area and Iteration classification trees from Azure DevOps (`_apis/wit/classificationnodes/areas?$depth=10` and `_apis/wit/classificationnodes/iterations?$depth=10`) and merges them with any Area/Iteration paths observed on loaded work items so the hierarchy is always complete even offline.
+  - Combines **Assignee**, **Area**, and **Iteration** into a unified, collapsible filter section below the **Create New Items** button on the Home screen, controlled by a **Hide/Unhide Filters** button right beside the Project title.
+  - Adds a dedicated **Classification (Area & Iteration)** section immediately before the **Description** section on both the **Work Item Detail** sheet and the **Create New Item** sheet, allowing instant viewing and editing of a work item's Area and Iteration with server persistence.
+- **Target Audience / Persona**: Teams and project managers organizing Azure Boards backlogs across multiple product areas, sub-teams, releases, and sprints.
+- **Key Value**: Brings full Azure Boards spatial and temporal hierarchy navigation to mobile without cluttering the Home screen or forms.
 
 ---
 
 ## 2. User Experience & Visual Design
 
-### Key User Flows
+- **Key User Flows**:
+  1. **Home Screen Filtering & Hide/Unhide Toggle**:
+     - Below the **Create New Items** button, the Project header row displays the interactive **Project selector** on the left and a **Hide/Unhide Filters** toggle pill/icon button on the right (displaying an active badge count if any Assignee, Area, or Iteration filter is active).
+     - When visible, a sleek horizontal filter strip directly below the Project row houses three coordinated filter pills: **Assignee**, **Area**, and **Iteration** (above the Work Item Type and State capsules).
+     - Tapping **Area** or **Iteration** opens the hierarchical **Tree Picker Dialog** with an `"All Areas"` / `"All Iterations"` option at the top and expandable tree nodes below. Selecting any parent node filters the list to items in that node or any nested child path.
+  2. **Detail Page & Create New Item Page (Section Before Description)**:
+     - Located after the **State & Assignee** metadata row and **before the Description section**, a structured **Area & Iteration** section presents two interactive cards/rows:
+       - **Area**: Shows the leaf area name in bold alongside its compact parent breadcrumb trail (e.g., `Project › Platform › Backend`). Tapping opens the Area Tree Picker and immediately updates `System.AreaPath`.
+       - **Iteration**: Shows the leaf sprint/iteration name in bold alongside its parent release/project breadcrumb (e.g., `Project › 2026 Q4 › Sprint 14`). Tapping opens the Iteration Tree Picker and immediately updates `System.IterationPath`.
+  3. **Expandable Indented Tree Picker Modal**:
+     - **Top Search Input**: Filters the tree in real time; when searching, matching nodes and their ancestor paths are automatically expanded.
+     - **Selected Path Preview Banner**: Displays the currently selected full breadcrumb path (`Project \ Team \ Sub-Area`) with RTL/LTR text awareness.
+     - **Interactive Hierarchy Tree**: Each node row has an expand/collapse chevron (if it has children) and a selectable node body indented by `depth * 18.dp`, with a folder/hierarchy icon for Areas and a calendar/sprint icon for Iterations.
 
-1. **Home Page Assignee Filter**:
-   - Tapping the Assignee filter chip opens a clean search-enabled picker.
-   - Immediately visible at the top: a search input field (`Type 3+ characters to search assignee...`) and the quick-select options **`All`** and **`Unassigned`** (plus the currently selected assignee if one is active).
-   - Once the user types **3 or more characters**, matching assignees from the project (case-insensitive substring match, supporting both English and Persian/RTL text) appear below for one-tap selection.
-
-2. **Detail & Create Page Assignee Selector**:
-   - Tapping the Assignee pill in the Detail sheet or Create New Item sheet opens the Assignee search picker.
-   - Immediately visible: the search input field and **`Unassigned`** (plus the current assignee if assigned).
-   - Typing **3+ characters** reveals matching project assignees to assign to the work item.
-
-3. **Detail & Create Page Tags Selector**:
-   - Existing tags on the work item remain displayed as removable pill chips (`×`).
-   - Tapping the `+` button opens a unified **Add / Search Tag** dialog with a text field (`Type at least 3 characters...`).
-   - Before 3 characters are typed, no long list of existing tags is shown—only a subtle prompt indicating to type at least 3 characters.
-   - Once **3+ characters** are typed:
-     - Matching existing project tags (excluding already-attached tags, or showing a checkmark if selected) are listed as selectable suggestions.
-     - Tapping any suggested tag immediately attaches it to the work item.
-     - If the typed tag doesn't match an existing tag (or the user taps **Add**), the user can still add the custom tag directly.
-
-### Visual Identity & Theme
-- **Aesthetic Direction**: Clean, high-contrast neumorphic card surfaces consistent with the app's existing light slate & purple/teal palette.
-- **Color Palette & Mood**:
-  - Primary Surface: `#FFFFFF` (`SurfaceCard`) with `#E4E9F2` / `#CBD5E1` borders
-  - Home Accent: `#6A5AE0` (`AccentPurple`)
-  - Detail / Create Accent: `#00677E` (`NeumorphicTeal`)
-  - Muted Helper Text: `#64748B` (`TextMuted` / `NeumorphicTextSecondary`)
-- **Typography & RTL Support**: Automatic bidirectional text alignment (`isAlmostPersian`) so typing Persian or English names/tags aligns and filters naturally.
+- **Visual Identity & Theme**:
+  - *Aesthetic Direction*: Crisp neumorphic-light surfaces matching the existing Azure Boards mobile design language.
+  - *Color Palette & Mood*:
+    - Surface background: `#F8FAFC` / `#FFFFFF` cards with `#DCE1EF` borders.
+    - Primary accent: Azure Blue `#0078D4` (`NeumorphicTeal`) for active filter pills, selected tree nodes, and active filter badges.
+    - Hierarchy connectors & breadcrumbs: Muted slate `#64748B` for parent segments and `#0F172A` bold for the active leaf segment.
+  - *Interactive Feedback & Motion*: Smooth `AnimatedVisibility(expandVertically() + fadeIn(), shrinkVertically() + fadeOut())` when toggling the **Assignee / Area / Iteration** filter section open or closed, and animated chevron rotation when expanding/collapsing tree branches.
 
 ---
 
 ## 3. Key Product Decisions & Trade-Offs
 
-- **Decision 1: Unified Search-and-Create Flow for Tags**
-  - *Chosen Approach*: Merge the old full-list tag dropdown and separate "+ New Tag" dialog into a single search-first dialog/sheet triggered by the `+` button.
-  - *Why*: Users no longer have to scroll past all existing tags to reach "+ New Tag" or hunt for an existing tag visually; typing 3+ characters both filters existing tags and allows creating a new tag in one step.
-- **Decision 2: Preserving Quick Reset Options (`All` / `Unassigned`)**
-  - *Chosen Approach*: Always show `All` and `Unassigned` on the Home filter (and `Unassigned` on Detail/Create) even when the search query has fewer than 3 characters.
-  - *Why*: Clearing an assignee filter or unassigning a work item is a frequent action that shouldn't require typing.
+- **Decision 1 — Expandable Tree with Compact Breadcrumb Display on Cards/Pills**:
+  - *Chosen Approach*: Show the leaf node name prominently with a subtle parent path subtitle in the Detail/Create section, and open an expandable indented tree modal on tap.
+  - *Why*: Deep Azure DevOps paths (e.g., `OrganizationProject\Product\Mobile\Android\Auth`) overflow single-line dropdowns on mobile screens. Showing the leaf + compact breadcrumb keeps the layout scannable while preserving full hierarchy context in the tree modal.
+  - *Alternatives Considered*: Flat dropdown menus with raw backslash strings, which truncate critical leaf names on narrow viewports.
+- **Decision 2 — Hybrid Classification Tree Resolution (Server Classification Nodes API + Work Item Path Synthesis)**:
+  - *Chosen Approach*: Fetch the full project tree from `_apis/wit/classificationnodes` and merge it with prefix trees constructed from `areaPath` and `iterationPath` values across cached/loaded work items.
+  - *Why*: Guarantees that newly created empty Areas/Sprints from Azure Boards appear in the tree while also working seamlessly offline from cached work items.
+- **Decision 3 — Hierarchical Prefix Matching (`UNDER`) for Home Filters**:
+  - *Chosen Approach*: Normalize backslash/slash separators and match `itemPath.equals(selectedPath, ignoreCase = true) || itemPath.startsWith("$selectedPath\\", ignoreCase = true)`.
+  - *Why*: Matches standard Azure Boards `System.AreaPath UNDER '...'` behavior so selecting a team or release roll-up shows all work items across its child sub-areas or sprints.
 
 ---
 
-## 4. Technical Architecture & Data Strategy
+## 4. Technical Architecture & Data Strategy *(Technical Reference)*
 
-### Architecture & Component Diagram
-
+- **Architecture & Component Diagram**:
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         WorkItemViewModel State                         │
-│     availableAssignees: List<String>  │  availableTags: List<String>    │
-└───────────────────┬──────────────────────────────────┬──────────────────┘
-                    │                                  │
-        ┌───────────▼───────────┐          ┌───────────▼───────────┐
-        │   WorkItemsScreen     │          │  WorkItemComponents   │
-        │     (Home Page)       │          │ (Detail & Create UI)  │
-        └───────────┬───────────┘          └───────────┬───────────┘
-                    │                                  │
-                    ▼                                  ▼
-┌────────────────────────────────────┐  ┌─────────────────────────────────┐
-│      HomeAssigneeDropdown          │  │  Assignee & Tag Search Pickers  │
-│  • Input: searchQuery              │  │  • Assignee: "Unassigned" +     │
-│  • Static: "All", "Unassigned"     │  │    matches when query.len >= 3  │
-│  • Dynamic: matches when len >= 3  │  │  • Tags: matches when len >= 3  │
-│                                    │  │    + direct custom tag creation │
-└────────────────────────────────────┘  └─────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│                         AzureDevOpsService (REST)                         │
+│  • GET {org}/{project}/_apis/wit/classificationnodes?$depth=10            │
+│  • PATCH /fields/System.AreaPath & /fields/System.IterationPath           │
+└────────────────────────────────────┬──────────────────────────────────────┘
+                                     │
+                                     ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│                           AzureDevOpsRepository                           │
+│  • Fetches & caches Project Area/Iteration paths per Organization/Project │
+│  • Builds hierarchical ClassificationTreeNode trees from paths + API      │
+│  • Updates & creates WorkItems with System.AreaPath & System.IterationPath│
+└────────────────────────────────────┬──────────────────────────────────────┘
+                                     │
+                                     ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│                            AzureDevOpsViewModel                           │
+│  • StateFlows: areaFilter, iterationFilter, projectAreas, projectIterations│
+│  • Hierarchical UNDER filter in filteredWorkItems combine pipeline        │
+└───────────────┬─────────────────────────────┬─────────────────────────────┘
+                │                             │
+                ▼                             ▼
+┌───────────────────────────────────┐ ┌─────────────────────────────────────┐
+│          WorkItemsScreen          │ │   Detail & Create Work Item Sheets  │
+│  • Project Header + Hide/Unhide   │ │  • Area & Iteration Section placed  │
+│    Filters Toggle Button          │ │    before Description section       │
+│  • Collapsible Filter Section:    │ │  • Opens HierarchyTreePickerDialog  │
+│    [Assignee] [Area] [Iteration]  │ │    for Area or Iteration selection  │
+└───────────────────────────────────┘ └─────────────────────────────────────┘
 ```
 
-### Interactive Component & State Mapping
-
-1. **3-Character Threshold Logic**:
-   - Let `trimmedQuery = query.trim()`.
-   - When `trimmedQuery.length < 3`:
-     - **Assignee Picker**: Shows only the static options (`All` and `Unassigned` on Home; `Unassigned` on Detail/Create) plus a helper hint `"Type at least 3 characters to search people"`.
-     - **Tag Picker**: Shows a helper hint `"Type at least 3 characters to see matching tags"` and hides the full tag catalog.
-   - When `trimmedQuery.length >= 3`:
-     - Filters `availableAssignees` / `projectTagOptions` using `option.contains(trimmedQuery, ignoreCase = true)`.
-     - Displays matching options in a bounded scrollable list; if no existing option matches, shows `"No matching assignees found"` (or for tags, allows adding `trimmedQuery` as a new tag).
+- **Data Model & State**:
+  - `ClassificationNodeResponse` / `RawClassificationNode`: Models recursive `children` from the Azure DevOps Classification Nodes REST API, normalized into canonical backslash-delimited paths (`Project\Node\SubNode`).
+  - `HierarchyNodeUiModel`: Represents each node in the UI tree with `name`, `fullPath`, `parentBreadcrumb`, `depth`, and `children: List<HierarchyNodeUiModel>`.
+  - `CachedOrganizationMetadata`: Extended with `areasByProject: Map<String, List<String>>` and `iterationsByProject: Map<String, List<String>>` for instant startup restoration.
+- **Interactive Component & State Mapping**:
+  - **Home Filter Toggle & Selection**: Clicking the filter toggle button beside the Project title flips `areFiltersVisible`; selecting an Area or Iteration updates `viewModel.setAreaFilter(path)` or `viewModel.setIterationFilter(path)` and triggers server/local filtering using hierarchical prefix matching.
+  - **Detail Page Area/Iteration Editing**: Selecting a new Area or Iteration in `FigmaItemDetailView` updates `currentAreaPath` / `currentIterationPath` and invokes `onUpdateWorkItem(workItem.copy(areaPath = ..., iterationPath = ...))`, which patches `/fields/System.AreaPath` and `/fields/System.IterationPath` on Azure DevOps.
+  - **Create New Item Page Area/Iteration Selection**: Defaults `currentAreaPath` and `currentIterationPath` to the selected project root (or active filter path if under the project) and sends `/fields/System.AreaPath` and `/fields/System.IterationPath` in `createWorkItemOnServer`.

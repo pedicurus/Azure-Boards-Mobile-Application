@@ -41,11 +41,16 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PersonOutline
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SearchOff
@@ -110,9 +115,13 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.data.model.OrganizationAccount
 import com.example.data.model.WorkItem
+import com.example.data.model.WorkItemComment
+import com.example.ui.components.HierarchyTreePickerDialog
 import com.example.ui.components.WorkItemCard
 import com.example.ui.components.WorkItemCreateSheet
 import com.example.ui.components.WorkItemDetailSheet
+import com.example.ui.components.extractHierarchyLeafName
+import com.example.ui.components.formatHierarchyBreadcrumb
 import com.example.ui.components.isAlmostPersian
 import com.example.ui.theme.getAzureStateColor
 import com.example.ui.theme.getAzureStateTextColor
@@ -146,12 +155,18 @@ fun WorkItemsScreen(
     selectedState: String?,
     selectedProject: String?,
     selectedAssignee: String? = null,
+    selectedArea: String? = null,
+    selectedIteration: String? = null,
     availableTypes: List<String>,
     availableStates: List<String>,
     availableProjects: List<String>,
     defaultProject: String? = null,
     availableAssignees: List<String> = emptyList(),
     availableTags: List<String> = emptyList(),
+    availableAreas: List<String> = emptyList(),
+    availableIterations: List<String> = emptyList(),
+    getAreasForProject: (String?) -> List<String> = { availableAreas },
+    getIterationsForProject: (String?) -> List<String> = { availableIterations },
     isLoading: Boolean,
     isLoadingMore: Boolean = false,
     isSearchingServer: Boolean = false,
@@ -163,6 +178,8 @@ fun WorkItemsScreen(
     onLoadMore: () -> Unit = {},
     selectedWorkItem: WorkItem?,
     childWorkItems: List<WorkItem> = emptyList(),
+    selectedWorkItemComments: List<WorkItemComment> = emptyList(),
+    isLoadingComments: Boolean = false,
     getAllowedChildTypes: (WorkItem) -> List<String> = { emptyList() },
     getAllowedChildTypesForType: (String?, String) -> List<String> = { _, _ -> emptyList() },
     getStatesForWorkItem: (WorkItem) -> List<String> = { availableStates },
@@ -175,15 +192,21 @@ fun WorkItemsScreen(
         assignedToName: String?,
         description: String?,
         tags: List<String>,
+        areaPath: String?,
+        iterationPath: String?,
         onResult: (Result<WorkItem>) -> Unit
-    ) -> Unit = { _, _, _, _, _, _, _, _ -> },
+    ) -> Unit = { _, _, _, _, _, _, _, _, _, _ -> },
     onAddChildWorkItem: (WorkItem, String, String, String) -> Unit = { _, _, _, _ -> },
     onAddExistingChildWorkItem: (WorkItem, Int, (Result<WorkItem>) -> Unit) -> Unit = { _, _, _ -> },
+    onRemoveChildWorkItem: (WorkItem, Int) -> Unit = { _, _ -> },
+    onAddComment: (WorkItem, String, (Result<WorkItemComment>) -> Unit) -> Unit = { _, _, _ -> },
     onSearchChange: (String) -> Unit,
     onTypeSelect: (String?) -> Unit,
     onStateSelect: (String?) -> Unit,
     onProjectSelect: (String?) -> Unit,
     onAssigneeSelect: (String?) -> Unit = {},
+    onAreaSelect: (String?) -> Unit = {},
+    onIterationSelect: (String?) -> Unit = {},
     onOrganizationSelect: (String) -> Unit = {},
     onDefaultOrganizationSelect: (String) -> Unit = {},
     onDefaultProjectSelect: (String) -> Unit = {},
@@ -379,9 +402,18 @@ fun WorkItemsScreen(
                 )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            // Second Section: Interactive {Project} Title on left & Assignee Dropdown on right
+            var isFiltersSectionVisible by remember { mutableStateOf(true) }
+            val isAssigneeFilterActive = !selectedAssignee.isNullOrBlank() && !selectedAssignee.equals("All", ignoreCase = true)
+            val isAreaFilterActive = !selectedArea.isNullOrBlank() && !selectedArea.equals("All", ignoreCase = true)
+            val isIterationFilterActive = !selectedIteration.isNullOrBlank() && !selectedIteration.equals("All", ignoreCase = true)
+            val activeSecondaryFilterCount =
+                (if (isAssigneeFilterActive) 1 else 0) +
+                (if (isAreaFilterActive) 1 else 0) +
+                (if (isIterationFilterActive) 1 else 0)
+
+            // Second Section: Interactive {Project} Title on left & Hide/Unhide Filters Toggle Button on right
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -398,11 +430,148 @@ fun WorkItemsScreen(
 
                 Spacer(modifier = Modifier.width(12.dp))
 
-                HomeAssigneeDropdown(
-                    selectedAssignee = selectedAssignee,
-                    availableAssignees = availableAssignees,
-                    onAssigneeSelected = onAssigneeSelect
-                )
+                Surface(
+                    onClick = { isFiltersSectionVisible = !isFiltersSectionVisible },
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (activeSecondaryFilterCount > 0) AccentPurple.copy(alpha = 0.1f) else Color.White,
+                    border = BorderStroke(
+                        1.dp,
+                        if (activeSecondaryFilterCount > 0) AccentPurple.copy(alpha = 0.5f) else CardBorderColor
+                    ),
+                    modifier = Modifier
+                        .height(34.dp)
+                        .testTag("toggle_filters_visibility_button")
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FilterList,
+                            contentDescription = if (isFiltersSectionVisible) "Hide filters" else "Show filters",
+                            tint = if (activeSecondaryFilterCount > 0) AccentPurple else TextMuted,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Text(
+                            text = if (isFiltersSectionVisible) "Hide Filters" else "Show Filters",
+                            color = if (activeSecondaryFilterCount > 0) AccentPurple else TextDark,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                        if (activeSecondaryFilterCount > 0) {
+                            Surface(
+                                shape = CircleShape,
+                                color = AccentPurple,
+                                modifier = Modifier.size(18.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = activeSecondaryFilterCount.toString(),
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                        Icon(
+                            imageVector = if (isFiltersSectionVisible) {
+                                Icons.Default.KeyboardArrowUp
+                            } else {
+                                Icons.Default.KeyboardArrowDown
+                            },
+                            contentDescription = null,
+                            tint = if (activeSecondaryFilterCount > 0) AccentPurple else TextMuted,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+
+            // Collapsible Combined Filter Section: Assignee + Area + Iteration
+            AnimatedVisibility(
+                visible = isFiltersSectionVisible,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                        .testTag("home_combined_filters_section")
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 20.dp)
+                    ) {
+                        HomeAssigneeDropdown(
+                            selectedAssignee = selectedAssignee,
+                            availableAssignees = availableAssignees,
+                            onAssigneeSelected = onAssigneeSelect
+                        )
+
+                        HomeHierarchyFilterButton(
+                            labelPrefix = "Area",
+                            selectedPath = selectedArea,
+                            availablePaths = availableAreas,
+                            defaultProjectRoot = selectedProject,
+                            isIteration = false,
+                            onPathSelected = onAreaSelect,
+                            testTagPrefix = "home_area"
+                        )
+
+                        HomeHierarchyFilterButton(
+                            labelPrefix = "Iteration",
+                            selectedPath = selectedIteration,
+                            availablePaths = availableIterations,
+                            defaultProjectRoot = selectedProject,
+                            isIteration = true,
+                            onPathSelected = onIterationSelect,
+                            testTagPrefix = "home_iteration"
+                        )
+
+                        if (activeSecondaryFilterCount > 0) {
+                            Surface(
+                                onClick = {
+                                    onAssigneeSelect(null)
+                                    onAreaSelect(null)
+                                    onIterationSelect(null)
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color(0xFFFFF1F2),
+                                border = BorderStroke(1.dp, Color(0xFFFECDD3)),
+                                modifier = Modifier
+                                    .height(34.dp)
+                                    .testTag("reset_combined_filters_button")
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Clear,
+                                        contentDescription = "Clear filters",
+                                        tint = Color(0xFFE11D48),
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Text(
+                                        text = "Reset",
+                                        color = Color(0xFFE11D48),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(10.dp))
@@ -898,6 +1067,12 @@ fun WorkItemsScreen(
             val detailAllowedChildTypes = remember(selectedWorkItem, availableTypes, allWorkItems) {
                 getAllowedChildTypes(selectedWorkItem)
             }
+            val detailAreas = remember(selectedWorkItem.teamProject, availableAreas) {
+                getAreasForProject(selectedWorkItem.teamProject).ifEmpty { availableAreas }
+            }
+            val detailIterations = remember(selectedWorkItem.teamProject, availableIterations) {
+                getIterationsForProject(selectedWorkItem.teamProject).ifEmpty { availableIterations }
+            }
             WorkItemDetailSheet(
                 workItem = selectedWorkItem,
                 onDismiss = onDismissDetail,
@@ -906,6 +1081,8 @@ fun WorkItemsScreen(
                 },
                 availableAssignees = availableAssignees,
                 availableTags = availableTags,
+                availableAreas = detailAreas,
+                availableIterations = detailIterations,
                 allWorkItems = allWorkItems,
                 childWorkItems = childWorkItems,
                 allowedChildTypes = detailAllowedChildTypes,
@@ -919,6 +1096,14 @@ fun WorkItemsScreen(
                 onAddExistingChildWorkItem = { childId, onResult ->
                     onAddExistingChildWorkItem(selectedWorkItem, childId, onResult)
                 },
+                onRemoveChildWorkItem = { childId ->
+                    onRemoveChildWorkItem(selectedWorkItem, childId)
+                },
+                comments = selectedWorkItemComments,
+                isLoadingComments = isLoadingComments,
+                onAddComment = { commentText, onResult ->
+                    onAddComment(selectedWorkItem, commentText, onResult)
+                },
                 onUpdateWorkItem = onUpdateWorkItem
             )
         }
@@ -931,6 +1116,10 @@ fun WorkItemsScreen(
                 initialType = selectedType ?: availableTypes.firstOrNull(),
                 availableAssignees = availableAssignees,
                 availableTags = availableTags,
+                availableAreas = availableAreas,
+                availableIterations = availableIterations,
+                initialAreaPath = selectedArea,
+                initialIterationPath = selectedIteration,
                 allWorkItems = allWorkItems,
                 getStatesForType = getStatesForChildType,
                 getAllowedChildTypesForType = getAllowedChildTypesForType,
@@ -1522,3 +1711,90 @@ private fun HomeAssigneeDropdown(
         }
     }
 }
+
+@Composable
+private fun HomeHierarchyFilterButton(
+    labelPrefix: String,
+    selectedPath: String?,
+    availablePaths: List<String>,
+    defaultProjectRoot: String?,
+    isIteration: Boolean,
+    onPathSelected: (String?) -> Unit,
+    testTagPrefix: String,
+    modifier: Modifier = Modifier
+) {
+    var showPickerDialog by remember { mutableStateOf(false) }
+    val isFilterActive = !selectedPath.isNullOrBlank() && !selectedPath.equals("All", ignoreCase = true)
+    val displayLabel = remember(selectedPath, labelPrefix) {
+        if (!selectedPath.isNullOrBlank() && !selectedPath.equals("All", ignoreCase = true)) {
+            extractHierarchyLeafName(selectedPath)
+        } else {
+            "$labelPrefix: All"
+        }
+    }
+
+    Box(modifier = modifier) {
+        Surface(
+            onClick = { showPickerDialog = true },
+            shape = RoundedCornerShape(10.dp),
+            color = if (isFilterActive) AccentPurple.copy(alpha = 0.08f) else Color.White,
+            border = BorderStroke(
+                1.dp,
+                if (isFilterActive) AccentPurple.copy(alpha = 0.55f) else CardBorderColor
+            ),
+            modifier = Modifier
+                .height(34.dp)
+                .widthIn(min = 104.dp, max = 210.dp)
+                .testTag("${testTagPrefix}_filter_button")
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Icon(
+                    imageVector = if (isIteration) Icons.Default.CalendarToday else Icons.Default.AccountTree,
+                    contentDescription = null,
+                    tint = if (isFilterActive) AccentPurple else TextMuted,
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = displayLabel,
+                    color = if (isFilterActive) AccentPurple else TextDark,
+                    fontSize = 12.sp,
+                    fontWeight = if (isFilterActive) FontWeight.SemiBold else FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Icon(
+                    imageVector = Icons.Default.ArrowDropDown,
+                    contentDescription = "Select $labelPrefix",
+                    tint = if (isFilterActive) AccentPurple else Color(0xFF292D32),
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+
+        if (showPickerDialog) {
+            HierarchyTreePickerDialog(
+                title = "Filter by $labelPrefix",
+                fieldLabel = labelPrefix,
+                icon = if (isIteration) Icons.Default.CalendarToday else Icons.Default.AccountTree,
+                availablePaths = availablePaths,
+                selectedPath = selectedPath,
+                fallbackRootProject = defaultProjectRoot,
+                allowAllOption = true,
+                testTagPrefix = testTagPrefix,
+                onSelectPath = { chosen ->
+                    showPickerDialog = false
+                    onPathSelected(chosen)
+                },
+                onDismiss = { showPickerDialog = false }
+            )
+        }
+    }
+}
+
