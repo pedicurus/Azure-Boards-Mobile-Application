@@ -2054,9 +2054,16 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
 
     /**
      * Returns the list of valid child work item types for a given [workItemType] in [project].
+     * Always returns an empty list when [workItemType] is at the last hierarchy level.
      */
     fun getAllowedChildTypesForType(project: String?, workItemType: String): List<String> {
-        val resolvedProject = project ?: _selectedProject.value ?: ""
+        val cleanType = workItemType.trim()
+        if (cleanType.isBlank()) return emptyList()
+
+        val resolvedProject = resolveEffectiveProject(project ?: _selectedProject.value, _allWorkItems.value)
+            ?: project
+            ?: _selectedProject.value
+            ?: ""
         val activeOrg = (_connectionStatus.value as? ConnectionStatus.Connected)?.organization
             ?: _defaultOrganization.value
         val processMapForProj = findProcessHierarchy(activeOrg, resolvedProject)
@@ -2066,19 +2073,30 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
             .orEmpty()
 
         val projectItems = _allWorkItems.value.filter {
-            it.teamProject?.equals(resolvedProject, ignoreCase = true) == true
+            resolvedProject.isBlank() || it.teamProject?.equals(resolvedProject, ignoreCase = true) == true
         }
         val activeTypesFromItems = projectItems.map { it.workItemType }
             .filterNot { AzureDevOpsRepository.isExcludedNonWorkItemType(it) }
             .distinct()
 
+        val combinedTypes = (activeTypesFromProcess + activeTypesFromItems)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinctBy { it.lowercase() }
+
         val activeTypes = when {
-            activeTypesFromProcess.isNotEmpty() -> activeTypesFromProcess
-            activeTypesFromItems.isNotEmpty() -> activeTypesFromItems
+            combinedTypes.isNotEmpty() -> combinedTypes
+            availableTypes.value.isNotEmpty() -> availableTypes.value
             else -> repository.getKnownProjectProcessHierarchy(resolvedProject).keys.toList()
         }
 
         val catMap = findCategoryMap(activeOrg, resolvedProject).orEmpty()
+
+        // Explicit check: if this work item type is a leaf / last-level type (e.g. Task / کار / Bug at Task level),
+        // it can never have children.
+        if (repository.isLeafWorkItemType(cleanType, catMap, activeTypes)) {
+            return emptyList()
+        }
 
         val levels = repository.resolveOrderedHierarchyLevels(
             activeTypes = activeTypes,
@@ -2088,7 +2106,7 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         if (levels.size <= 1) return emptyList()
 
         val levelIdx = levels.indexOfFirst { levelTypes ->
-            levelTypes.any { it.equals(workItemType, ignoreCase = true) }
+            levelTypes.any { it.equals(cleanType, ignoreCase = true) }
         }
         if (levelIdx < 0 || levelIdx >= levels.lastIndex) {
             return emptyList()
@@ -2222,6 +2240,7 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
     /**
      * Creates a new child work item under [parent], immediately updating UI state and
      * persisting the new child work item and hierarchy link to Azure DevOps.
+     * Refuses to create children if [parent] is at the last level of the item type hierarchy.
      */
     fun addChildWorkItem(
         parent: WorkItem,
@@ -2232,10 +2251,13 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         val trimmedTitle = title.trim()
         if (trimmedTitle.isBlank()) return
 
+        val allowedChildTypes = getAllowedChildTypesForWorkItem(parent)
+        if (allowedChildTypes.isEmpty()) return
+
         val project = parent.teamProject ?: _selectedProject.value ?: ""
-        val resolvedType = childType.ifBlank {
-            getAllowedChildTypesForWorkItem(parent).firstOrNull() ?: "Task"
-        }
+        val resolvedType = childType.takeIf { candidate ->
+            candidate.isNotBlank() && allowedChildTypes.any { it.equals(candidate, ignoreCase = true) }
+        } ?: allowedChildTypes.first()
         val resolvedState = initialState.ifBlank {
             getStatesForType(project, resolvedType).firstOrNull() ?: "New"
         }
@@ -2315,6 +2337,150 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                     _selectedWorkItem.value = _allWorkItems.value.firstOrNull { it.id == parent.id }
                 }
             }
+        }
+    }
+
+    /**
+     * Links an existing work item with [childId] as a child of [parent], validating that
+     * [parent] is not at the last level of the item type hierarchy, updating UI state, and
+     * persisting the hierarchy link to Azure DevOps.
+     */
+    fun addExistingChildWorkItem(
+        parent: WorkItem,
+        childId: Int,
+        onResult: (Result<WorkItem>) -> Unit = {}
+    ) {
+        val allowedChildTypes = getAllowedChildTypesForWorkItem(parent)
+        if (allowedChildTypes.isEmpty()) {
+            onResult(
+                Result.failure(
+                    IllegalArgumentException("${parent.workItemType} is at the last hierarchy level and cannot have children.")
+                )
+            )
+            return
+        }
+        if (childId <= 0) {
+            onResult(Result.failure(IllegalArgumentException("Please enter a valid work item ID.")))
+            return
+        }
+        if (childId == parent.id) {
+            onResult(Result.failure(IllegalArgumentException("A work item cannot be added as a child of itself.")))
+            return
+        }
+        if (childId == parent.parentId) {
+            onResult(Result.failure(IllegalArgumentException("Work item #$childId is the parent of this work item.")))
+            return
+        }
+        val alreadyChild = childId in parent.childIds ||
+            _allWorkItems.value.any { it.id == childId && it.parentId == parent.id }
+        if (alreadyChild) {
+            onResult(Result.failure(IllegalArgumentException("Work item #$childId is already a child of this item.")))
+            return
+        }
+
+        // Prevent ancestor cycles if the candidate is in memory
+        val byId = _allWorkItems.value.associateBy { it.id }
+        var cursorParentId = parent.parentId
+        val visited = mutableSetOf<Int>()
+        while (cursorParentId != null && visited.add(cursorParentId)) {
+            if (cursorParentId == childId) {
+                onResult(
+                    Result.failure(
+                        IllegalArgumentException("Work item #$childId is an ancestor of #${parent.id} and cannot be added as its child.")
+                    )
+                )
+                return
+            }
+            cursorParentId = byId[cursorParentId]?.parentId
+        }
+
+        val existingInMemory = byId[childId]
+        val acc = getActiveAccount()
+        val org = acc?.organization ?: repository.getConfiguredUrl()
+        val pat = acc?.pat ?: repository.getConfiguredPat()
+
+        // Optimistically link in memory if the work item is already loaded locally
+        if (existingInMemory != null) {
+            val previousParentId = existingInMemory.parentId
+            val updatedChild = existingInMemory.copy(parentId = parent.id)
+            _allWorkItems.value = _allWorkItems.value.map { item ->
+                when (item.id) {
+                    childId -> updatedChild
+                    parent.id -> item.copy(childIds = (item.childIds + childId).distinct())
+                    previousParentId -> item.copy(childIds = item.childIds.filterNot { it == childId })
+                    else -> item
+                }
+            }
+            if (_selectedWorkItem.value?.id == parent.id) {
+                _selectedWorkItem.value = _allWorkItems.value.firstOrNull { it.id == parent.id }
+            }
+            persistCurrentItemsInBackground(org)
+
+            if (org.isBlank() || pat.isBlank()) {
+                onResult(Result.success(updatedChild))
+                return
+            }
+        } else if (org.isBlank() || pat.isBlank()) {
+            onResult(Result.failure(IllegalArgumentException("Work item #$childId was not found.")))
+            return
+        }
+
+        viewModelScope.launch {
+            val result = repository.linkExistingChildWorkItemOnServer(
+                organization = org,
+                pat = pat,
+                parentId = parent.id,
+                childId = childId
+            )
+            result.fold(
+                onSuccess = { serverLinkedChild ->
+                    val finalChild = serverLinkedChild.copy(parentId = parent.id)
+                    serverSyncedItems[finalChild.id] = finalChild
+
+                    val currentItems = _allWorkItems.value
+                    val hadChildInList = currentItems.any { it.id == finalChild.id }
+                    val updatedList = if (hadChildInList) {
+                        currentItems.map { item ->
+                            when {
+                                item.id == finalChild.id -> finalChild
+                                item.id == parent.id -> {
+                                    val newParent = item.copy(childIds = (item.childIds + finalChild.id).distinct())
+                                    serverSyncedItems[newParent.id] = newParent
+                                    newParent
+                                }
+                                item.id != parent.id && finalChild.id in item.childIds -> {
+                                    item.copy(childIds = item.childIds.filterNot { it == finalChild.id })
+                                }
+                                else -> item
+                            }
+                        }
+                    } else {
+                        currentItems.map { item ->
+                            if (item.id == parent.id) {
+                                val newParent = item.copy(childIds = (item.childIds + finalChild.id).distinct())
+                                serverSyncedItems[newParent.id] = newParent
+                                newParent
+                            } else {
+                                item
+                            }
+                        } + finalChild
+                    }
+
+                    _allWorkItems.value = updatedList
+                    if (_selectedWorkItem.value?.id == parent.id) {
+                        _selectedWorkItem.value = _allWorkItems.value.firstOrNull { it.id == parent.id }
+                    }
+                    persistCurrentItemsInBackground(org)
+                    onResult(Result.success(finalChild))
+                },
+                onFailure = { err ->
+                    if (existingInMemory != null) {
+                        onResult(Result.success(existingInMemory.copy(parentId = parent.id)))
+                    } else {
+                        onResult(Result.failure(err))
+                    }
+                }
+            )
         }
     }
 

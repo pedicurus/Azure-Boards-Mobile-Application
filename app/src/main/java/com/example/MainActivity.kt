@@ -120,6 +120,7 @@ fun AzureBoardsApp(
                 getStatesForChildType = { proj, type -> viewModel.getStatesForType(proj, type) },
                 onCreateWorkItem = viewModel::createWorkItem,
                 onAddChildWorkItem = viewModel::addChildWorkItem,
+                onAddExistingChildWorkItem = viewModel::addExistingChildWorkItem,
                 onSearchChange = viewModel::setSearchQuery,
                 onTypeSelect = viewModel::setTypeFilter,
                 onStateSelect = viewModel::setStateFilter,

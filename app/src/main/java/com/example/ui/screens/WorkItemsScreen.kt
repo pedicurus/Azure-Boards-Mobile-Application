@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -50,17 +51,22 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -172,6 +178,7 @@ fun WorkItemsScreen(
         onResult: (Result<WorkItem>) -> Unit
     ) -> Unit = { _, _, _, _, _, _, _, _ -> },
     onAddChildWorkItem: (WorkItem, String, String, String) -> Unit = { _, _, _, _ -> },
+    onAddExistingChildWorkItem: (WorkItem, Int, (Result<WorkItem>) -> Unit) -> Unit = { _, _, _ -> },
     onSearchChange: (String) -> Unit,
     onTypeSelect: (String?) -> Unit,
     onStateSelect: (String?) -> Unit,
@@ -888,6 +895,9 @@ fun WorkItemsScreen(
 
         // Detail Bottom Sheet when user clicks a Work Item Card
         if (selectedWorkItem != null) {
+            val detailAllowedChildTypes = remember(selectedWorkItem, availableTypes, allWorkItems) {
+                getAllowedChildTypes(selectedWorkItem)
+            }
             WorkItemDetailSheet(
                 workItem = selectedWorkItem,
                 onDismiss = onDismissDetail,
@@ -896,14 +906,18 @@ fun WorkItemsScreen(
                 },
                 availableAssignees = availableAssignees,
                 availableTags = availableTags,
+                allWorkItems = allWorkItems,
                 childWorkItems = childWorkItems,
-                allowedChildTypes = getAllowedChildTypes(selectedWorkItem),
+                allowedChildTypes = detailAllowedChildTypes,
                 getChildStates = getStatesForWorkItem,
                 getStatesForChildType = { childType ->
                     getStatesForChildType(selectedWorkItem.teamProject, childType)
                 },
                 onAddChildWorkItem = { title, childType, initialState ->
                     onAddChildWorkItem(selectedWorkItem, title, childType, initialState)
+                },
+                onAddExistingChildWorkItem = { childId, onResult ->
+                    onAddExistingChildWorkItem(selectedWorkItem, childId, onResult)
                 },
                 onUpdateWorkItem = onUpdateWorkItem
             )
@@ -1214,20 +1228,23 @@ private fun HomeAssigneeDropdown(
     modifier: Modifier = Modifier
 ) {
     var expanded by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
 
-    val assigneeOptions = remember(availableAssignees) {
-        val realAssignees = availableAssignees
+    val realAssignees = remember(availableAssignees) {
+        availableAssignees
             .map { it.trim() }
             .filter { it.isNotBlank() && !it.equals("All", ignoreCase = true) && !it.equals("Unassigned", ignoreCase = true) }
             .distinct()
-        listOf("All") + realAssignees + "Unassigned"
     }
 
     val currentLabel = selectedAssignee?.takeIf { it.isNotBlank() } ?: "All"
 
     Box(modifier = modifier) {
         Surface(
-            onClick = { expanded = !expanded },
+            onClick = {
+                searchQuery = ""
+                expanded = true
+            },
             shape = RoundedCornerShape(10.dp),
             color = Color.White,
             border = BorderStroke(1.dp, CardBorderColor),
@@ -1268,52 +1285,240 @@ private fun HomeAssigneeDropdown(
             }
         }
 
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-            containerColor = Color.White,
-            shape = RoundedCornerShape(12.dp),
-            border = BorderStroke(1.dp, CardBorderColor),
-            modifier = Modifier.widthIn(min = 170.dp)
-        ) {
-            assigneeOptions.forEach { option ->
-                val isSelected = if (option == "All") {
-                    selectedAssignee.isNullOrBlank() || selectedAssignee.equals("All", ignoreCase = true)
+        if (expanded) {
+            val trimmedQuery = searchQuery.trim()
+            val isQueryRtl = isAlmostPersian(trimmedQuery)
+            val matchingAssignees = remember(realAssignees, trimmedQuery) {
+                if (trimmedQuery.length >= 3) {
+                    realAssignees.filter { it.contains(trimmedQuery, ignoreCase = true) }
                 } else {
-                    selectedAssignee?.equals(option, ignoreCase = true) == true
+                    emptyList()
                 }
-                DropdownMenuItem(
-                    text = {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
+            }
+            val staticOptions = remember(selectedAssignee) {
+                val activeCustom = selectedAssignee?.trim()?.takeIf {
+                    it.isNotBlank() && !it.equals("All", ignoreCase = true) && !it.equals("Unassigned", ignoreCase = true)
+                }
+                listOfNotNull("All", "Unassigned", activeCustom).distinct()
+            }
+
+            AlertDialog(
+                onDismissRequest = { expanded = false },
+                title = {
+                    Text(
+                        text = "Filter by Assignee",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextDark
+                    )
+                },
+                text = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        CompositionLocalProvider(
+                            LocalLayoutDirection provides if (isQueryRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+                        ) {
+                            OutlinedTextField(
+                                value = searchQuery,
+                                onValueChange = { searchQuery = it },
+                                placeholder = {
+                                    Text(
+                                        text = "Type at least 3 characters...",
+                                        color = TextMuted,
+                                        fontSize = 13.sp,
+                                        textAlign = if (isQueryRtl) TextAlign.Right else TextAlign.Left,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Search,
+                                        contentDescription = null,
+                                        tint = AccentPurple,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                },
+                                trailingIcon = if (searchQuery.isNotEmpty()) {
+                                    {
+                                        IconButton(onClick = { searchQuery = "" }) {
+                                            Icon(
+                                                imageVector = Icons.Default.Clear,
+                                                contentDescription = "Clear search",
+                                                tint = TextMuted,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                } else null,
+                                textStyle = TextStyle(
+                                    color = TextDark,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    textAlign = if (isQueryRtl) TextAlign.Right else TextAlign.Left,
+                                    textDirection = if (isQueryRtl) TextDirection.Rtl else TextDirection.Ltr
+                                ),
+                                singleLine = true,
+                                shape = RoundedCornerShape(12.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = TextDark,
+                                    unfocusedTextColor = TextDark,
+                                    cursorColor = AccentPurple,
+                                    focusedBorderColor = AccentPurple,
+                                    unfocusedBorderColor = CardBorderColor,
+                                    focusedContainerColor = Color.White,
+                                    unfocusedContainerColor = Color.White
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("home_assignee_search_input")
+                            )
+                        }
+
+                        // Always visible quick options: All & Unassigned (plus current selection if active)
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text(
-                                text = option,
-                                color = if (isSelected) AccentPurple else TextDark,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                fontSize = 13.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            if (isSelected) {
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Icon(
-                                    imageVector = Icons.Default.Check,
-                                    contentDescription = null,
-                                    tint = AccentPurple,
-                                    modifier = Modifier.size(16.dp)
-                                )
+                            staticOptions.forEach { option ->
+                                val isSelected = if (option == "All") {
+                                    selectedAssignee.isNullOrBlank() || selectedAssignee.equals("All", ignoreCase = true)
+                                } else {
+                                    selectedAssignee?.equals(option, ignoreCase = true) == true
+                                }
+                                Surface(
+                                    onClick = {
+                                        expanded = false
+                                        onAssigneeSelected(if (option == "All") null else option)
+                                    },
+                                    color = if (isSelected) AccentPurple.copy(alpha = 0.1f) else Color(0xFFF8FAFC),
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isSelected) AccentPurple else CardBorderColor
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("home_assignee_option_${option}")
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 9.dp)
+                                    ) {
+                                        Text(
+                                            text = option,
+                                            color = if (isSelected) AccentPurple else TextDark,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                            fontSize = 13.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (isSelected) {
+                                            Icon(
+                                                imageVector = Icons.Default.Check,
+                                                contentDescription = null,
+                                                tint = AccentPurple,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
-                    },
-                    onClick = {
-                        expanded = false
-                        onAssigneeSelected(if (option == "All") null else option)
+
+                        HorizontalDivider(color = CardBorderColor, thickness = 1.dp)
+
+                        if (trimmedQuery.length < 3) {
+                            Text(
+                                text = "Type at least 3 characters to search people.",
+                                color = TextMuted,
+                                fontSize = 12.sp,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                                    .testTag("home_assignee_min_chars_hint")
+                            )
+                        } else if (matchingAssignees.isEmpty()) {
+                            Text(
+                                text = "No matching assignees found.",
+                                color = TextMuted,
+                                fontSize = 12.sp,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                                    .testTag("home_assignee_no_matches")
+                            )
+                        } else {
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 220.dp)
+                                    .verticalScroll(rememberScrollState())
+                                    .testTag("home_assignee_suggestions_list")
+                            ) {
+                                matchingAssignees.forEach { option ->
+                                    val isSelected = selectedAssignee?.equals(option, ignoreCase = true) == true
+                                    Surface(
+                                        onClick = {
+                                            expanded = false
+                                            onAssigneeSelected(option)
+                                        },
+                                        color = if (isSelected) AccentPurple.copy(alpha = 0.1f) else Color.White,
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (isSelected) AccentPurple else CardBorderColor
+                                        ),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("home_assignee_suggestion_${option}")
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 9.dp)
+                                        ) {
+                                            Text(
+                                                text = option,
+                                                color = if (isSelected) AccentPurple else TextDark,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                                fontSize = 13.sp,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            if (isSelected) {
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Icon(
+                                                    imageVector = Icons.Default.Check,
+                                                    contentDescription = null,
+                                                    tint = AccentPurple,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
-                )
-            }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(onClick = { expanded = false }) {
+                        Text("Close", color = TextMuted)
+                    }
+                },
+                containerColor = Color.White,
+                shape = RoundedCornerShape(16.dp)
+            )
         }
     }
 }

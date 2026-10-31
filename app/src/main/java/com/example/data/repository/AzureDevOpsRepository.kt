@@ -1499,6 +1499,126 @@ class AzureDevOpsRepository(context: Context) {
     }
 
     /**
+     * Links an existing work item [childId] in Azure DevOps as a child of [parentId]
+     * using System.LinkTypes.Hierarchy-Reverse (replacing any previous parent relation if present).
+     */
+    suspend fun linkExistingChildWorkItemOnServer(
+        organization: String,
+        pat: String,
+        parentId: Int,
+        childId: Int
+    ): Result<WorkItem> = withContext(Dispatchers.IO) {
+        val normalizedOrg = extractOrganization(organization)
+        if (normalizedOrg.isBlank() || pat.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Missing Azure DevOps credentials."))
+        }
+        if (childId <= 0) {
+            return@withContext Result.failure(IllegalArgumentException("Please enter a valid work item ID."))
+        }
+        if (childId == parentId) {
+            return@withContext Result.failure(IllegalArgumentException("A work item cannot be a child of itself."))
+        }
+
+        try {
+            val service = AzureDevOpsClient.createService(pat)
+            val fetchResp = service.getWorkItems(
+                organization = normalizedOrg,
+                ids = childId.toString(),
+                fields = null,
+                expand = "relations"
+            )
+            val existingRaw = fetchResp.body()?.value?.firstOrNull { it.id == childId }
+                ?: return@withContext Result.failure(
+                    IllegalArgumentException("Work item #$childId was not found in Azure DevOps.")
+                )
+
+            val existingRelations = existingRaw.relations.orEmpty()
+            val forwardTargetIds = existingRelations
+                .filter { it.rel.equals("System.LinkTypes.Hierarchy-Forward", ignoreCase = true) }
+                .mapNotNull { it.url?.trimEnd('/')?.substringAfterLast('/')?.toIntOrNull() }
+            if (parentId in forwardTargetIds) {
+                return@withContext Result.failure(
+                    IllegalArgumentException("Work item #$childId is the parent of #$parentId and cannot be added as its child.")
+                )
+            }
+
+            val existingParentRelIndex = existingRelations.indexOfFirst {
+                it.rel.equals("System.LinkTypes.Hierarchy-Reverse", ignoreCase = true)
+            }
+            val currentParentIdOnServer = if (existingParentRelIndex >= 0) {
+                existingRelations[existingParentRelIndex].url
+                    ?.trimEnd('/')
+                    ?.substringAfterLast('/')
+                    ?.toIntOrNull()
+            } else {
+                null
+            }
+
+            if (currentParentIdOnServer != parentId) {
+                val parentUrl = "https://dev.azure.com/$normalizedOrg/_apis/wit/workItems/$parentId"
+                val patchOps = mutableListOf<JsonPatchOperation>()
+                if (existingParentRelIndex >= 0) {
+                    patchOps.add(
+                        JsonPatchOperation(
+                            op = "remove",
+                            path = "/relations/$existingParentRelIndex",
+                            value = null
+                        )
+                    )
+                }
+                patchOps.add(
+                    JsonPatchOperation(
+                        op = "add",
+                        path = "/relations/-",
+                        value = mapOf(
+                            "rel" to "System.LinkTypes.Hierarchy-Reverse",
+                            "url" to parentUrl
+                        )
+                    )
+                )
+
+                val patchResp = service.updateWorkItem(
+                    organization = normalizedOrg,
+                    id = childId,
+                    patchBody = AzureDevOpsClient.createPatchRequestBody(patchOps)
+                )
+
+                if (!patchResp.isSuccessful) {
+                    // Fallback: try adding Hierarchy-Forward relation on the parent work item
+                    val childUrl = "https://dev.azure.com/$normalizedOrg/_apis/wit/workItems/$childId"
+                    val parentPatchOps = listOf(
+                        JsonPatchOperation(
+                            op = "add",
+                            path = "/relations/-",
+                            value = mapOf(
+                                "rel" to "System.LinkTypes.Hierarchy-Forward",
+                                "url" to childUrl
+                            )
+                        )
+                    )
+                    val fallbackResp = service.updateWorkItem(
+                        organization = normalizedOrg,
+                        id = parentId,
+                        patchBody = AzureDevOpsClient.createPatchRequestBody(parentPatchOps)
+                    )
+                    if (!fallbackResp.isSuccessful) {
+                        return@withContext Result.failure(
+                            Exception("Failed to link work item #$childId as child (${patchResp.code()}): ${patchResp.message()}")
+                        )
+                    }
+                }
+            }
+
+            val parsedChild = parseAndLinkRawWorkItems(listOf(existingRaw)).firstOrNull()
+                ?: return@withContext Result.failure(Exception("Failed to parse work item #$childId."))
+
+            Result.success(parsedChild.copy(parentId = parentId))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
      * Fetches work item type -> category reference name (e.g. Microsoft.EpicCategory,
      * Microsoft.FeatureCategory, Microsoft.RequirementCategory, Microsoft.TaskCategory)
      * for a project so hierarchy levels can be determined accurately.
@@ -1596,38 +1716,92 @@ class AzureDevOpsRepository(context: Context) {
         }
     }
 
+    private fun isSubtaskTypeName(type: String): Boolean {
+        val n = type.lowercase().trim()
+        return n.contains("subtask") || n.contains("sub-task") || n.contains("زیرکار")
+    }
+
+    /**
+     * Returns true if [type] is explicitly a leaf (last-level) work item type in the project
+     * (e.g., Task / کار / Bug at Task level / Subtask) and therefore cannot have child work items.
+     */
+    fun isLeafWorkItemType(
+        type: String,
+        categoryMap: Map<String, String> = emptyMap(),
+        activeTypes: List<String> = emptyList()
+    ): Boolean {
+        val cleanType = type.trim()
+        if (cleanType.isBlank()) return true
+        if (isSubtaskTypeName(cleanType)) return true
+
+        val hasSubtaskTierInProject = activeTypes.any { isSubtaskTypeName(it) }
+        if (hasSubtaskTierInProject) return false
+
+        val catRef = categoryMap.entries.firstOrNull { it.key.equals(cleanType, ignoreCase = true) }?.value
+        if (catRef.equals("Microsoft.TaskCategory", ignoreCase = true)) {
+            return true
+        }
+
+        val n = cleanType.lowercase()
+        val isTaskByName = n.contains("task") || n.contains("کار") || n.contains("وظیفه") || n.contains("اقدام")
+        if (isTaskByName) return true
+
+        val isBugByNameOrCat = catRef.equals("Microsoft.BugCategory", ignoreCase = true) ||
+            n.contains("bug") || n.contains("باگ") || n.contains("خطا") || n.contains("ایراد")
+        if (isBugByNameOrCat && !catRef.equals("Microsoft.RequirementCategory", ignoreCase = true)) {
+            return true
+        }
+
+        return false
+    }
+
+    private fun typeDisplayTieBreakerWithinLevel(type: String): Int {
+        val n = type.lowercase().trim()
+        return when {
+            n.contains("user story") || n.contains("story") || n.contains("product backlog item") ||
+                n.contains("backlog item") || n.contains("requirement") || n.contains("داستان") ||
+                n.contains("نیازمندی") || n.contains("پروژه") || n.contains("خواسته") -> 0
+            n.contains("issue") || n.contains("مسئله") || n.contains("impediment") || n.contains("مانع") -> 1
+            n.contains("task") || n.contains("کار") || n.contains("وظیفه") || n.contains("اقدام") -> 0
+            n.contains("bug") || n.contains("باگ") || n.contains("خطا") || n.contains("ایراد") -> 1
+            else -> 2
+        }
+    }
+
     private fun baseHierarchyScore(
         type: String,
         categoryRef: String?,
         projectWorkItems: List<WorkItem> = emptyList()
     ): Int {
         val n = type.lowercase().trim()
-        // Check explicit name-based hierarchy first for fine-grained ordering within/across categories
+        // All types belonging to the same hierarchy tier share the exact same tier score
+        // so that same-level types (e.g., Task & Bug, or User Story & Issue) are grouped
+        // into the same hierarchy level rather than creating false parent -> child levels.
         val nameScore = when {
             n.contains("initiative") || n.contains("theme") -> 0
             n.contains("epic") || n.contains("هدف") || n.contains("اهداف") || n.contains("حماسه") ||
-                n.contains("goal") || n.contains("objective") || n.contains("کلان") -> 2
+                n.contains("goal") || n.contains("objective") || n.contains("کلان") -> 10
             n.contains("feature") || n.contains("ویژگی") || n.contains("قابلیت") ||
-                n.contains("امکانات") || n.contains("deliverable") -> 10
+                n.contains("امکانات") || n.contains("deliverable") -> 20
             n.contains("user story") || n.contains("story") || n.contains("product backlog item") ||
                 n.contains("backlog item") || n.contains("requirement") || n.contains("داستان") ||
-                n.contains("نیازمندی") || n.contains("پروژه") || n.contains("خواسته") -> 20
-            n.contains("issue") || n.contains("مسئله") || n.contains("impediment") || n.contains("مانع") -> 22
-            n.contains("subtask") || n.contains("sub-task") || n.contains("زیرکار") -> 35
-            n.contains("task") || n.contains("کار") || n.contains("وظیفه") || n.contains("اقدام") -> 30
-            n.contains("bug") || n.contains("باگ") || n.contains("خطا") || n.contains("ایراد") -> 32
+                n.contains("نیازمندی") || n.contains("پروژه") || n.contains("خواسته") ||
+                n.contains("issue") || n.contains("مسئله") || n.contains("impediment") || n.contains("مانع") -> 30
+            isSubtaskTypeName(n) -> 50
+            n.contains("task") || n.contains("کار") || n.contains("وظیفه") || n.contains("اقدام") ||
+                n.contains("bug") || n.contains("باگ") || n.contains("خطا") || n.contains("ایراد") -> 40
             else -> null
         }
         val catScore = when {
-            categoryRef.equals("Microsoft.EpicCategory", ignoreCase = true) -> 2
-            categoryRef.equals("Microsoft.FeatureCategory", ignoreCase = true) -> 10
-            categoryRef.equals("Microsoft.RequirementCategory", ignoreCase = true) -> 20
-            categoryRef.equals("Microsoft.TaskCategory", ignoreCase = true) -> 30
-            categoryRef.equals("Microsoft.BugCategory", ignoreCase = true) -> 32
+            categoryRef.equals("Microsoft.EpicCategory", ignoreCase = true) -> 10
+            categoryRef.equals("Microsoft.FeatureCategory", ignoreCase = true) -> 20
+            categoryRef.equals("Microsoft.RequirementCategory", ignoreCase = true) -> 30
+            categoryRef.equals("Microsoft.TaskCategory", ignoreCase = true) -> 40
+            categoryRef.equals("Microsoft.BugCategory", ignoreCase = true) -> 40
             else -> null
         }
         if (catScore != null && nameScore != null) {
-            return if (kotlin.math.abs(catScore - nameScore) <= 4) nameScore else catScore
+            return if (nameScore == 0 || nameScore == 50) nameScore else catScore
         }
         if (catScore != null) return catScore
         if (nameScore != null) return nameScore
@@ -1638,13 +1812,13 @@ class AzureDevOpsRepository(context: Context) {
             val hasChildren = itemsOfType.any { it.childIds.isNotEmpty() }
             val hasParents = itemsOfType.any { it.parentId != null }
             return when {
-                hasChildren && !hasParents -> 5
-                hasChildren && hasParents -> 15
-                !hasChildren && hasParents -> 28
-                else -> 15
+                hasChildren && !hasParents -> 10
+                hasChildren && hasParents -> 25
+                !hasChildren && hasParents -> 40
+                else -> 25
             }
         }
-        return 15
+        return 25
     }
 
     /**
@@ -1664,10 +1838,11 @@ class AzureDevOpsRepository(context: Context) {
         for (type in cleanedTypes) {
             val catRef = categoryMap.entries.firstOrNull { it.key.equals(type, ignoreCase = true) }?.value
             tierScores[type] = baseHierarchyScore(type, catRef, projectWorkItems)
-            isKnownTier[type] = catRef != null || baseHierarchyScore(type, null) != 15
+            isKnownTier[type] = catRef != null || baseHierarchyScore(type, null) != 25
         }
 
-        // Refine tiers using observed parent -> child relationships in projectWorkItems
+        // Refine tiers for unknown custom types using observed parent -> child relationships in projectWorkItems,
+        // without splitting or demoting known standard tiers.
         if (projectWorkItems.isNotEmpty()) {
             val byId = projectWorkItems.associateBy { it.id }
             val edgeCounts = mutableMapOf<Pair<String, String>, Int>()
@@ -1681,7 +1856,6 @@ class AzureDevOpsRepository(context: Context) {
                     edgeCounts[key] = (edgeCounts[key] ?: 0) + 1
                 }
             }
-            // Keep dominant direction if bidirectional links exist
             val directedEdges = edgeCounts.keys.filter { (p, c) ->
                 val forward = edgeCounts[p to c] ?: 0
                 val backward = edgeCounts[c to p] ?: 0
@@ -1689,11 +1863,13 @@ class AzureDevOpsRepository(context: Context) {
             }
             repeat(cleanedTypes.size) {
                 for ((pType, cType) in directedEdges) {
-                    val pScore = tierScores[pType] ?: 15
-                    val cScore = tierScores[cType] ?: 15
-                    if (pScore >= cScore) {
+                    val pScore = tierScores[pType] ?: 25
+                    val cScore = tierScores[cType] ?: 25
+                    if (pScore >= cScore && (isKnownTier[pType] != true || isKnownTier[cType] != true)) {
                         if (isKnownTier[cType] == true && isKnownTier[pType] != true) {
                             tierScores[pType] = cScore - 5
+                        } else if (isKnownTier[pType] == true && isKnownTier[cType] != true) {
+                            tierScores[cType] = pScore + 5
                         } else {
                             tierScores[cType] = pScore + 5
                         }
@@ -1703,14 +1879,14 @@ class AzureDevOpsRepository(context: Context) {
         }
 
         return cleanedTypes
-            .groupBy { tierScores[it] ?: 15 }
+            .groupBy { tierScores[it] ?: 25 }
             .toSortedMap()
             .values
             .map { levelList ->
-                levelList.distinct().sortedBy { type ->
-                    val catRef = categoryMap.entries.firstOrNull { it.key.equals(type, ignoreCase = true) }?.value
-                    baseHierarchyScore(type, catRef, projectWorkItems)
-                }
+                levelList.distinct().sortedWith(
+                    compareBy<String> { typeDisplayTieBreakerWithinLevel(it) }
+                        .thenBy { it.lowercase() }
+                )
             }
     }
 
