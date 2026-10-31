@@ -48,6 +48,7 @@ fun AzureBoardsApp(
     val defaultProjectsByOrg by viewModel.defaultProjectsByOrg.collectAsStateWithLifecycle()
     val filteredWorkItems by viewModel.filteredWorkItems.collectAsStateWithLifecycle()
     val allWorkItems by viewModel.allWorkItems.collectAsStateWithLifecycle()
+    val totalWorkItemsCount by viewModel.totalWorkItemsCount.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val selectedType by viewModel.typeFilter.collectAsStateWithLifecycle()
     val selectedState by viewModel.stateFilter.collectAsStateWithLifecycle()
@@ -97,7 +98,7 @@ fun AzureBoardsApp(
                 defaultProjectsByOrg = defaultProjectsByOrg,
                 workItems = filteredWorkItems,
                 allWorkItems = allWorkItems,
-                totalCount = allWorkItems.size,
+                totalCount = totalWorkItemsCount,
                 searchQuery = searchQuery,
                 selectedType = selectedType,
                 selectedState = selectedState,

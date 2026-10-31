@@ -20,6 +20,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -260,22 +264,41 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     /**
-     * Azure Boards UNDER operator semantics: returns true if [itemPath] equals [selectedFilterPath]
-     * or is a descendant child path under [selectedFilterPath] (e.g. `Project\Sub` matches `Project\Sub\Leaf`).
+     * Zero-allocation O(1) Azure Boards UNDER operator check using pre-normalized lowercase paths.
      */
-    private fun matchesClassificationHierarchy(
-        itemPath: String?,
-        selectedFilterPath: String?
+    private fun matchesClassificationHierarchyFast(
+        itemNormPathLower: String,
+        filterNormLower: String,
+        filterPrefixWithSlashLower: String
     ): Boolean {
-        if (selectedFilterPath.isNullOrBlank() || selectedFilterPath.equals("All", ignoreCase = true)) {
-            return true
+        if (filterNormLower.isEmpty()) return true
+        if (itemNormPathLower.isEmpty()) return false
+        return itemNormPathLower == filterNormLower ||
+            itemNormPathLower.startsWith(filterPrefixWithSlashLower)
+    }
+
+    /**
+     * Maintains a bounded top-K list in sorted order without sorting or retaining the entire terminal item stream.
+     */
+    private fun insertBoundedTopK(
+        bucket: MutableList<WorkItem>,
+        candidate: WorkItem,
+        maxSize: Int,
+        comparator: Comparator<WorkItem>
+    ) {
+        if (bucket.size == maxSize && comparator.compare(candidate, bucket.last()) >= 0) {
+            return
         }
-        val normFilter = normalizeClassificationPath(selectedFilterPath)
-        if (normFilter.isEmpty()) return true
-        val normItem = normalizeClassificationPath(itemPath)
-        if (normItem.isEmpty()) return false
-        return normItem.equals(normFilter, ignoreCase = true) ||
-            normItem.startsWith("$normFilter\\", ignoreCase = true)
+        var insertIdx = bucket.binarySearch(candidate, comparator)
+        if (insertIdx < 0) {
+            insertIdx = -insertIdx - 1
+        }
+        if (insertIdx < maxSize) {
+            bucket.add(insertIdx, candidate)
+            if (bucket.size > maxSize) {
+                bucket.removeAt(bucket.lastIndex)
+            }
+        }
     }
 
     private fun getDefaultProjectForOrgInternal(organization: String?): String? {
@@ -320,6 +343,8 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         private const val PROPOSED_PAGE_STEP = 40
         private const val STATE_INITIAL_BATCH_SIZE = 40
         private const val STATE_PAGE_STEP = 40
+        private const val BACKGROUND_STREAM_UI_THROTTLE_MS = 250L
+        private const val SNAPSHOT_PERSIST_BATCH_INTERVAL = 5
     }
 
     private val _isLoading = MutableStateFlow(true)
@@ -368,12 +393,18 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
 
     private var activeCommentsJob: Job? = null
 
+    val totalWorkItemsCount: StateFlow<Int> = _allWorkItems
+        .map { it.size }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
     val selectedWorkItemChildren: StateFlow<List<WorkItem>> = combine(
         _selectedWorkItem,
         _allWorkItems
     ) { selected, allItems ->
         if (selected == null) return@combine emptyList()
-        val childIdSet = selected.childIds.toSet()
+        val childIdSet = selected.childIds.toHashSet()
         allItems.filter { candidate ->
             candidate.id != selected.id && (candidate.parentId == selected.id || candidate.id in childIdSet)
         }.sortedWith(
@@ -382,7 +413,10 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                 { it.id }
             )
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     /**
      * Strictly returns only the projects belonging to the currently active organization.
@@ -409,13 +443,16 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         (fetchedForOrg + fromItems + cachedForOrg)
             .distinctBy { it.lowercase() }
             .sorted()
-    }.stateIn(
-        viewModelScope,
-        SharingStarted.WhileSubscribed(5000),
-        (_defaultOrganization.value?.let { repository.getCachedProjectsForOrg(it) }.orEmpty())
-            .distinctBy { it.lowercase() }
-            .sorted()
-    )
+    }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            (_defaultOrganization.value?.let { repository.getCachedProjectsForOrg(it) }.orEmpty())
+                .distinctBy { it.lowercase() }
+                .sorted()
+        )
 
     /**
      * Returns the projects belonging strictly to the Default Organization (used in Settings
@@ -446,13 +483,16 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         (fetchedForDefOrg + fromItemsIfActive + cachedForDefOrg)
             .distinctBy { it.lowercase() }
             .sorted()
-    }.stateIn(
-        viewModelScope,
-        SharingStarted.WhileSubscribed(5000),
-        (_defaultOrganization.value?.let { repository.getCachedProjectsForOrg(it) }.orEmpty())
-            .distinctBy { it.lowercase() }
-            .sorted()
-    )
+    }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            (_defaultOrganization.value?.let { repository.getCachedProjectsForOrg(it) }.orEmpty())
+                .distinctBy { it.lowercase() }
+                .sorted()
+        )
 
     private fun resolveEffectiveProject(project: String?, items: List<WorkItem>): String? {
         val activeOrg = (_connectionStatus.value as? ConnectionStatus.Connected)?.organization
@@ -483,21 +523,122 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         return project
     }
 
-    val availableTypes: StateFlow<List<String>> = combine(
-        combine(_connectionStatus, _allWorkItems, _selectedProject) { status, items, rawProject ->
-            Triple(status, items, rawProject)
-        },
-        combine(_projectProcessMap, _projectCategoryMap, _projectBacklogLevelsMap) { processMap, categoryMap, backlogLevelsMap ->
-            Triple(processMap, categoryMap, backlogLevelsMap)
-        }
-    ) { (status, items, rawProject), (processMap, categoryMap, backlogLevelsMap) ->
+    private data class ProjectScopedWorkItemsSnapshot(
+        val activeOrg: String,
+        val effectiveProject: String?,
+        val effectiveProjectLower: String,
+        val projectItems: List<WorkItem>,
+        val allItems: List<WorkItem>
+    )
+
+    private data class ProjectAndTypeScopedSnapshot(
+        val activeOrg: String,
+        val effectiveProject: String?,
+        val effectiveProjectLower: String,
+        val selectedType: String?,
+        val selectedTypeLower: String,
+        val projectAndTypeItems: List<WorkItem>,
+        val projectItems: List<WorkItem>
+    )
+
+    /**
+     * Shared intermediate flow on Dispatchers.Default that filters [_allWorkItems] once by the
+     * resolved effective project. All project-level flows reuse this pre-filtered snapshot.
+     */
+    private val projectScopedSnapshotFlow: StateFlow<ProjectScopedWorkItemsSnapshot> = combine(
+        _connectionStatus,
+        _allWorkItems,
+        _selectedProject,
+        _projectsByOrg,
+        _workItemsOrg
+    ) { status, items, rawProject, _, _ ->
+        val activeOrg = (status as? ConnectionStatus.Connected)?.organization
+            ?: _defaultOrganization.value
+            ?: _organizations.value.firstOrNull()?.organization
+            ?: ""
         val project = resolveEffectiveProject(rawProject, items)
+        val projectLower = project?.trim()?.lowercase().orEmpty()
+        val projItems = if (projectLower.isEmpty()) {
+            items
+        } else {
+            items.filter { it.normTeamProjectLower == projectLower }
+        }
+        ProjectScopedWorkItemsSnapshot(
+            activeOrg = activeOrg,
+            effectiveProject = project,
+            effectiveProjectLower = projectLower,
+            projectItems = projItems,
+            allItems = items
+        )
+    }
+        .conflate()
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            ProjectScopedWorkItemsSnapshot(
+                activeOrg = _defaultOrganization.value.orEmpty(),
+                effectiveProject = _selectedProject.value,
+                effectiveProjectLower = _selectedProject.value?.trim()?.lowercase().orEmpty(),
+                projectItems = emptyList(),
+                allItems = emptyList()
+            )
+        )
+
+    /**
+     * Shared intermediate flow on Dispatchers.Default that further scopes [projectScopedSnapshotFlow]
+     * by the currently selected work item type.
+     */
+    private val projectAndTypeScopedSnapshotFlow: StateFlow<ProjectAndTypeScopedSnapshot> = combine(
+        projectScopedSnapshotFlow,
+        _typeFilter
+    ) { projSnap, type ->
+        val typeLower = type?.trim()?.lowercase().orEmpty()
+        val typedItems = if (typeLower.isEmpty()) {
+            projSnap.projectItems
+        } else {
+            projSnap.projectItems.filter { it.normTypeLower == typeLower }
+        }
+        ProjectAndTypeScopedSnapshot(
+            activeOrg = projSnap.activeOrg,
+            effectiveProject = projSnap.effectiveProject,
+            effectiveProjectLower = projSnap.effectiveProjectLower,
+            selectedType = type,
+            selectedTypeLower = typeLower,
+            projectAndTypeItems = typedItems,
+            projectItems = projSnap.projectItems
+        )
+    }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            ProjectAndTypeScopedSnapshot(
+                activeOrg = _defaultOrganization.value.orEmpty(),
+                effectiveProject = _selectedProject.value,
+                effectiveProjectLower = _selectedProject.value?.trim()?.lowercase().orEmpty(),
+                selectedType = _typeFilter.value,
+                selectedTypeLower = _typeFilter.value?.trim()?.lowercase().orEmpty(),
+                projectAndTypeItems = emptyList(),
+                projectItems = emptyList()
+            )
+        )
+
+    val availableTypes: StateFlow<List<String>> = combine(
+        projectScopedSnapshotFlow,
+        _projectProcessMap,
+        _projectCategoryMap,
+        _projectBacklogLevelsMap
+    ) { projSnap, processMap, categoryMap, backlogLevelsMap ->
+        val project = projSnap.effectiveProject
         if (project.isNullOrBlank()) return@combine emptyList()
-        val activeOrg = (status as? ConnectionStatus.Connected)?.organization ?: _defaultOrganization.value
+        val activeOrg = projSnap.activeOrg
         val matchedProcessMap = findProcessHierarchy(activeOrg, project, processMap)
         val matchedCategoryMap = findCategoryMap(activeOrg, project, categoryMap).orEmpty()
         val matchedBacklogLevels = findBacklogLevels(activeOrg, project, backlogLevelsMap).orEmpty()
-        val projectItems = items.filter { it.teamProject?.equals(project, ignoreCase = true) == true }
+        val projectItems = projSnap.projectItems
         val fromApi = matchedProcessMap?.keys
             ?.filterNot { AzureDevOpsRepository.isExcludedNonWorkItemType(it) }
             ?.toList()
@@ -515,27 +656,25 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
             projectWorkItems = projectItems,
             explicitBacklogLevels = matchedBacklogLevels
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val availableStates: StateFlow<List<String>> = combine(
-        _connectionStatus,
-        _allWorkItems,
-        _selectedProject,
-        _typeFilter,
+        projectAndTypeScopedSnapshotFlow,
         _projectProcessMap
-    ) { status, items, rawProject, type, processMap ->
-        val project = resolveEffectiveProject(rawProject, items)
+    ) { typeSnap, processMap ->
+        val project = typeSnap.effectiveProject
+        val type = typeSnap.selectedType
         if (project.isNullOrBlank() || type.isNullOrBlank()) return@combine emptyList()
-        val activeOrg = (status as? ConnectionStatus.Connected)?.organization ?: _defaultOrganization.value
+        val activeOrg = typeSnap.activeOrg
         val matchedProjMap = findProcessHierarchy(activeOrg, project, processMap)
         val fromApi = matchedProjMap?.entries?.firstOrNull { it.key.equals(type, ignoreCase = true) }?.value
         val typeStates = if (!fromApi.isNullOrEmpty()) {
             fromApi
         } else {
-            val fromItems = items.filter {
-                it.teamProject?.equals(project, ignoreCase = true) == true &&
-                it.workItemType.equals(type, ignoreCase = true)
-            }.map { it.state }.distinct()
+            val fromItems = typeSnap.projectAndTypeItems.map { it.state }.distinct()
             if (fromItems.isNotEmpty()) {
                 fromItems
             } else {
@@ -547,205 +686,217 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         } else {
             listOf("All") + typeStates.filterNot { it.equals("All", ignoreCase = true) }
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val projectAssignees: StateFlow<List<String>> = combine(
-        _allWorkItems,
-        _selectedProject
-    ) { items, project ->
-        val projectItems = if (project.isNullOrBlank()) {
-            items
-        } else {
-            items.filter { it.teamProject?.equals(project, ignoreCase = true) == true }
+    val projectAssignees: StateFlow<List<String>> = projectScopedSnapshotFlow
+        .map { projSnap ->
+            val seenLower = HashSet<String>()
+            val result = ArrayList<String>()
+            for (item in projSnap.projectItems) {
+                if (!item.isUnassigned) {
+                    val trimmed = item.assignedToName?.trim().orEmpty()
+                    if (trimmed.isNotEmpty() && seenLower.add(item.normAssigneeLower)) {
+                        result.add(trimmed)
+                    }
+                }
+            }
+            for (item in projSnap.allItems) {
+                if (!item.isUnassigned) {
+                    val trimmed = item.assignedToName?.trim().orEmpty()
+                    if (trimmed.isNotEmpty() && seenLower.add(item.normAssigneeLower)) {
+                        result.add(trimmed)
+                    }
+                }
+            }
+            result
         }
-        val fromProject = projectItems.mapNotNull { it.assignedToName?.trim() }
-            .filter { it.isNotBlank() && !it.equals("Unassigned", ignoreCase = true) }
-        val fromAll = items.mapNotNull { it.assignedToName?.trim() }
-            .filter { it.isNotBlank() && !it.equals("Unassigned", ignoreCase = true) }
-        (fromProject + fromAll).distinct()
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val projectFrequentTags: StateFlow<List<String>> = combine(
-        _allWorkItems,
-        _selectedProject
-    ) { items, project ->
-        val projectItems = if (project.isNullOrBlank()) {
-            items
-        } else {
-            items.filter { it.teamProject?.equals(project, ignoreCase = true) == true }
+    val projectFrequentTags: StateFlow<List<String>> = projectScopedSnapshotFlow
+        .map { projSnap ->
+            val counts = LinkedHashMap<String, Int>()
+            for (item in projSnap.projectItems) {
+                for (rawTag in item.tags) {
+                    val clean = rawTag.trim()
+                    if (clean.isNotEmpty()) {
+                        counts[clean] = (counts[clean] ?: 0) + 1
+                    }
+                }
+            }
+            counts.entries
+                .sortedByDescending { it.value }
+                .map { it.key }
         }
-        projectItems
-            .flatMap { it.tags }
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .groupingBy { it }
-            .eachCount()
-            .entries
-            .sortedByDescending { it.value }
-            .map { it.key }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val projectAreas: StateFlow<List<String>> = combine(
-        _connectionStatus,
-        _allWorkItems,
-        _selectedProject,
+        projectScopedSnapshotFlow,
         _projectAreasMap
-    ) { status, items, rawProject, areasMap ->
-        val project = resolveEffectiveProject(rawProject, items)
+    ) { projSnap, areasMap ->
+        val project = projSnap.effectiveProject
         if (project.isNullOrBlank()) return@combine emptyList()
-        val activeOrg = (status as? ConnectionStatus.Connected)?.organization ?: _defaultOrganization.value
-        val fromApi = findProjectAreas(activeOrg, project, areasMap).orEmpty()
-        val fromItems = items
-            .filter { it.teamProject?.equals(project, ignoreCase = true) == true }
-            .mapNotNull { it.areaPath?.trim() }
-            .filter { it.isNotBlank() }
+        val fromApi = findProjectAreas(projSnap.activeOrg, project, areasMap).orEmpty()
+        val fromItems = projSnap.projectItems
+            .mapNotNull { it.normAreaPath.takeIf { p -> p.isNotEmpty() } }
         expandAndSortHierarchyPaths(project, fromApi + fromItems)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val projectIterations: StateFlow<List<String>> = combine(
-        _connectionStatus,
-        _allWorkItems,
-        _selectedProject,
+        projectScopedSnapshotFlow,
         _projectIterationsMap
-    ) { status, items, rawProject, iterationsMap ->
-        val project = resolveEffectiveProject(rawProject, items)
+    ) { projSnap, iterationsMap ->
+        val project = projSnap.effectiveProject
         if (project.isNullOrBlank()) return@combine emptyList()
-        val activeOrg = (status as? ConnectionStatus.Connected)?.organization ?: _defaultOrganization.value
-        val fromApi = findProjectIterations(activeOrg, project, iterationsMap).orEmpty()
-        val fromItems = items
-            .filter { it.teamProject?.equals(project, ignoreCase = true) == true }
-            .mapNotNull { it.iterationPath?.trim() }
-            .filter { it.isNotBlank() }
+        val fromApi = findProjectIterations(projSnap.activeOrg, project, iterationsMap).orEmpty()
+        val fromItems = projSnap.projectItems
+            .mapNotNull { it.normIterationPath.takeIf { p -> p.isNotEmpty() } }
         expandAndSortHierarchyPaths(project, fromApi + fromItems)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     fun getAreasForProject(project: String?): List<String> {
+        val currentSnap = projectScopedSnapshotFlow.value
+        if (project.isNullOrBlank() || project.equals(currentSnap.effectiveProject, ignoreCase = true)) {
+            val cached = projectAreas.value
+            if (cached.isNotEmpty()) return cached
+        }
         val resolvedProj = resolveEffectiveProject(project ?: _selectedProject.value, _allWorkItems.value)
             ?: project
             ?: _selectedProject.value
             ?: ""
         if (resolvedProj.isBlank()) return emptyList()
+        val resolvedProjLower = resolvedProj.trim().lowercase()
         val activeOrg = (_connectionStatus.value as? ConnectionStatus.Connected)?.organization
             ?: _defaultOrganization.value
         val fromApi = findProjectAreas(activeOrg, resolvedProj).orEmpty()
         val fromItems = _allWorkItems.value
-            .filter { it.teamProject?.equals(resolvedProj, ignoreCase = true) == true }
-            .mapNotNull { it.areaPath?.trim() }
-            .filter { it.isNotBlank() }
+            .filter { it.normTeamProjectLower == resolvedProjLower }
+            .mapNotNull { it.normAreaPath.takeIf { p -> p.isNotEmpty() } }
         return expandAndSortHierarchyPaths(resolvedProj, fromApi + fromItems)
     }
 
     fun getIterationsForProject(project: String?): List<String> {
+        val currentSnap = projectScopedSnapshotFlow.value
+        if (project.isNullOrBlank() || project.equals(currentSnap.effectiveProject, ignoreCase = true)) {
+            val cached = projectIterations.value
+            if (cached.isNotEmpty()) return cached
+        }
         val resolvedProj = resolveEffectiveProject(project ?: _selectedProject.value, _allWorkItems.value)
             ?: project
             ?: _selectedProject.value
             ?: ""
         if (resolvedProj.isBlank()) return emptyList()
+        val resolvedProjLower = resolvedProj.trim().lowercase()
         val activeOrg = (_connectionStatus.value as? ConnectionStatus.Connected)?.organization
             ?: _defaultOrganization.value
         val fromApi = findProjectIterations(activeOrg, resolvedProj).orEmpty()
         val fromItems = _allWorkItems.value
-            .filter { it.teamProject?.equals(resolvedProj, ignoreCase = true) == true }
-            .mapNotNull { it.iterationPath?.trim() }
-            .filter { it.isNotBlank() }
+            .filter { it.normTeamProjectLower == resolvedProjLower }
+            .mapNotNull { it.normIterationPath.takeIf { p -> p.isNotEmpty() } }
         return expandAndSortHierarchyPaths(resolvedProj, fromApi + fromItems)
     }
 
-    val remainingItemsCount: StateFlow<Int> = combine(
-        _allWorkItems,
-        _selectedProject
-    ) { items, project ->
-        items.filter { project == null || it.teamProject?.equals(project, ignoreCase = true) == true }
-            .count { item ->
-                val s = item.state.lowercase().trim()
-                s != "done" && s != "closed" && s != "resolved" && s != "تکمیل" && s != "completed"
-            }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    val remainingItemsCount: StateFlow<Int> = projectScopedSnapshotFlow
+        .map { projSnap ->
+            projSnap.projectItems.count { !it.isCompletedOrTerminalState }
+        }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
-    val completedItemsCount: StateFlow<Int> = combine(
-        _allWorkItems,
-        _selectedProject
-    ) { items, project ->
-        items.filter { project == null || it.teamProject?.equals(project, ignoreCase = true) == true }
-            .count { item ->
-                val s = item.state.lowercase().trim()
-                s == "done" || s == "closed" || s == "resolved" || s == "تکمیل" || s == "completed"
-            }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    val completedItemsCount: StateFlow<Int> = projectScopedSnapshotFlow
+        .map { projSnap ->
+            projSnap.projectItems.count { it.isCompletedOrTerminalState }
+        }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     val hasMoreItems: StateFlow<Boolean> = combine(
-        combine(_allWorkItems, _selectedProject, _typeFilter) { items, project, type ->
-            Triple(items, project, type)
-        },
+        projectAndTypeScopedSnapshotFlow,
         combine(_stateFilter, _proposedDisplayLimit, _stateDisplayLimits) { state, propLimit, stateLimits ->
             Triple(state, propLimit, stateLimits)
-        },
+        }.distinctUntilChanged(),
         _hasMoreServerItems
-    ) { (items, rawProject, type), (state, propLimit, stateLimits), hasMoreServer ->
-        val project = resolveEffectiveProject(rawProject, items)
-        val matchingProjectAndType = items.filter { item ->
-            (project == null || item.teamProject?.equals(project, ignoreCase = true) == true) &&
-                (type == null || item.workItemType.equals(type, ignoreCase = true))
-        }
-        if (state == null || state.equals("All", ignoreCase = true)) {
+    ) { typeSnap, (state, propLimit, stateLimits), hasMoreServer ->
+        val matchingProjectAndType = typeSnap.projectAndTypeItems
+        val stateLower = state?.trim()?.lowercase().orEmpty()
+        if (stateLower.isEmpty() || stateLower == "all") {
             val totalProposedInMemory = matchingProjectAndType.count { item ->
-                repository.resolveStateCategory(item.state, item.teamProject, item.workItemType) ==
+                repository.resolveStateCategoryForWorkItem(item) ==
                     AzureDevOpsRepository.CATEGORY_PROPOSED
             }
             totalProposedInMemory > propLimit || hasMoreServer
         } else {
-            val stateKey = "${project.orEmpty().lowercase()}|${type.orEmpty().lowercase()}|${state.trim().lowercase()}"
+            val stateKey = "${typeSnap.effectiveProjectLower}|${typeSnap.selectedTypeLower}|$stateLower"
             val currentLimit = stateLimits[stateKey] ?: STATE_INITIAL_BATCH_SIZE
             val totalStateInMemory = matchingProjectAndType.count { item ->
-                item.state.equals(state, ignoreCase = true)
+                item.normStateLower == stateLower
             }
             val isStateExhaustedOnServer = stateKey in exhaustedStateQueries
             totalStateInMemory > currentLimit || hasMoreServer || !isStateExhaustedOnServer
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+    }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     val filteredWorkItems: StateFlow<List<WorkItem>> = combine(
-        combine(_allWorkItems, _searchQuery, _selectedProject) { items, query, project ->
-            Triple(items, query, project)
-        },
+        combine(projectScopedSnapshotFlow, _searchQuery) { projSnap, query ->
+            projSnap to query
+        }.distinctUntilChanged(),
         combine(_typeFilter, _stateFilter, _assigneeFilter) { type, state, assignee ->
             Triple(type, state, assignee)
-        },
+        }.distinctUntilChanged(),
         combine(_areaFilter, _iterationFilter) { area, iteration ->
             area to iteration
-        },
+        }.distinctUntilChanged(),
         combine(_proposedDisplayLimit, _stateDisplayLimits) { propLimit, stateLimits ->
             propLimit to stateLimits
-        }
-    ) { (items, query, rawProject), (type, state, assignee), (area, iteration), (propLimit, stateLimits) ->
-        val project = resolveEffectiveProject(rawProject, items)
+        }.distinctUntilChanged()
+    ) { (projSnap, query), (type, state, assignee), (area, iteration), (propLimit, stateLimits) ->
+        val project = projSnap.effectiveProject
+        val projectLower = projSnap.effectiveProjectLower
         val cleanQuery = query.trim()
-        val numericQuery = cleanQuery.removePrefix("#").trim()
 
         // 1. Active Search Mode:
         //    Search across ALL Work Item Types, States, Assignees, Areas, and Iterations in the current project
         //    (with automatic organization-wide fallback if an exact ID or item is in another project),
-        //    ranked by relevance so any item that exists in Azure is immediately shown.
+        //    ranked by relevance using pre-lowercased fields on WorkItem.
         if (cleanQuery.isNotEmpty()) {
-            val allQueryMatches = items.filter { item ->
-                item.title.contains(cleanQuery, ignoreCase = true) ||
-                    (numericQuery.isNotEmpty() && item.id.toString().contains(numericQuery)) ||
-                    (item.description?.contains(cleanQuery, ignoreCase = true) == true) ||
-                    (item.assignedToName?.contains(cleanQuery, ignoreCase = true) == true) ||
-                    (item.areaPath?.contains(cleanQuery, ignoreCase = true) == true) ||
-                    (item.iterationPath?.contains(cleanQuery, ignoreCase = true) == true) ||
-                    item.workItemType.contains(cleanQuery, ignoreCase = true) ||
-                    item.state.contains(cleanQuery, ignoreCase = true) ||
-                    item.tags.any { it.contains(cleanQuery, ignoreCase = true) }
+            val queryLower = cleanQuery.lowercase()
+            val numericQuery = cleanQuery.removePrefix("#").trim()
+            val allQueryMatches = projSnap.allItems.filter { item ->
+                item.titleLower.contains(queryLower) ||
+                    (numericQuery.isNotEmpty() && item.idString.contains(numericQuery)) ||
+                    item.descriptionLower.contains(queryLower) ||
+                    item.normAssigneeLower.contains(queryLower) ||
+                    item.normAreaPathLower.contains(queryLower) ||
+                    item.normIterationPathLower.contains(queryLower) ||
+                    item.normTypeLower.contains(queryLower) ||
+                    item.normStateLower.contains(queryLower) ||
+                    item.tagsLower.any { it.contains(queryLower) }
             }
 
-            val projectScopedMatches = if (project.isNullOrBlank()) {
+            val projectScopedMatches = if (projectLower.isEmpty()) {
                 allQueryMatches
             } else {
                 val inProject = allQueryMatches.filter { item ->
-                    item.teamProject.isNullOrBlank() ||
-                        item.teamProject.equals(project, ignoreCase = true) ||
-                        (numericQuery.isNotEmpty() && item.id.toString() == numericQuery)
+                    item.normTeamProjectLower.isEmpty() ||
+                        item.normTeamProjectLower == projectLower ||
+                        (numericQuery.isNotEmpty() && item.idString == numericQuery)
                 }
                 inProject.ifEmpty { allQueryMatches }
             }
@@ -754,12 +905,12 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                 compareBy<WorkItem>(
                     { item ->
                         when {
-                            numericQuery.isNotEmpty() && item.id.toString() == numericQuery -> 0
-                            item.title.equals(cleanQuery, ignoreCase = true) -> 1
-                            item.title.startsWith(cleanQuery, ignoreCase = true) -> 2
-                            item.title.contains(cleanQuery, ignoreCase = true) -> 3
-                            item.tags.any { it.contains(cleanQuery, ignoreCase = true) } -> 4
-                            numericQuery.isNotEmpty() && item.id.toString().contains(numericQuery) -> 5
+                            numericQuery.isNotEmpty() && item.idString == numericQuery -> 0
+                            item.titleLower == queryLower -> 1
+                            item.titleLower.startsWith(queryLower) -> 2
+                            item.titleLower.contains(queryLower) -> 3
+                            item.tagsLower.any { it.contains(queryLower) } -> 4
+                            numericQuery.isNotEmpty() && item.idString.contains(numericQuery) -> 5
                             else -> 6
                         }
                     },
@@ -770,20 +921,38 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
             )
         }
 
-        val baseMatched = items.filter { item ->
-            val matchesProject = project == null || item.teamProject?.equals(project, ignoreCase = true) == true
-            val matchesType = type == null || item.workItemType.equals(type, ignoreCase = true)
-            val matchesState = state == null || state.equals("All", ignoreCase = true) || item.state.equals(state, ignoreCase = true)
-            val matchesAssignee = when {
-                assignee.isNullOrBlank() || assignee.equals("All", ignoreCase = true) -> true
-                assignee.equals("Unassigned", ignoreCase = true) ->
-                    item.assignedToName.isNullOrBlank() || item.assignedToName.equals("Unassigned", ignoreCase = true)
-                else -> item.assignedToName?.trim()?.equals(assignee.trim(), ignoreCase = true) == true
-            }
-            val matchesArea = matchesClassificationHierarchy(item.areaPath, area)
-            val matchesIteration = matchesClassificationHierarchy(item.iterationPath, iteration)
+        // Pre-compute filter tokens once outside the loop (zero per-item string transformations)
+        val typeLower = type?.trim()?.lowercase().orEmpty()
+        val stateLower = if (state == null || state.equals("All", ignoreCase = true)) {
+            ""
+        } else {
+            state.trim().lowercase()
+        }
+        val assigneeLower = assignee?.trim()?.lowercase().orEmpty()
+        val isAssigneeAll = assigneeLower.isEmpty() || assigneeLower == "all"
+        val isAssigneeUnassigned = assigneeLower == "unassigned"
 
-            matchesProject && matchesType && matchesState && matchesAssignee && matchesArea && matchesIteration
+        val normAreaLower = if (area.isNullOrBlank() || area.equals("All", ignoreCase = true)) {
+            ""
+        } else {
+            normalizeClassificationPath(area).lowercase()
+        }
+        val normAreaPrefixLower = if (normAreaLower.isEmpty()) "" else "$normAreaLower\\"
+
+        val normIterationLower = if (iteration.isNullOrBlank() || iteration.equals("All", ignoreCase = true)) {
+            ""
+        } else {
+            normalizeClassificationPath(iteration).lowercase()
+        }
+        val normIterationPrefixLower = if (normIterationLower.isEmpty()) "" else "$normIterationLower\\"
+
+        // Reuse projectItems from projectScopedSnapshotFlow so we only scan items in the active project
+        val baseMatched = projSnap.projectItems.filter { item ->
+            (typeLower.isEmpty() || item.normTypeLower == typeLower) &&
+                (stateLower.isEmpty() || item.normStateLower == stateLower) &&
+                (isAssigneeAll || (if (isAssigneeUnassigned) item.isUnassigned else item.normAssigneeLower == assigneeLower)) &&
+                matchesClassificationHierarchyFast(item.normAreaPathLower, normAreaLower, normAreaPrefixLower) &&
+                matchesClassificationHierarchyFast(item.normIterationPathLower, normIterationLower, normIterationPrefixLower)
         }
 
         val boardOrderComparator = compareBy<WorkItem>(
@@ -797,29 +966,35 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         // 2. "All" States Mode:
         //    - Tier 1 (InProgress category): Show 100% of items across all InProgress states
         //    - Tier 2 (Proposed category): Show up to [propLimit] items (auto-streams in background & on scroll)
-        //    - Tier 3 (Completed / Resolved / Removed categories): Show 5 most recently changed items per (workItemType, state)
-        if (state == null || state.equals("All", ignoreCase = true)) {
-            val inProgressItems = mutableListOf<WorkItem>()
-            val proposedItems = mutableListOf<WorkItem>()
-            val terminalItems = mutableListOf<WorkItem>()
+        //    - Tier 3 (Completed / Resolved / Removed categories): Bounded top-5 accumulator per (workItemType, state)
+        if (stateLower.isEmpty()) {
+            val inProgressItems = ArrayList<WorkItem>()
+            val proposedItems = ArrayList<WorkItem>()
+            val terminalTopKBuckets = HashMap<Pair<String, String>, MutableList<WorkItem>>()
 
             for (item in baseMatched) {
-                when (repository.resolveStateCategory(item.state, item.teamProject, item.workItemType)) {
+                when (repository.resolveStateCategoryForWorkItem(item)) {
                     AzureDevOpsRepository.CATEGORY_IN_PROGRESS -> inProgressItems.add(item)
                     AzureDevOpsRepository.CATEGORY_PROPOSED -> proposedItems.add(item)
-                    else -> terminalItems.add(item)
+                    else -> {
+                        val bucketKey = item.normTypeLower to item.normStateLower
+                        val bucket = terminalTopKBuckets.getOrPut(bucketKey) {
+                            ArrayList(RECENT_COMPLETED_LIMIT_PER_TYPE_AND_STATE + 1)
+                        }
+                        insertBoundedTopK(
+                            bucket = bucket,
+                            candidate = item,
+                            maxSize = RECENT_COMPLETED_LIMIT_PER_TYPE_AND_STATE,
+                            comparator = recentChangedComparator
+                        )
+                    }
                 }
             }
 
             val sortedInProgress = inProgressItems.sortedWith(boardOrderComparator)
             val sortedProposed = proposedItems.sortedWith(boardOrderComparator).take(propLimit)
-            val cappedRecentTerminal = terminalItems
-                .groupBy { "${it.workItemType.trim().lowercase()}|${it.state.trim().lowercase()}" }
-                .values
-                .flatMap { group ->
-                    group.sortedWith(recentChangedComparator)
-                        .take(RECENT_COMPLETED_LIMIT_PER_TYPE_AND_STATE)
-                }
+            val cappedRecentTerminal = terminalTopKBuckets.values
+                .flatten()
                 .sortedWith(recentChangedComparator)
 
             return@combine sortedInProgress + sortedProposed + cappedRecentTerminal
@@ -827,7 +1002,7 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
 
         // 3. Specific State Chip Selected Mode:
         //    - Lift the 5-item cap and show up to [stateLimit] items for that state (auto-loads more on selection & scroll)
-        val stateKey = "${project.orEmpty().lowercase()}|${type.orEmpty().lowercase()}|${state.trim().lowercase()}"
+        val stateKey = "$projectLower|$typeLower|$stateLower"
         val stateLimit = stateLimits[stateKey] ?: STATE_INITIAL_BATCH_SIZE
         val selectedCategory = repository.resolveStateCategory(state, project, type)
 
@@ -836,7 +1011,11 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
             AzureDevOpsRepository.CATEGORY_PROPOSED -> baseMatched.sortedWith(boardOrderComparator).take(stateLimit)
             else -> baseMatched.sortedWith(recentChangedComparator).take(stateLimit)
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }
+        .conflate()
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     /**
      * Immediately restores cached work items and project process/category metadata from local device
@@ -882,7 +1061,8 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
 
     /**
      * Continuously streams remaining unloaded work items in small non-blocking batches (50 items)
-     * in the background even when the user does not scroll, persisting every batch to local device storage.
+     * in the background while throttling UI list emissions to [BACKGROUND_STREAM_UI_THROTTLE_MS] (250ms)
+     * and coalescing disk snapshot persistence so scrolling and filtering remain locked at 60fps.
      */
     private fun startIterativeBackgroundStream(organization: String, pat: String) {
         val normOrg = repository.extractOrganization(organization)
@@ -891,6 +1071,10 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
 
         backgroundStreamJob?.cancel()
         backgroundStreamJob = viewModelScope.launch {
+            val bufferedBatches = ArrayList<WorkItem>()
+            val bufferedIds = HashSet<Int>()
+            var lastUiPublishMs = System.currentTimeMillis()
+            var batchesSinceLastPersist = 0
             try {
                 while (isActive && repository.hasUnloadedServerItems(normOrg)) {
                     val activeOrg = (_connectionStatus.value as? ConnectionStatus.Connected)?.organization
@@ -898,7 +1082,7 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                         break
                     }
 
-                    val loadedCount = _allWorkItems.value.size
+                    val loadedCount = _allWorkItems.value.size + bufferedIds.size
                     val remainingCount = repository.getRemainingUnloadedCount(normOrg)
                     if (remainingCount <= 0) break
 
@@ -907,7 +1091,12 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                     _syncProgress.value = (loadedCount.toFloat() / totalExpected.toFloat()).coerceIn(0.08f, 0.96f)
                     _syncStatusText.value = "Syncing..."
 
-                    val existingIds = _allWorkItems.value.map { it.id }.toSet()
+                    val existingIds = withContext(Dispatchers.Default) {
+                        val set = HashSet<Int>(_allWorkItems.value.size + bufferedIds.size)
+                        _allWorkItems.value.forEach { set.add(it.id) }
+                        set.addAll(bufferedIds)
+                        set
+                    }
                     val batchResult = repository.fetchNextWorkItemBatch(
                         organization = normOrg,
                         pat = cleanPat,
@@ -926,29 +1115,63 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                         break
                     }
 
-                    mergeHydratedWorkItemsSuspend(fetchedBatch)
-                    val updatedLoaded = _allWorkItems.value.size
-                    val updatedRemaining = repository.getRemainingUnloadedCount(normOrg)
-                    val updatedTotal = (updatedLoaded + updatedRemaining).coerceAtLeast(1)
-                    _syncProgress.value = (updatedLoaded.toFloat() / updatedTotal.toFloat()).coerceIn(0.1f, 0.98f)
+                    bufferedBatches.addAll(fetchedBatch)
+                    fetchedBatch.forEach { bufferedIds.add(it.id) }
+                    batchesSinceLastPersist++
 
-                    // Expand display limit automatically so streamed items appear without requiring user scroll
-                    _proposedDisplayLimit.value = maxOf(
-                        _proposedDisplayLimit.value + fetchedBatch.size,
-                        _allWorkItems.value.size
-                    )
-                    _hasMoreServerItems.value = repository.hasUnloadedServerItems(normOrg)
+                    val now = System.currentTimeMillis()
+                    val hasMoreRemaining = repository.hasUnloadedServerItems(normOrg)
+                    val shouldPublishToUi = (now - lastUiPublishMs) >= BACKGROUND_STREAM_UI_THROTTLE_MS || !hasMoreRemaining
 
-                    repository.saveCachedOrganizationSnapshot(normOrg, _allWorkItems.value)
+                    if (shouldPublishToUi && bufferedBatches.isNotEmpty()) {
+                        val toMerge = bufferedBatches.toList()
+                        bufferedBatches.clear()
+                        bufferedIds.clear()
+                        mergeHydratedWorkItemsSuspend(toMerge)
+                        lastUiPublishMs = System.currentTimeMillis()
 
-                    // Yield/pause briefly between batches so UI scrolling and animations stay at 60fps
-                    delay(100L)
+                        val updatedLoaded = _allWorkItems.value.size
+                        val updatedRemaining = repository.getRemainingUnloadedCount(normOrg)
+                        val updatedTotal = (updatedLoaded + updatedRemaining).coerceAtLeast(1)
+                        _syncProgress.value = (updatedLoaded.toFloat() / updatedTotal.toFloat()).coerceIn(0.1f, 0.98f)
+
+                        // Expand display limit automatically so streamed items appear without requiring user scroll
+                        _proposedDisplayLimit.value = maxOf(
+                            _proposedDisplayLimit.value + toMerge.size,
+                            _allWorkItems.value.size
+                        )
+                        _hasMoreServerItems.value = hasMoreRemaining
+                    }
+
+                    if (batchesSinceLastPersist >= SNAPSHOT_PERSIST_BATCH_INTERVAL) {
+                        batchesSinceLastPersist = 0
+                        val snapshotItems = _allWorkItems.value
+                        withContext(Dispatchers.IO) {
+                            repository.saveCachedOrganizationSnapshot(normOrg, snapshotItems)
+                        }
+                    }
+
+                    // Yield briefly between batches while respecting the 250ms UI publish cadence
+                    delay(120L)
                 }
 
                 val finalActiveOrg = (_connectionStatus.value as? ConnectionStatus.Connected)?.organization
                 if (finalActiveOrg == null || finalActiveOrg.equals(normOrg, ignoreCase = true)) {
-                    repository.saveCachedOrganizationSnapshot(normOrg, _allWorkItems.value)
+                    if (bufferedBatches.isNotEmpty()) {
+                        val toMerge = bufferedBatches.toList()
+                        bufferedBatches.clear()
+                        bufferedIds.clear()
+                        mergeHydratedWorkItemsSuspend(toMerge)
+                        _proposedDisplayLimit.value = maxOf(
+                            _proposedDisplayLimit.value + toMerge.size,
+                            _allWorkItems.value.size
+                        )
+                    }
                     _hasMoreServerItems.value = repository.hasUnloadedServerItems(normOrg)
+                    val finalItems = _allWorkItems.value
+                    withContext(Dispatchers.IO) {
+                        repository.saveCachedOrganizationSnapshot(normOrg, finalItems)
+                    }
                 }
             } finally {
                 _isBackgroundSyncing.value = false
@@ -998,22 +1221,25 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                     .distinctBy { it.lowercase() }
                     .sorted()
                 activeOrg to orgProjects
-            }.collect { (activeOrg, projects) ->
-                if (activeOrg.isBlank() || projects.isEmpty()) return@collect
-
-                val resolvedDefaultForActiveOrg = resolveAndPersistDefaultProjectForOrg(activeOrg, projects)
-
-                if (!userManuallySelectedProject && !resolvedDefaultForActiveOrg.isNullOrBlank()) {
-                    if (_selectedProject.value == null || !_selectedProject.value.equals(resolvedDefaultForActiveOrg, ignoreCase = true)) {
-                        _selectedProject.value = resolvedDefaultForActiveOrg
-                    }
-                    return@collect
-                }
-                if (_selectedProject.value == null || projects.none { it.equals(_selectedProject.value, ignoreCase = true) }) {
-                    val fallbackProj = resolvedDefaultForActiveOrg ?: projects.first()
-                    _selectedProject.value = fallbackProj
-                }
             }
+                .distinctUntilChanged()
+                .flowOn(Dispatchers.Default)
+                .collect { (activeOrg, projects) ->
+                    if (activeOrg.isBlank() || projects.isEmpty()) return@collect
+
+                    val resolvedDefaultForActiveOrg = resolveAndPersistDefaultProjectForOrg(activeOrg, projects)
+
+                    if (!userManuallySelectedProject && !resolvedDefaultForActiveOrg.isNullOrBlank()) {
+                        if (_selectedProject.value == null || !_selectedProject.value.equals(resolvedDefaultForActiveOrg, ignoreCase = true)) {
+                            _selectedProject.value = resolvedDefaultForActiveOrg
+                        }
+                        return@collect
+                    }
+                    if (_selectedProject.value == null || projects.none { it.equals(_selectedProject.value, ignoreCase = true) }) {
+                        val fallbackProj = resolvedDefaultForActiveOrg ?: projects.first()
+                        _selectedProject.value = fallbackProj
+                    }
+                }
         }
 
         // Always keep one valid Default Project for the Default Organization

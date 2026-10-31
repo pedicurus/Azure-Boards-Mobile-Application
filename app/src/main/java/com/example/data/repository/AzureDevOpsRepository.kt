@@ -42,6 +42,7 @@ class AzureDevOpsRepository(context: Context) {
     private val hydratedIdsByOrg = ConcurrentHashMap<String, MutableSet<Int>>()
     private val unloadedProposedIdsByOrg = ConcurrentHashMap<String, MutableList<Int>>()
     private val unloadedOtherIdsByOrg = ConcurrentHashMap<String, MutableList<Int>>()
+    private val cachedProjectsByOrgMemory = ConcurrentHashMap<String, List<String>>()
 
     companion object {
         private const val KEY_DEFAULT_ORG = "pref_azure_user_default_organization"
@@ -60,6 +61,24 @@ class AzureDevOpsRepository(context: Context) {
         const val CATEGORY_REMOVED = "Removed"
 
         private val stateCategoryCache = ConcurrentHashMap<String, String>()
+
+        private val IN_PROGRESS_STATE_NAMES = setOf(
+            "in progress", "inprogress", "active", "doing", "committed",
+            "در راه", "امروز", "در حال انجام", "فعال"
+        )
+        private val PROPOSED_STATE_NAMES = setOf(
+            "new", "to do", "todo", "proposed", "approved", "design", "open", "requested",
+            "اهداف", "کارها", "پیشنهادی", "جدید"
+        )
+        private val RESOLVED_STATE_NAMES = setOf(
+            "resolved", "ready", "حل شده", "آماده"
+        )
+        private val COMPLETED_STATE_NAMES = setOf(
+            "done", "closed", "completed", "تکمیل", "انجام شده", "بسته"
+        )
+        private val REMOVED_STATE_NAMES = setOf(
+            "removed", "cut", "منتفی", "حذف شده", "لغو"
+        )
 
         val NON_WORK_ITEM_TYPES = setOf(
             "feedback response",
@@ -217,6 +236,30 @@ class AzureDevOpsRepository(context: Context) {
         return propSize + otherSize
     }
 
+    fun resolveStateCategoryForWorkItem(item: WorkItem): String {
+        val cleanState = item.normStateLower
+        if (cleanState.isEmpty()) return CATEGORY_PROPOSED
+
+        val projLower = item.normTeamProjectLower
+        val typeLower = item.normTypeLower
+        if (projLower.isNotEmpty() && typeLower.isNotEmpty()) {
+            val scopedKey = "$projLower|$typeLower|$cleanState"
+            stateCategoryCache[scopedKey]?.let { return it }
+        }
+        stateCategoryCache[cleanState]?.let { return it }
+
+        val resolved = when (cleanState) {
+            in IN_PROGRESS_STATE_NAMES -> CATEGORY_IN_PROGRESS
+            in PROPOSED_STATE_NAMES -> CATEGORY_PROPOSED
+            in RESOLVED_STATE_NAMES -> CATEGORY_RESOLVED
+            in COMPLETED_STATE_NAMES -> CATEGORY_COMPLETED
+            in REMOVED_STATE_NAMES -> CATEGORY_REMOVED
+            else -> CATEGORY_PROPOSED
+        }
+        stateCategoryCache[cleanState] = resolved
+        return resolved
+    }
+
     fun resolveStateCategory(
         state: String?,
         project: String? = null,
@@ -231,26 +274,16 @@ class AzureDevOpsRepository(context: Context) {
         }
         stateCategoryCache[cleanState]?.let { return it }
 
-        return when {
-            cleanState in setOf(
-                "in progress", "inprogress", "active", "doing", "committed",
-                "در راه", "امروز", "در حال انجام", "فعال"
-            ) -> CATEGORY_IN_PROGRESS
-            cleanState in setOf(
-                "new", "to do", "todo", "proposed", "approved", "design", "open", "requested",
-                "اهداف", "کارها", "پیشنهادی", "جدید"
-            ) -> CATEGORY_PROPOSED
-            cleanState in setOf(
-                "resolved", "ready", "حل شده", "آماده"
-            ) -> CATEGORY_RESOLVED
-            cleanState in setOf(
-                "done", "closed", "completed", "تکمیل", "انجام شده", "بسته"
-            ) -> CATEGORY_COMPLETED
-            cleanState in setOf(
-                "removed", "cut", "منتفی", "حذف شده", "لغو"
-            ) -> CATEGORY_REMOVED
+        val resolved = when (cleanState) {
+            in IN_PROGRESS_STATE_NAMES -> CATEGORY_IN_PROGRESS
+            in PROPOSED_STATE_NAMES -> CATEGORY_PROPOSED
+            in RESOLVED_STATE_NAMES -> CATEGORY_RESOLVED
+            in COMPLETED_STATE_NAMES -> CATEGORY_COMPLETED
+            in REMOVED_STATE_NAMES -> CATEGORY_REMOVED
             else -> CATEGORY_PROPOSED
         }
+        stateCategoryCache[cleanState] = resolved
+        return resolved
     }
 
     fun isTerminalOrResolvedCategory(
@@ -438,28 +471,36 @@ class AzureDevOpsRepository(context: Context) {
     fun getCachedProjectsForOrg(organization: String): List<String> {
         val normOrg = extractOrganization(organization)
         if (normOrg.isBlank()) return emptyList()
-        val raw = prefs.getString(KEY_CACHED_PROJECTS_PREFIX + normOrg.lowercase(), null)
+        val orgKey = normOrg.lowercase()
+        cachedProjectsByOrgMemory[orgKey]?.let { return it }
+
+        val raw = prefs.getString(KEY_CACHED_PROJECTS_PREFIX + orgKey, null)
             ?: return emptyList()
-        return raw.split("|").map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
+        val parsed = raw.split("|").map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
+        cachedProjectsByOrgMemory[orgKey] = parsed
+        return parsed
     }
 
     fun saveCachedProjectsForOrg(organization: String, projects: List<String>) {
         val normOrg = extractOrganization(organization)
         if (normOrg.isBlank()) return
+        val orgKey = normOrg.lowercase()
         val cleaned = projects.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
         if (cleaned.isNotEmpty()) {
+            cachedProjectsByOrgMemory[orgKey] = cleaned
             prefs.edit()
-                .putString(KEY_CACHED_PROJECTS_PREFIX + normOrg.lowercase(), cleaned.joinToString("|"))
-                .commit()
+                .putString(KEY_CACHED_PROJECTS_PREFIX + orgKey, cleaned.joinToString("|"))
+                .apply()
         }
     }
 
     fun clearCredentials() {
+        cachedProjectsByOrgMemory.clear()
         localStore.clearAllCaches()
         prefs.edit()
             .remove(KEY_SAVED_ORGS)
             .remove(KEY_DEFAULT_ORG)
-            .commit()
+            .apply()
     }
 
     /**

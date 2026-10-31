@@ -3,8 +3,21 @@ package com.example.data.model
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
 
+fun normalizeWorkItemClassificationPath(rawPath: String?): String {
+    if (rawPath.isNullOrBlank()) return ""
+    return rawPath
+        .replace('/', '\\')
+        .split('\\')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .joinToString("\\")
+}
+
 /**
  * Clean domain model for an Azure DevOps Work Item.
+ * Pre-computes normalized and lowercased @Transient fields once at instantiation time
+ * (on background threads) so filtering, searching, and hierarchy prefix checks run in O(1)
+ * with zero per-pass string allocations.
  */
 @JsonClass(generateAdapter = true)
 data class WorkItem(
@@ -26,7 +39,59 @@ data class WorkItem(
     val parentId: Int? = null,
     val childIds: List<Int> = emptyList(),
     val tags: List<String> = emptyList()
-)
+) {
+    @Transient
+    val idString: String = id.toString()
+
+    @Transient
+    val titleLower: String = title.lowercase()
+
+    @Transient
+    val normTeamProjectLower: String = teamProject?.trim()?.lowercase().orEmpty()
+
+    @Transient
+    val normTypeLower: String = workItemType.trim().lowercase()
+
+    @Transient
+    val normStateLower: String = state.trim().lowercase()
+
+    @Transient
+    val normAssigneeLower: String = assignedToName?.trim()?.lowercase().orEmpty()
+
+    @Transient
+    val isUnassigned: Boolean = normAssigneeLower.isEmpty() || normAssigneeLower == "unassigned"
+
+    @Transient
+    val descriptionLower: String = description?.lowercase().orEmpty()
+
+    @Transient
+    val normAreaPath: String = normalizeWorkItemClassificationPath(areaPath)
+
+    @Transient
+    val normAreaPathLower: String = normAreaPath.lowercase()
+
+    @Transient
+    val normIterationPath: String = normalizeWorkItemClassificationPath(iterationPath)
+
+    @Transient
+    val normIterationPathLower: String = normIterationPath.lowercase()
+
+    @Transient
+    val tagsLower: List<String> = if (tags.isEmpty()) {
+        emptyList()
+    } else {
+        tags.map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+    }
+
+    @Transient
+    val isCompletedOrTerminalState: Boolean =
+        normStateLower == "done" ||
+            normStateLower == "closed" ||
+            normStateLower == "resolved" ||
+            normStateLower == "تکمیل" ||
+            normStateLower == "completed"
+}
+
 
 /**
  * On-device persisted snapshot of work items and progressive sync state for an organization.

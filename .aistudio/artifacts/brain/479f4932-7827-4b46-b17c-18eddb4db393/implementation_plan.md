@@ -1,112 +1,119 @@
-# Hierarchical Areas & Iterations Across Filters, Detail, and Creation
+# Azure Boards High-Performance Pipeline & UI Responsiveness Refactoring
 
-This update introduces Azure Boards **Areas** (`System.AreaPath`) and **Iterations** (`System.IterationPath`) as full hierarchical classification trees across the app—adding a collapsible **Assignee + Area + Iteration** filter bar on the Home screen, a dedicated **Area & Iteration** section before **Description** on both the **Detail** and **Create New Item** pages, and an interactive **Expandable Tree Picker** with search and path breadcrumbs.
-
----
+Eliminates UI thread blocking, frame drops, and memory churn when loading thousands of work items, switching work item types or states, and filtering by Assignee, Area, or Iteration by moving all data pipelines off the Main thread, sharing pre-filtered intermediate flows, pre-normalizing hierarchy paths, throttling background sync emissions to 250ms, and preventing unnecessary Compose recompositions.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following design and functional choices were confirmed during clarification and govern this implementation:
+> All architectural and throttling preferences have been confirmed in Phase 1:
 
-- **Confirmed Decision 1 — Expandable Indented Tree Picker with Search & Path Preview**: Users browse and pick Areas and Iterations using an interactive hierarchical tree modal featuring expand/collapse chevrons for parent nodes, indentation per hierarchy level, a real-time search box, and a full breadcrumb path preview.
-- **Confirmed Decision 2 — Hierarchical Sub-Path Filtering (`Under` Semantics)**: Selecting a parent Area or Iteration in the Home filter bar automatically includes work items assigned to that path **and all of its child sub-paths** (matching Azure Boards `UNDER` query semantics).
-- **Confirmed Decision 3 — Hide/Unhide Filters Button Beside Project Title**: A filter toggle button next to the Project title on the Home screen shows or hides the **Assignee, Area, and Iteration** filter row below the **Create New Items** button (with an active filter count badge when filters are applied while collapsed).
+- **Confirmed Decision 1 (Optimization Scope)**: Execute the **Full 5-Step Coroutine Refactoring Plan** from the performance review **plus the 4 additional bottlenecks** identified in the codebase (pre-normalized hierarchy paths, periodic/debounced disk snapshot persistence, Compose recomposition isolation for `allWorkItems`, and non-blocking cache reads).
+- **Confirmed Decision 2 (Background Sync Emission Cadence)**: **Throttle UI list updates to every 250ms** during background streaming so incoming work item batches merge smoothly without flooding downstream combiners or interrupting 60fps scrolling.
 
 ---
 
 ## 1. Overview & Core Concept
 
-- **What It Does**:
-  - Fetches the authoritative Area and Iteration classification trees from Azure DevOps (`_apis/wit/classificationnodes/areas?$depth=10` and `_apis/wit/classificationnodes/iterations?$depth=10`) and merges them with any Area/Iteration paths observed on loaded work items so the hierarchy is always complete even offline.
-  - Combines **Assignee**, **Area**, and **Iteration** into a unified, collapsible filter section below the **Create New Items** button on the Home screen, controlled by a **Hide/Unhide Filters** button right beside the Project title.
-  - Adds a dedicated **Classification (Area & Iteration)** section immediately before the **Description** section on both the **Work Item Detail** sheet and the **Create New Item** sheet, allowing instant viewing and editing of a work item's Area and Iteration with server persistence.
-- **Target Audience / Persona**: Teams and project managers organizing Azure Boards backlogs across multiple product areas, sub-teams, releases, and sprints.
-- **Key Value**: Brings full Azure Boards spatial and temporal hierarchy navigation to mobile without cluttering the Home screen or forms.
+- **What It Does**: Re-architects the reactive state and caching pipeline so that zero list filtering, string splitting, hierarchy expansion, sorting, or JSON serialization occurs on the Android Main (UI) thread.
+- **Target Audience / Persona**: Teams and project managers working with large Azure DevOps organizations (hundreds to thousands of work items across multiple projects, nested Areas, Iterations, and custom process states).
+- **Key Value**: Instantaneous (sub-16ms) response when tapping Type or State chips, opening or selecting Area/Iteration trees, typing in the search bar, or scrolling while background sync is active.
 
 ---
 
 ## 2. User Experience & Visual Design
 
 - **Key User Flows**:
-  1. **Home Screen Filtering & Hide/Unhide Toggle**:
-     - Below the **Create New Items** button, the Project header row displays the interactive **Project selector** on the left and a **Hide/Unhide Filters** toggle pill/icon button on the right (displaying an active badge count if any Assignee, Area, or Iteration filter is active).
-     - When visible, a sleek horizontal filter strip directly below the Project row houses three coordinated filter pills: **Assignee**, **Area**, and **Iteration** (above the Work Item Type and State capsules).
-     - Tapping **Area** or **Iteration** opens the hierarchical **Tree Picker Dialog** with an `"All Areas"` / `"All Iterations"` option at the top and expandable tree nodes below. Selecting any parent node filters the list to items in that node or any nested child path.
-  2. **Detail Page & Create New Item Page (Section Before Description)**:
-     - Located after the **State & Assignee** metadata row and **before the Description section**, a structured **Area & Iteration** section presents two interactive cards/rows:
-       - **Area**: Shows the leaf area name in bold alongside its compact parent breadcrumb trail (e.g., `Project › Platform › Backend`). Tapping opens the Area Tree Picker and immediately updates `System.AreaPath`.
-       - **Iteration**: Shows the leaf sprint/iteration name in bold alongside its parent release/project breadcrumb (e.g., `Project › 2026 Q4 › Sprint 14`). Tapping opens the Iteration Tree Picker and immediately updates `System.IterationPath`.
-  3. **Expandable Indented Tree Picker Modal**:
-     - **Top Search Input**: Filters the tree in real time; when searching, matching nodes and their ancestor paths are automatically expanded.
-     - **Selected Path Preview Banner**: Displays the currently selected full breadcrumb path (`Project \ Team \ Sub-Area`) with RTL/LTR text awareness.
-     - **Interactive Hierarchy Tree**: Each node row has an expand/collapse chevron (if it has children) and a selectable node body indented by `depth * 18.dp`, with a folder/hierarchy icon for Areas and a calendar/sprint icon for Iterations.
-
+  1. **Zero-Jank Startup & Organization Switch**: Cached work items and metadata restore asynchronously off the UI thread while keeping the first frame responsive.
+  2. **Instant Chip & Hierarchy Filtering**: Tapping any Work Item Type, State chip, Assignee, Area, or Iteration filter immediately updates the visual selection state on the UI thread while the background worker pool (`Dispatchers.Default`) computes the filtered list from pre-indexed fields in a single pass.
+  3. **Smooth 60fps Scrolling During Background Sync**: While `startIterativeBackgroundStream` fetches 50-item batches in the background, UI list updates are coalesced and throttled to a **250ms cadence**, and full-snapshot JSON disk writes happen periodically in the background rather than after every single batch.
 - **Visual Identity & Theme**:
-  - *Aesthetic Direction*: Crisp neumorphic-light surfaces matching the existing Azure Boards mobile design language.
-  - *Color Palette & Mood*:
-    - Surface background: `#F8FAFC` / `#FFFFFF` cards with `#DCE1EF` borders.
-    - Primary accent: Azure Blue `#0078D4` (`NeumorphicTeal`) for active filter pills, selected tree nodes, and active filter badges.
-    - Hierarchy connectors & breadcrumbs: Muted slate `#64748B` for parent segments and `#0F172A` bold for the active leaf segment.
-  - *Interactive Feedback & Motion*: Smooth `AnimatedVisibility(expandVertically() + fadeIn(), shrinkVertically() + fadeOut())` when toggling the **Assignee / Area / Iteration** filter section open or closed, and animated chevron rotation when expanding/collapsing tree branches.
+  - Preserves the existing Azure Boards aesthetic (`#FFFFFF` to `#DFE4F1` vertical gradient canvas, `#0078D4` accent blue, `#0D101C` primary typography, `#6E7591` muted labels, and `#DCE1EF` card borders).
+- **Interactive Feedback & Motion**:
+  - Filter chip transitions, expandable Area/Iteration tree nodes, and bottom sheets animate smoothly at 60fps without frame skips or main-thread stalls.
 
 ---
 
 ## 3. Key Product Decisions & Trade-Offs
 
-- **Decision 1 — Expandable Tree with Compact Breadcrumb Display on Cards/Pills**:
-  - *Chosen Approach*: Show the leaf node name prominently with a subtle parent path subtitle in the Detail/Create section, and open an expandable indented tree modal on tap.
-  - *Why*: Deep Azure DevOps paths (e.g., `OrganizationProject\Product\Mobile\Android\Auth`) overflow single-line dropdowns on mobile screens. Showing the leaf + compact breadcrumb keeps the layout scannable while preserving full hierarchy context in the tree modal.
-  - *Alternatives Considered*: Flat dropdown menus with raw backslash strings, which truncate critical leaf names on narrow viewports.
-- **Decision 2 — Hybrid Classification Tree Resolution (Server Classification Nodes API + Work Item Path Synthesis)**:
-  - *Chosen Approach*: Fetch the full project tree from `_apis/wit/classificationnodes` and merge it with prefix trees constructed from `areaPath` and `iterationPath` values across cached/loaded work items.
-  - *Why*: Guarantees that newly created empty Areas/Sprints from Azure Boards appear in the tree while also working seamlessly offline from cached work items.
-- **Decision 3 — Hierarchical Prefix Matching (`UNDER`) for Home Filters**:
-  - *Chosen Approach*: Normalize backslash/slash separators and match `itemPath.equals(selectedPath, ignoreCase = true) || itemPath.startsWith("$selectedPath\\", ignoreCase = true)`.
-  - *Why*: Matches standard Azure Boards `System.AreaPath UNDER '...'` behavior so selecting a team or release roll-up shows all work items across its child sub-areas or sprints.
+- **Decision 1: Shared Intermediate Flows + `flowOn(Dispatchers.Default)` + `conflate()` + `distinctUntilChanged()`**
+  - *Chosen Approach*: Introduce shared intermediate flows (`activeOrgAndProjectFlow`, `projectScopedWorkItems`, and `projectAndTypeScopedWorkItems`) running on `Dispatchers.Default` with `.conflate()` and `.distinctUntilChanged()`. All downstream flows (`filteredWorkItems`, `hasMoreItems`, `availableTypes`, `availableStates`, `projectAssignees`, `projectFrequentTags`, `projectAreas`, `projectIterations`, `remainingItemsCount`, `completedItemsCount`, `selectedWorkItemChildren`) derive from these shared flows on `Dispatchers.Default`.
+  - *Why*: Previously, 12+ separate `combine` blocks each scanned the entire `_allWorkItems` list independently on `Dispatchers.Main`. Sharing pre-filtered project/type subsets on `Dispatchers.Default` cuts redundant list iterations by ~75% and completely frees the UI thread.
+  - *Alternatives Considered*: Only adding `.flowOn(Dispatchers.Default)` to `filteredWorkItems`—rejected because the remaining 11 flows would still scan `_allWorkItems` on the Main thread on every batch emission.
+
+- **Decision 2: Pre-Normalized & Pre-Lowercased Lookup Fields on `WorkItem`**
+  - *Chosen Approach*: Pre-compute normalized, lowercased transient fields (`normAreaPathLower`, `normIterationPathLower`, `normTeamProjectLower`, `normTypeLower`, `normStateLower`, `normAssigneeLower`, `titleLower`) once when a `WorkItem` is constructed or hydrated, and replace `.groupBy` string allocation in "All" States mode with a single-pass top-K accumulator per `(workItemType, state)` pair.
+  - *Why*: Previously, `matchesClassificationHierarchy()` split and re-joined `areaPath` and `iterationPath` strings on every item during every filter evaluation, and `.lowercase().trim()` was called tens of thousands of times per second. Pre-computing these once on background hydration turns filtering into O(1) reference/prefix comparisons with zero allocations.
+  - *Alternatives Considered*: Computing normalized strings inside `filteredWorkItems`—rejected because it still allocates temporary strings and lists on every filter change.
+
+- **Decision 3: 250ms UI Throttling (`sample`/`conflate`) & Coalesced Snapshot Persistence During Background Sync**
+  - *Chosen Approach*: Throttle `_allWorkItems` emissions into UI-facing combiners to at most once every **250ms** while background streaming is active (while keeping user-initiated edits and filter clicks instantaneous), and persist the JSON snapshot to disk every 5 batches (or when the stream finishes/cancels) on `Dispatchers.IO` instead of after every single 50-item batch.
+  - *Why*: Serializing 1,000+ `WorkItem` objects to JSON after every 50-item batch caused O(N²) CPU and garbage collection spikes during scrolling.
+  - *Alternatives Considered*: Waiting until 100% of background items finish syncing before updating the UI—rejected because users prefer seeing progressive items appear smoothly every 250ms.
+
+- **Decision 4: Isolate `allWorkItems` Recomposition Scope in Compose**
+  - *Chosen Approach*: Expose a dedicated `totalWorkItemsCount: StateFlow<Int>` (with `.distinctUntilChanged()`) for the Settings dialog counter and avoid triggering full `WorkItemsScreen` recompositions on every `_allWorkItems` emission when `filteredWorkItems` has not changed.
+  - *Why*: Collecting the raw `allWorkItems` list at the root composable forced Compose to re-evaluate `WorkItemsScreen` on every background batch even when the visible filtered list was unchanged.
 
 ---
 
 ## 4. Technical Architecture & Data Strategy *(Technical Reference)*
 
-- **Architecture & Component Diagram**:
+### Architecture & Reactive Data Flow Diagram
+
 ```
-┌───────────────────────────────────────────────────────────────────────────┐
-│                         AzureDevOpsService (REST)                         │
-│  • GET {org}/{project}/_apis/wit/classificationnodes?$depth=10            │
-│  • PATCH /fields/System.AreaPath & /fields/System.IterationPath           │
-└────────────────────────────────────┬──────────────────────────────────────┘
-                                     │
-                                     ▼
-┌───────────────────────────────────────────────────────────────────────────┐
-│                           AzureDevOpsRepository                           │
-│  • Fetches & caches Project Area/Iteration paths per Organization/Project │
-│  • Builds hierarchical ClassificationTreeNode trees from paths + API      │
-│  • Updates & creates WorkItems with System.AreaPath & System.IterationPath│
-└────────────────────────────────────┬──────────────────────────────────────┘
-                                     │
-                                     ▼
-┌───────────────────────────────────────────────────────────────────────────┐
-│                            AzureDevOpsViewModel                           │
-│  • StateFlows: areaFilter, iterationFilter, projectAreas, projectIterations│
-│  • Hierarchical UNDER filter in filteredWorkItems combine pipeline        │
-└───────────────┬─────────────────────────────┬─────────────────────────────┘
-                │                             │
-                ▼                             ▼
-┌───────────────────────────────────┐ ┌─────────────────────────────────────┐
-│          WorkItemsScreen          │ │   Detail & Create Work Item Sheets  │
-│  • Project Header + Hide/Unhide   │ │  • Area & Iteration Section placed  │
-│    Filters Toggle Button          │ │    before Description section       │
-│  • Collapsible Filter Section:    │ │  • Opens HierarchyTreePickerDialog  │
-│    [Assignee] [Area] [Iteration]  │ │    for Area or Iteration selection  │
-└───────────────────────────────────┘ └─────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                     AzureDevOpsRepository (Dispatchers.IO)                   │
+│  • Hydrates RawWorkItem -> WorkItem with pre-normalized lowercase fields     │
+│  • Coalesced/periodic snapshot persistence (every 5 batches & on completion) │
+│  • In-memory cached project lists (zero synchronous disk reads in combiners) │
+└──────────────────────────────────────┬───────────────────────────────────────┘
+                                       │ Batched & 250ms-throttled during sync
+                                       ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                  Shared Base Flows (Dispatchers.Default)                     │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │ _allWorkItems (conflated / 250ms throttled during background stream)   │  │
+│  └───────────────────────────────────┬────────────────────────────────────┘  │
+│                                      ▼                                       │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │ projectScopedWorkItems (filtered once by resolved effective project)   │  │
+│  │ + distinctUntilChanged() + flowOn(Dispatchers.Default)                 │  │
+│  └───────────────┬────────────────────────────────────────┬───────────────┘  │
+│                  │                                        │                  │
+│                  ▼                                        ▼                  │
+│  ┌───────────────────────────────────────┐  ┌─────────────────────────────┐  │
+│  │ projectAndTypeScopedWorkItems         │  │ Project Metadata Flows      │  │
+│  │ (filtered by workItemType)            │  │ • availableTypes            │  │
+│  │ • availableStates                     │  │ • projectAssignees          │  │
+│  │ • hasMoreItems                        │  │ • projectFrequentTags       │  │
+│  │ • filteredWorkItems (O(1) path check, │  │ • projectAreas              │  │
+│  │   top-5 terminal bucket accumulator)  │  │ • projectIterations         │  │
+│  └───────────────────┬───────────────────┘  └──────────────┬──────────────┘  │
+└──────────────────────┼─────────────────────────────────────┼─────────────────┘
+                       │ StateFlow (distinct emissions only) │
+                       ▼                                     ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                        Jetpack Compose UI (Main Thread)                      │
+│  • WorkItemsScreen observes filteredWorkItems & totalWorkItemsCount          │
+│  • Detail & Create sheets receive memoized project-scoped Area/Iteration     │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Data Model & State**:
-  - `ClassificationNodeResponse` / `RawClassificationNode`: Models recursive `children` from the Azure DevOps Classification Nodes REST API, normalized into canonical backslash-delimited paths (`Project\Node\SubNode`).
-  - `HierarchyNodeUiModel`: Represents each node in the UI tree with `name`, `fullPath`, `parentBreadcrumb`, `depth`, and `children: List<HierarchyNodeUiModel>`.
-  - `CachedOrganizationMetadata`: Extended with `areasByProject: Map<String, List<String>>` and `iterationsByProject: Map<String, List<String>>` for instant startup restoration.
-- **Interactive Component & State Mapping**:
-  - **Home Filter Toggle & Selection**: Clicking the filter toggle button beside the Project title flips `areFiltersVisible`; selecting an Area or Iteration updates `viewModel.setAreaFilter(path)` or `viewModel.setIterationFilter(path)` and triggers server/local filtering using hierarchical prefix matching.
-  - **Detail Page Area/Iteration Editing**: Selecting a new Area or Iteration in `FigmaItemDetailView` updates `currentAreaPath` / `currentIterationPath` and invokes `onUpdateWorkItem(workItem.copy(areaPath = ..., iterationPath = ...))`, which patches `/fields/System.AreaPath` and `/fields/System.IterationPath` on Azure DevOps.
-  - **Create New Item Page Area/Iteration Selection**: Defaults `currentAreaPath` and `currentIterationPath` to the selected project root (or active filter path if under the project) and sends `/fields/System.AreaPath` and `/fields/System.IterationPath` in `createWorkItemOnServer`.
+### Data Model & Pre-Computed Indexing Strategy
+
+- **Pre-Computed Transient Fields on `WorkItem`**:
+  - Add `@Transient` pre-computed fields on `WorkItem` (`normTeamProjectLower`, `normTypeLower`, `normStateLower`, `normAssigneeLower`, `normAreaPath`, `normAreaPathLower`, `normAreaPrefixLower`, `normIterationPath`, `normIterationPathLower`, `normIterationPrefixLower`, `titleLower`, `idString`) initialized in the `WorkItem` class body.
+  - Because `@Transient` properties are excluded from Moshi JSON serialization and computed once upon object instantiation on background threads, `matchesClassificationHierarchy(item, filterNormLower, filterPrefixLower)` becomes:
+    `item.normAreaPathLower == filterNormLower || item.normAreaPathLower.startsWith(filterPrefixLower)` — **zero string allocations, zero regex/splitting, O(1) execution**.
+- **Top-K Bucket Accumulator in `"All"` States Mode**:
+  - Replace `.groupBy { "${it.workItemType.trim().lowercase()}|${it.state.trim().lowercase()}" }.values.flatMap { group.sortedWith(...).take(5) }` with a lightweight per-bucket bounded list (`RECENT_COMPLETED_LIMIT_PER_TYPE_AND_STATE = 5`) keyed by `item.normTypeLower to item.normStateLower` so terminal items are never sorted in full.
+
+### Interactive Component & State Mapping
+
+- **Filter Changes (`setTypeFilter`, `setStateFilter`, `setAssigneeFilter`, `setAreaFilter`, `setIterationFilter`, `setProject`)**:
+  - Immediately update the corresponding `MutableStateFlow` so filter chips and buttons reflect selection in `<1ms`.
+  - Downstream `projectScopedWorkItems` -> `projectAndTypeScopedWorkItems` -> `filteredWorkItems` execute on `Dispatchers.Default` without touching the Main thread.
+- **Background Sync Throttling (`startIterativeBackgroundStream`)**:
+  - Accumulate incoming batches into `serverSyncedItems` and publish to `_allWorkItems` on a 250ms throttle window, while writing to `WorkItemLocalStore` every 5 batches and once in `finally` on `Dispatchers.IO`.
+- **Non-Blocking Cache Restoration (`restoreOrganizationFromLocalCache`)**:
+  - Cache `projectsByOrg` in memory inside `AzureDevOpsRepository` so `getCachedProjectsForOrg` never hits `SharedPreferences` or JSON parsing repeatedly inside `combine` blocks, and offload heavy snapshot deserialization to `Dispatchers.IO`.
