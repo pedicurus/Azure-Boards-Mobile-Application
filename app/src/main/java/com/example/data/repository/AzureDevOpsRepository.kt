@@ -3349,21 +3349,39 @@ class AzureDevOpsRepository(context: Context) {
         val targetId = detectedUserId?.trim()?.lowercase().orEmpty()
 
         if (targetName.isNotEmpty()) {
-            if (lowerText.contains("@$targetName")) return true
-            // Also check first name token if @FirstName is used and is at least 3 chars
-            val firstToken = targetName.substringBefore(' ').trim()
-            if (firstToken.length >= 3 && Regex("(?<![\\w@])@${Regex.escape(firstToken)}(?![\\w])").containsMatchIn(lowerText)) {
+            if (lowerText.contains("@$targetName") ||
+                (lowerText.contains("data-vss-mention") && lowerText.contains(targetName)) ||
+                lowerText.contains("@ $targetName")
+            ) {
+                return true
+            }
+            // Check parts of the name (e.g. first name or last name if at least 3 chars)
+            val nameParts = targetName.split(' ', '-', '_', '.').map { it.trim() }.filter { it.length >= 3 }
+            for (part in nameParts) {
+                if (lowerText.contains("@$part") ||
+                    Regex("(?<![\\w@])@${Regex.escape(part)}(?![\\w])").containsMatchIn(lowerText)
+                ) {
+                    return true
+                }
+            }
+            // If the targetName appears in the comment with a mention indicator
+            if (lowerText.contains(targetName) && (lowerText.contains("@") || lowerText.contains("mention") || lowerText.contains("<a "))) {
                 return true
             }
         }
         if (targetEmail.isNotEmpty()) {
-            if (lowerText.contains("@$targetEmail")) return true
+            if (lowerText.contains("@$targetEmail") || lowerText.contains(targetEmail)) return true
             val emailPrefix = targetEmail.substringBefore('@').trim()
-            if (emailPrefix.length >= 3 && Regex("(?<![\\w@])@${Regex.escape(emailPrefix)}(?![\\w])").containsMatchIn(lowerText)) {
-                return true
+            if (emailPrefix.length >= 3) {
+                if (lowerText.contains("@$emailPrefix") ||
+                    Regex("(?<![\\w@])@${Regex.escape(emailPrefix)}(?![\\w])").containsMatchIn(lowerText) ||
+                    (lowerText.contains(emailPrefix) && (lowerText.contains("@") || lowerText.contains("mention")))
+                ) {
+                    return true
+                }
             }
         }
-        if (targetId.isNotEmpty() && lowerText.contains(targetId)) {
+        if (targetId.isNotEmpty() && (lowerText.contains(targetId) || (lowerText.contains("data-vss-mention") && lowerText.contains(targetId)))) {
             return true
         }
         return false
@@ -3450,7 +3468,8 @@ class AzureDevOpsRepository(context: Context) {
      * Synchronizes Assigned and Mentioned notifications for [organization]:
      * 1. Auto-detects the authenticated user's display name & email via `_apis/connectionData` and `@Me` WIQL.
      * 2. Detects work items newly assigned to the user (`Assigned` section).
-     * 3. Scans recently updated work items' discussions for `@mentions` of the user (`Mentioned` section).
+     * 3. Scans work items and executes WIQL discussion history search for `@mentions` of the user,
+     *    querying deeper until at least 10 mentions are found (or available items exhausted).
      */
     suspend fun syncOrganizationNotifications(
         organization: String,
@@ -3504,7 +3523,7 @@ class AzureDevOpsRepository(context: Context) {
                 service.queryWorkItems(
                     organization = normOrg,
                     request = WiqlQueryRequest(query = wiql)
-                ).body()?.workItems.orEmpty().map { it.id }.take(40)
+                ).body()?.workItems.orEmpty().map { it.id }.take(50)
             }.getOrDefault(emptyList())
         } else {
             val escapedOverride = manualOverride.replace("'", "''")
@@ -3513,20 +3532,8 @@ class AzureDevOpsRepository(context: Context) {
                 service.queryWorkItems(
                     organization = normOrg,
                     request = WiqlQueryRequest(query = wiql)
-                ).body()?.workItems.orEmpty().map { it.id }.take(40)
+                ).body()?.workItems.orEmpty().map { it.id }.take(50)
             }.getOrDefault(emptyList())
-        }
-
-        val missingAssignedIds = assignedToMeServerIds.filter { it !in itemsById }.take(25)
-        if (missingAssignedIds.isNotEmpty()) {
-            runCatching {
-                val rawBatch = hydrateRawItemsByIds(service, normOrg, missingAssignedIds)
-                val parsedBatch = parseAndLinkRawWorkItems(rawBatch)
-                parsedBatch.forEach { item ->
-                    itemsById[item.id] = item
-                    newlyHydratedItems.add(item)
-                }
-            }
         }
 
         // Fallback: if connectionData didn't return a display name, infer it from @Me assigned items
@@ -3542,6 +3549,53 @@ class AzureDevOpsRepository(context: Context) {
         }
 
         val effectiveIdentityName = manualOverride ?: detectedName
+
+        // 2b. Query Work Items where [System.History] contains user mention or user identity
+        val mentionServerIds = mutableSetOf<Int>()
+        if (!effectiveIdentityName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) {
+            val mentionQueryTokens = mutableListOf<String>()
+            val escapedName = effectiveIdentityName?.replace("'", "''")?.trim()
+            if (!escapedName.isNullOrBlank()) {
+                mentionQueryTokens.add(escapedName)
+                val firstName = escapedName.substringBefore(' ').trim()
+                if (firstName.length >= 3 && firstName != escapedName) {
+                    mentionQueryTokens.add(firstName)
+                }
+            }
+            val escapedEmail = detectedEmail?.replace("'", "''")?.trim()
+            if (!escapedEmail.isNullOrBlank()) {
+                val emailPrefix = escapedEmail.substringBefore('@').trim()
+                if (emailPrefix.length >= 3) {
+                    mentionQueryTokens.add(emailPrefix)
+                }
+            }
+
+            for (token in mentionQueryTokens.take(3)) {
+                runCatching {
+                    val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.History] CONTAINS '$token' ORDER BY [System.ChangedDate] DESC"
+                    val resp = service.queryWorkItems(
+                        organization = normOrg,
+                        request = WiqlQueryRequest(query = wiql)
+                    )
+                    resp.body()?.workItems.orEmpty().map { it.id }.forEach { mentionServerIds.add(it) }
+                }
+                if (mentionServerIds.size >= 30) break
+            }
+        }
+
+        // Hydrate any missing work items from assigned and mention queries
+        val combinedMissingIds = (assignedToMeServerIds + mentionServerIds).filter { it !in itemsById }.take(50)
+        if (combinedMissingIds.isNotEmpty()) {
+            runCatching {
+                val rawBatch = hydrateRawItemsByIds(service, normOrg, combinedMissingIds)
+                val parsedBatch = parseAndLinkRawWorkItems(rawBatch)
+                parsedBatch.forEach { item ->
+                    itemsById[item.id] = item
+                    newlyHydratedItems.add(item)
+                }
+            }
+        }
+
         val assignedServerIdSet = assignedToMeServerIds.toSet()
 
         // Collect all items assigned to the effective user identity
@@ -3573,7 +3627,7 @@ class AzureDevOpsRepository(context: Context) {
         val currentAssignedKeySet = allAssignedItems.map { it.id.toString() }.toSet()
         knownAssignedMap.keys.retainAll(currentAssignedKeySet)
 
-        for (item in allAssignedItems.take(35)) {
+        for (item in allAssignedItems.take(50)) {
             val itemKey = item.id.toString()
             val previouslyKnownAssignee = knownAssignedMap[itemKey]
             val currentAssigneeSig = (item.assignedToName ?: effectiveIdentityName ?: "me").trim().lowercase()
@@ -3585,7 +3639,7 @@ class AzureDevOpsRepository(context: Context) {
             val epoch = parseIsoToEpochMs(changedIso).takeIf { it > 0L } ?: System.currentTimeMillis()
 
             if (previouslyKnownAssignee == null) {
-                // Newly discovered assignment to this user!
+                // Newly discovered assignment to this user
                 val isUnread = !isInitialAssignedBaseline
                 val notif = com.example.data.model.AppNotificationItem(
                     id = notifId,
@@ -3621,26 +3675,34 @@ class AzureDevOpsRepository(context: Context) {
             }
         }
 
-        // 3. Scan recently changed work items for Discussion @mentions
+        // 3. Scan work item discussions for @mentions
+        // Prioritize: items found via mention WIQL queries, then assigned items, then recently changed items
+        val candidateWorkItemIds = linkedSetOf<Int>()
+        mentionServerIds.forEach { candidateWorkItemIds.add(it) }
+        assignedToMeServerIds.forEach { candidateWorkItemIds.add(it) }
+        itemsById.values
+            .filter { !it.teamProject.isNullOrBlank() && !isExcludedNonWorkItemType(it.workItemType) }
+            .sortedByDescending { it.changedDate ?: "" }
+            .map { it.id }
+            .forEach { candidateWorkItemIds.add(it) }
+
+        val candidateItemsList = candidateWorkItemIds.mapNotNull { itemsById[it] }
+            .filter { !it.teamProject.isNullOrBlank() && !isExcludedNonWorkItemType(it.workItemType) }
+
         val isInitialMentionsBaseline = !currentState.baselineMentionsInitialized
         val lastCheckedIso = currentState.lastCheckedChangedDateIso
         var maxObservedChangedIso = lastCheckedIso
 
-        if (!effectiveIdentityName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) {
-            val candidateItemsForComments = itemsById.values
-                .filter { !it.teamProject.isNullOrBlank() && !isExcludedNonWorkItemType(it.workItemType) }
-                .sortedByDescending { it.changedDate ?: "" }
-                .let { sorted ->
-                    if (isInitialMentionsBaseline || lastCheckedIso.isNullOrBlank()) {
-                        sorted.take(10)
-                    } else {
-                        sorted.filter { (it.changedDate ?: "") > lastCheckedIso }.take(10)
-                    }
-                }
+        fun currentMentionCount(): Int = existingNotificationsById.values.count {
+            it.category == com.example.data.model.NotificationCategory.MENTIONED
+        }
 
-            if (candidateItemsForComments.isNotEmpty()) {
+        if (!effectiveIdentityName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) {
+            // Process candidates in batches of 15 until at least 10 mentions are found (or candidates exhausted, up to 90 items)
+            val candidateChunks = candidateItemsList.take(90).chunked(15)
+            for (chunk in candidateChunks) {
                 val commentResults = coroutineScope {
-                    candidateItemsForComments.map { workItem ->
+                    chunk.map { workItem ->
                         async {
                             val proj = workItem.teamProject?.trim().orEmpty()
                             val comments = fetchWorkItemComments(
@@ -3699,6 +3761,11 @@ class AzureDevOpsRepository(context: Context) {
                             }
                         }
                     }
+                }
+
+                // Stop scanning further if we have successfully accumulated at least 10 mentions
+                if (currentMentionCount() >= 10) {
+                    break
                 }
             }
 

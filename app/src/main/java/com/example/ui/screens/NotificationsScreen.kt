@@ -128,7 +128,7 @@ fun NotificationsScreen(
     }
     val totalUnreadCount = unreadAssignedCount + unreadMentionedCount
 
-    val activeItems = if (selectedTabIndex == 0) assignedNotifications else mentionedNotifications
+    val activeItems = (if (selectedTabIndex == 0) assignedNotifications else mentionedNotifications).take(10)
     val activeCategory = if (selectedTabIndex == 0) NotificationCategory.ASSIGNED else NotificationCategory.MENTIONED
 
     Column(

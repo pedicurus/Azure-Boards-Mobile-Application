@@ -408,7 +408,9 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
 
     val assignedNotifications: StateFlow<List<AppNotificationItem>> = _notificationsState
         .map { state ->
-            state.notifications.filter { it.category == NotificationCategory.ASSIGNED }
+            state.notifications
+                .filter { it.category == NotificationCategory.ASSIGNED }
+                .take(10)
         }
         .distinctUntilChanged()
         .flowOn(Dispatchers.Default)
@@ -416,7 +418,9 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
 
     val mentionedNotifications: StateFlow<List<AppNotificationItem>> = _notificationsState
         .map { state ->
-            state.notifications.filter { it.category == NotificationCategory.MENTIONED }
+            state.notifications
+                .filter { it.category == NotificationCategory.MENTIONED }
+                .take(10)
         }
         .distinctUntilChanged()
         .flowOn(Dispatchers.Default)
