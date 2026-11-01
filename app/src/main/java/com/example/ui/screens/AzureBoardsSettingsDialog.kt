@@ -88,6 +88,10 @@ fun AzureBoardsSettingsDialog(
     defaultProject: String?,
     selectedProject: String?,
     totalCount: Int,
+    detectedUserIdentity: String? = null,
+    manualIdentityOverride: String? = null,
+    availableAssignees: List<String> = emptyList(),
+    onManualIdentityOverrideChange: (String?) -> Unit = {},
     onDismiss: () -> Unit,
     onSwitchOrganization: (String) -> Unit,
     onDefaultOrganizationSelect: (String) -> Unit,
@@ -794,6 +798,230 @@ fun AzureBoardsSettingsDialog(
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(18.dp))
+                HorizontalDivider(color = DialogCardBorderColor, thickness = 1.dp)
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 4. Your Identity (For Assigned & @Mention Notifications)
+                var customIdentityInput by remember(manualIdentityOverride) {
+                    mutableStateOf(manualIdentityOverride.orEmpty())
+                }
+                var isEditingIdentity by remember { mutableStateOf(false) }
+                val effectiveIdentity = manualIdentityOverride?.takeIf { it.isNotBlank() }
+                    ?: detectedUserIdentity
+
+                Text(
+                    text = "Your Identity (For Notifications)",
+                    fontWeight = FontWeight.SemiBold,
+                    color = DialogTextDark,
+                    fontSize = 14.sp
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Used to alert you when an item is assigned to you or when you are @mentioned in Discussion.",
+                    color = DialogTextMuted,
+                    fontSize = 12.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFFF8FAFC),
+                    border = BorderStroke(1.dp, DialogCardBorderColor),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("settings_identity_card")
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = effectiveIdentity?.ifBlank { "Auto-detecting from PAT..." }
+                                        ?: "Auto-detecting from PAT...",
+                                    color = DialogTextDark,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                                Text(
+                                    text = if (!manualIdentityOverride.isNullOrBlank()) {
+                                        "Manual override active" + (detectedUserIdentity?.let { " (PAT: $it)" }.orEmpty())
+                                    } else {
+                                        "Auto-detected from Azure DevOps PAT"
+                                    },
+                                    color = DialogTextMuted,
+                                    fontSize = 11.sp
+                                )
+                            }
+
+                            TextButton(
+                                onClick = { isEditingIdentity = !isEditingIdentity },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.testTag("settings_toggle_identity_override_button")
+                            ) {
+                                Text(
+                                    text = if (isEditingIdentity) "Close" else "Override",
+                                    color = DialogAccentPurple,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        AnimatedVisibility(visible = isEditingIdentity) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 10.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = customIdentityInput,
+                                    onValueChange = { customIdentityInput = it },
+                                    label = { Text("Display Name or Email", fontSize = 12.sp) },
+                                    placeholder = {
+                                        Text(
+                                            text = detectedUserIdentity ?: "e.g. Jane Doe",
+                                            fontSize = 12.sp
+                                        )
+                                    },
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = DialogAccentPurple,
+                                        unfocusedBorderColor = DialogCardBorderColor,
+                                        focusedTextColor = DialogTextDark,
+                                        unfocusedTextColor = DialogTextDark
+                                    ),
+                                    trailingIcon = if (customIdentityInput.isNotEmpty()) {
+                                        {
+                                            IconButton(onClick = { customIdentityInput = "" }) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Clear,
+                                                    contentDescription = "Clear",
+                                                    tint = DialogTextMuted,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                        }
+                                    } else null,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("settings_identity_override_input")
+                                )
+
+                                if (availableAssignees.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = "Or pick from project team members:",
+                                        color = DialogTextMuted,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Column(
+                                        verticalArrangement = Arrangement.spacedBy(5.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        availableAssignees.take(6).forEach { member ->
+                                            val isSelected = customIdentityInput.trim().equals(member, ignoreCase = true)
+                                            Surface(
+                                                onClick = {
+                                                    customIdentityInput = member
+                                                    onManualIdentityOverrideChange(member)
+                                                    isEditingIdentity = false
+                                                },
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = if (isSelected) Color(0xFFEFF6FF) else Color.White,
+                                                border = BorderStroke(
+                                                    1.dp,
+                                                    if (isSelected) DialogAccentPurple else DialogCardBorderColor
+                                                ),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .testTag("settings_identity_member_$member")
+                                            ) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 10.dp, vertical = 7.dp)
+                                                ) {
+                                                    Text(
+                                                        text = member,
+                                                        color = if (isSelected) DialogAccentPurple else DialogTextDark,
+                                                        fontSize = 12.sp,
+                                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    if (isSelected) {
+                                                        Icon(
+                                                            imageVector = Icons.Filled.Check,
+                                                            contentDescription = null,
+                                                            tint = DialogAccentPurple,
+                                                            modifier = Modifier.size(14.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    horizontalArrangement = Arrangement.End,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    if (!manualIdentityOverride.isNullOrBlank()) {
+                                        TextButton(
+                                            onClick = {
+                                                customIdentityInput = ""
+                                                onManualIdentityOverrideChange(null)
+                                                isEditingIdentity = false
+                                            },
+                                            modifier = Modifier.testTag("settings_identity_use_autodetect_button")
+                                        ) {
+                                            Text(
+                                                text = "Use Auto-Detect",
+                                                color = DialogTextMuted,
+                                                fontSize = 12.sp
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Button(
+                                        onClick = {
+                                            onManualIdentityOverrideChange(customIdentityInput.trim().ifBlank { null })
+                                            isEditingIdentity = false
+                                        },
+                                        shape = RoundedCornerShape(8.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = DialogAccentPurple,
+                                            contentColor = Color.White
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                                        modifier = Modifier
+                                            .height(34.dp)
+                                            .testTag("settings_identity_save_button")
+                                    ) {
+                                        Text("Save Identity", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                     }
                                 }
                             }

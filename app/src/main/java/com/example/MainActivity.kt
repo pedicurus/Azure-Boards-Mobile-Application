@@ -1,9 +1,11 @@
 package com.example
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
@@ -12,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.notifications.NotificationHelper
 import com.example.ui.AzureDevOpsViewModel
 import com.example.ui.ConnectionStatus
 import com.example.ui.screens.ConnectionScreen
@@ -20,18 +23,43 @@ import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.NeumorphicBg
 
 class MainActivity : ComponentActivity() {
+
+    private val viewModel: AzureDevOpsViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        handleNotificationIntent(intent)
         setContent {
             MyApplicationTheme {
                 Surface(
                     color = NeumorphicBg,
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    AzureBoardsApp()
+                    AzureBoardsApp(viewModel = viewModel)
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleNotificationIntent(intent)
+    }
+
+    private fun handleNotificationIntent(intent: Intent?) {
+        if (intent == null) return
+        val workItemId = intent.getIntExtra(NotificationHelper.EXTRA_NOTIFICATION_WORK_ITEM_ID, -1)
+        if (workItemId > 0) {
+            val org = intent.getStringExtra(NotificationHelper.EXTRA_NOTIFICATION_ORG)
+            val notifId = intent.getStringExtra(NotificationHelper.EXTRA_NOTIFICATION_ID)
+            viewModel.handleNotificationDeepLink(
+                organization = org,
+                workItemId = workItemId,
+                notificationId = notifId
+            )
+            intent.removeExtra(NotificationHelper.EXTRA_NOTIFICATION_WORK_ITEM_ID)
         }
     }
 }
@@ -77,6 +105,12 @@ fun AzureBoardsApp(
     val selectedWorkItemChildren by viewModel.selectedWorkItemChildren.collectAsStateWithLifecycle()
     val selectedWorkItemComments by viewModel.selectedWorkItemComments.collectAsStateWithLifecycle()
     val isLoadingComments by viewModel.isLoadingComments.collectAsStateWithLifecycle()
+    val assignedNotifications by viewModel.assignedNotifications.collectAsStateWithLifecycle()
+    val mentionedNotifications by viewModel.mentionedNotifications.collectAsStateWithLifecycle()
+    val unreadNotificationsCount by viewModel.unreadNotificationsCount.collectAsStateWithLifecycle()
+    val isSyncingNotifications by viewModel.isSyncingNotifications.collectAsStateWithLifecycle()
+    val detectedUserIdentity by viewModel.detectedUserIdentity.collectAsStateWithLifecycle()
+    val manualIdentityOverride by viewModel.manualIdentityOverride.collectAsStateWithLifecycle()
 
     val isConnected = connectionStatus is ConnectionStatus.Connected || organizations.isNotEmpty()
     val activeOrganization = (connectionStatus as? ConnectionStatus.Connected)?.organization
@@ -129,6 +163,16 @@ fun AzureBoardsApp(
                 childWorkItems = selectedWorkItemChildren,
                 selectedWorkItemComments = selectedWorkItemComments,
                 isLoadingComments = isLoadingComments,
+                assignedNotifications = assignedNotifications,
+                mentionedNotifications = mentionedNotifications,
+                unreadNotificationsCount = unreadNotificationsCount,
+                isSyncingNotifications = isSyncingNotifications,
+                detectedUserIdentity = detectedUserIdentity,
+                manualIdentityOverride = manualIdentityOverride,
+                onManualIdentityOverrideChange = viewModel::setManualIdentityOverride,
+                onRefreshNotifications = { viewModel.syncNotificationsForActiveOrganization(postDeviceNotifications = true) },
+                onNotificationClick = viewModel::onNotificationClicked,
+                onMarkAllNotificationsRead = viewModel::markAllNotificationsRead,
                 getAllowedChildTypes = viewModel::getAllowedChildTypesForWorkItem,
                 getAllowedChildTypesForType = viewModel::getAllowedChildTypesForType,
                 getStatesForWorkItem = viewModel::getStatesForWorkItem,
@@ -170,3 +214,4 @@ fun AzureBoardsApp(
         }
     }
 }
+

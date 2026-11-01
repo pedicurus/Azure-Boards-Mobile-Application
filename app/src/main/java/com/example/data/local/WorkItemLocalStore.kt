@@ -1,6 +1,7 @@
 package com.example.data.local
 
 import android.content.Context
+import com.example.data.model.CachedNotificationsState
 import com.example.data.model.CachedOrganizationMetadata
 import com.example.data.model.CachedOrganizationSnapshot
 import com.squareup.moshi.Moshi
@@ -14,7 +15,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Provides fast, atomic on-device persistence for work items, progressive sync queues,
- * and project process/category metadata per Azure DevOps organization.
+ * project process/category metadata, and notifications per Azure DevOps organization.
  */
 class WorkItemLocalStore(context: Context) {
 
@@ -30,10 +31,12 @@ class WorkItemLocalStore(context: Context) {
 
     private val snapshotAdapter = moshi.adapter(CachedOrganizationSnapshot::class.java)
     private val metadataAdapter = moshi.adapter(CachedOrganizationMetadata::class.java)
+    private val notificationsAdapter = moshi.adapter(CachedNotificationsState::class.java)
 
     private val writeMutex = Mutex()
     private val inMemorySnapshots = ConcurrentHashMap<String, CachedOrganizationSnapshot>()
     private val inMemoryMetadata = ConcurrentHashMap<String, CachedOrganizationMetadata>()
+    private val inMemoryNotifications = ConcurrentHashMap<String, CachedNotificationsState>()
 
     private fun sanitizeOrgKey(organization: String): String {
         return organization.trim().lowercase().replace(Regex("[^a-z0-9._-]"), "_")
@@ -44,6 +47,9 @@ class WorkItemLocalStore(context: Context) {
 
     private fun metadataFile(orgKey: String): File =
         File(cacheDir, "metadata_${orgKey}.json")
+
+    private fun notificationsFile(orgKey: String): File =
+        File(cacheDir, "notifications_${orgKey}.json")
 
     /**
      * Loads the cached work item snapshot for [organization] from memory or local storage.
@@ -149,18 +155,73 @@ class WorkItemLocalStore(context: Context) {
         }
     }
 
+    /**
+     * Loads cached notifications state for [organization] from memory or local storage.
+     */
+    fun loadNotificationsStateSync(organization: String): CachedNotificationsState? {
+        val orgKey = sanitizeOrgKey(organization)
+        if (orgKey.isBlank()) return null
+        inMemoryNotifications[orgKey]?.let { return it }
+
+        val file = notificationsFile(orgKey)
+        if (!file.exists() || file.length() == 0L) return null
+        return try {
+            val rawJson = file.readText(Charsets.UTF_8)
+            val parsed = notificationsAdapter.fromJson(rawJson)
+            if (parsed != null) {
+                inMemoryNotifications[orgKey] = parsed
+            }
+            parsed
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    suspend fun loadNotificationsState(organization: String): CachedNotificationsState? =
+        withContext(Dispatchers.IO) {
+            loadNotificationsStateSync(organization)
+        }
+
+    /**
+     * Atomically persists notifications state for [organization] to device storage.
+     */
+    suspend fun saveNotificationsState(state: CachedNotificationsState) = withContext(Dispatchers.IO) {
+        val orgKey = sanitizeOrgKey(state.organization)
+        if (orgKey.isBlank()) return@withContext
+        inMemoryNotifications[orgKey] = state
+
+        writeMutex.withLock {
+            try {
+                if (!cacheDir.exists()) cacheDir.mkdirs()
+                val targetFile = notificationsFile(orgKey)
+                val tempFile = File(cacheDir, "notifications_${orgKey}.tmp")
+                val json = notificationsAdapter.toJson(state)
+                tempFile.writeText(json, Charsets.UTF_8)
+                if (!tempFile.renameTo(targetFile)) {
+                    targetFile.writeText(json, Charsets.UTF_8)
+                    tempFile.delete()
+                }
+            } catch (_: Exception) {
+                // Ignore disk write failure gracefully
+            }
+        }
+    }
+
     fun clearOrganizationCache(organization: String) {
         val orgKey = sanitizeOrgKey(organization)
         if (orgKey.isBlank()) return
         inMemorySnapshots.remove(orgKey)
         inMemoryMetadata.remove(orgKey)
+        inMemoryNotifications.remove(orgKey)
         runCatching { snapshotFile(orgKey).delete() }
         runCatching { metadataFile(orgKey).delete() }
+        runCatching { notificationsFile(orgKey).delete() }
     }
 
     fun clearAllCaches() {
         inMemorySnapshots.clear()
         inMemoryMetadata.clear()
+        inMemoryNotifications.clear()
         runCatching {
             cacheDir.listFiles()?.forEach { it.delete() }
         }

@@ -429,5 +429,62 @@ data class RawClassificationNode(
     @param:Json(name = "children") val children: List<RawClassificationNode>? = emptyList()
 )
 
+@JsonClass(generateAdapter = true)
+data class ConnectionDataResponse(
+    @param:Json(name = "authenticatedUser") val authenticatedUser: AuthenticatedUser? = null,
+    @param:Json(name = "authorizedUser") val authorizedUser: AuthenticatedUser? = null
+)
 
+@JsonClass(generateAdapter = true)
+data class AuthenticatedUser(
+    @param:Json(name = "id") val id: String? = null,
+    @param:Json(name = "providerDisplayName") val providerDisplayName: String? = null,
+    @param:Json(name = "customDisplayName") val customDisplayName: String? = null,
+    @param:Json(name = "uniqueName") val uniqueName: String? = null,
+    @param:Json(name = "properties") val properties: Map<String, Any?>? = null
+)
 
+object NotificationCategory {
+    const val ASSIGNED = "ASSIGNED"
+    const val MENTIONED = "MENTIONED"
+}
+
+/**
+ * Domain model representing a single Assigned or Mentioned notification in the app.
+ */
+@JsonClass(generateAdapter = true)
+data class AppNotificationItem(
+    val id: String,
+    val organization: String,
+    val workItemId: Int,
+    val workItemTitle: String,
+    val workItemType: String,
+    val workItemState: String,
+    val teamProject: String? = null,
+    val category: String, // NotificationCategory.ASSIGNED or NotificationCategory.MENTIONED
+    val actorName: String? = null,
+    val messageSnippet: String? = null,
+    val createdDateIso: String = "",
+    val formattedDate: String = "",
+    val epochMs: Long = 0L,
+    val commentId: Int? = null,
+    val isRead: Boolean = false
+)
+
+/**
+ * On-device persisted notification feed and baseline tracking state for an organization.
+ */
+@JsonClass(generateAdapter = true)
+data class CachedNotificationsState(
+    val organization: String,
+    val detectedDisplayName: String? = null,
+    val detectedEmail: String? = null,
+    val detectedUserId: String? = null,
+    val manualIdentityOverride: String? = null,
+    val notifications: List<AppNotificationItem> = emptyList(),
+    val notifiedNotificationIds: List<String> = emptyList(),
+    val baselineAssignedInitialized: Boolean = false,
+    val baselineMentionsInitialized: Boolean = false,
+    val knownAssignedItemStates: Map<String, String> = emptyMap(),
+    val lastCheckedChangedDateIso: String? = null
+)

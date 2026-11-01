@@ -177,6 +177,12 @@ interface AzureDevOpsService {
         @Query("\$depth") depth: Int = 10,
         @Query("api-version") apiVersion: String = "7.0"
     ): Response<com.example.data.model.RawClassificationNode>
+
+    @GET("{organization}/_apis/connectionData")
+    suspend fun getConnectionData(
+        @Path("organization") organization: String,
+        @Query("api-version") apiVersion: String = "7.0-preview"
+    ): Response<com.example.data.model.ConnectionDataResponse>
 }
 
 object AzureDevOpsClient {

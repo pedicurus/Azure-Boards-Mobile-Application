@@ -1,3 +1,15 @@
 <resources>
     <string name="app_name">Azure Boards</string>
+    <string name="notif_channel_assigned_name">Assigned Work Items</string>
+    <string name="notif_channel_assigned_desc">Notifications when an Azure Boards work item is assigned to you</string>
+    <string name="notif_channel_mentioned_name">Discussion Mentions</string>
+    <string name="notif_channel_mentioned_desc">Notifications when someone mentions you in a work item discussion</string>
+    <string name="notifications_title">Notifications</string>
+    <string name="notifications_tab_assigned">Assigned</string>
+    <string name="notifications_tab_mentioned">Mentioned</string>
+    <string name="notifications_mark_all_read">Mark all read</string>
+    <string name="notifications_empty_assigned_title">No assigned notifications yet</string>
+    <string name="notifications_empty_assigned_subtitle">When a work item is assigned to you, it will appear here and alert your device.</string>
+    <string name="notifications_empty_mentioned_title">No @mentions yet</string>
+    <string name="notifications_empty_mentioned_subtitle">When someone mentions you with @ in a work item discussion, it will appear here.</string>
 </resources>

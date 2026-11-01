@@ -1,6 +1,6 @@
 {
-  "summary":  "Comprehensive performance refactoring plan combining the 5-step coroutine flow optimization strategy with 4 additional memory/recomposition/I/O fixes and 250ms background sync UI throttling.",
-  "updatedAt":  "2026-10-31T19:00:31.761338080Z",
+  "summary":  "Implementation plan for adding Assigned & Mentioned device notifications, user identity detection via Azure DevOps ConnectionData with manual override in Settings, periodic background & live sync checks, header Bell icon with unread badge next to Settings, and a dedicated Notifications page with switchable Assigned and Mentioned tabs.",
+  "updatedAt":  "2026-11-01T04:31:43.040161445Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

@@ -3,11 +3,15 @@ package com.example.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.model.AppNotificationItem
+import com.example.data.model.CachedNotificationsState
 import com.example.data.model.CachedOrganizationSnapshot
+import com.example.data.model.NotificationCategory
 import com.example.data.model.OrganizationAccount
 import com.example.data.model.WorkItem
 import com.example.data.model.WorkItemComment
 import com.example.data.repository.AzureDevOpsRepository
+import com.example.notifications.NotificationHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -392,6 +396,56 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
     val isLoadingComments: StateFlow<Boolean> = _isLoadingComments.asStateFlow()
 
     private var activeCommentsJob: Job? = null
+    private var activeNotificationsSyncJob: Job? = null
+
+    private val _notificationsState = MutableStateFlow(
+        _defaultOrganization.value?.let { repository.getCachedNotificationsStateSync(it) }
+            ?: CachedNotificationsState(organization = "")
+    )
+
+    private val _isSyncingNotifications = MutableStateFlow(false)
+    val isSyncingNotifications: StateFlow<Boolean> = _isSyncingNotifications.asStateFlow()
+
+    val assignedNotifications: StateFlow<List<AppNotificationItem>> = _notificationsState
+        .map { state ->
+            state.notifications.filter { it.category == NotificationCategory.ASSIGNED }
+        }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val mentionedNotifications: StateFlow<List<AppNotificationItem>> = _notificationsState
+        .map { state ->
+            state.notifications.filter { it.category == NotificationCategory.MENTIONED }
+        }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val unreadNotificationsCount: StateFlow<Int> = _notificationsState
+        .map { state ->
+            state.notifications.count { !it.isRead }
+        }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val detectedUserIdentity: StateFlow<String?> = _notificationsState
+        .map { state ->
+            state.detectedDisplayName?.takeIf { it.isNotBlank() }
+                ?: state.detectedEmail?.takeIf { it.isNotBlank() }
+        }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val manualIdentityOverride: StateFlow<String?> = _notificationsState
+        .map { state ->
+            state.manualIdentityOverride?.takeIf { it.isNotBlank() }
+        }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     val totalWorkItemsCount: StateFlow<Int> = _allWorkItems
         .map { it.size }
@@ -1044,6 +1098,9 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
             }
         }
 
+        val cachedNotifs = repository.getCachedNotificationsStateSync(normOrg)
+        _notificationsState.value = cachedNotifs
+
         val snapshot = repository.getCachedOrganizationSnapshotSync(normOrg)
         if (snapshot != null && snapshot.workItems.isNotEmpty()) {
             serverSyncedItems.clear()
@@ -1194,6 +1251,20 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     init {
+        val appContext = getApplication<Application>().applicationContext
+        NotificationHelper.ensureNotificationChannels(appContext)
+        NotificationHelper.schedulePeriodicBackgroundSync(appContext)
+
+        // Periodic live notification check while the app is open and connected
+        viewModelScope.launch {
+            while (isActive) {
+                delay(90_000L)
+                if (_connectionStatus.value is ConnectionStatus.Connected && !_isSyncingNotifications.value) {
+                    syncNotificationsForActiveOrganization(postDeviceNotifications = true)
+                }
+            }
+        }
+
         // Automatically ensure the active organization's default project is selected when projects are available.
         // Pair activeOrg and its strictly-scoped projects together so a stale emission from a previous
         // organization can never overwrite the newly selected organization's project.
@@ -1546,6 +1617,7 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                     _syncProgress.value = null
                     _syncStatusText.value = null
                 }
+                syncNotificationsForActiveOrganization(postDeviceNotifications = true)
                 return@launch
             }
 
@@ -1660,6 +1732,7 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                         _syncProgress.value = null
                         _syncStatusText.value = null
                     }
+                    syncNotificationsForActiveOrganization(postDeviceNotifications = true)
                 },
                 onFailure = { error ->
                     _isLoading.value = false
@@ -1907,6 +1980,7 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                         _syncProgress.value = null
                         _syncStatusText.value = null
                     }
+                    syncNotificationsForActiveOrganization(postDeviceNotifications = true)
 
                     onResult(true, null)
                 },
@@ -2072,6 +2146,7 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                             _syncProgress.value = null
                             _syncStatusText.value = null
                         }
+                        syncNotificationsForActiveOrganization(postDeviceNotifications = true)
                     },
                     onFailure = { error ->
                         _isLoading.value = false
@@ -2153,6 +2228,7 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                         _syncProgress.value = null
                         _syncStatusText.value = null
                     }
+                    syncNotificationsForActiveOrganization(postDeviceNotifications = true)
                 },
                 onFailure = { error ->
                     _isLoading.value = false
@@ -2486,6 +2562,14 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         val org = acc?.organization ?: repository.getConfiguredUrl()
         val pat = acc?.pat ?: repository.getConfiguredPat()
         val project = item.teamProject ?: _selectedProject.value ?: ""
+
+        if (org.isNotBlank()) {
+            viewModelScope.launch {
+                val updatedState = repository.markNotificationsReadForWorkItem(org, item.id)
+                _notificationsState.value = updatedState
+            }
+        }
+
         if (org.isBlank() || pat.isBlank() || project.isBlank()) {
             _isLoadingComments.value = false
             return
@@ -2515,10 +2599,203 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                 if (_selectedWorkItem.value?.id == item.id) {
                     _selectedWorkItemComments.value = merged
                 }
+
+                // Evaluate fetched comments for any @mentions of the current user
+                val mentionOutcome = repository.evaluateWorkItemCommentsForMentions(
+                    organization = org,
+                    workItem = item,
+                    comments = serverComments
+                )
+                if (mentionOutcome.state.organization.isNotBlank()) {
+                    val markedReadState = repository.markNotificationsReadForWorkItem(org, item.id)
+                    _notificationsState.value = markedReadState
+                }
             }
             if (_selectedWorkItem.value?.id == item.id) {
                 _isLoadingComments.value = false
             }
+        }
+    }
+
+    /**
+     * Syncs Azure DevOps work item assignments and `@mentions` in discussions for the active organization.
+     * Any newly detected assignments or mentions since the baseline/last check also trigger an Android
+     * device notification via [NotificationHelper.postSystemNotification].
+     */
+    fun syncNotificationsForActiveOrganization(postDeviceNotifications: Boolean = true) {
+        val acc = getActiveAccount()
+        val org = acc?.organization ?: repository.getConfiguredUrl()
+        val pat = acc?.pat ?: repository.getConfiguredPat()
+        if (org.isBlank() || pat.isBlank()) return
+
+        val normOrg = repository.extractOrganization(org)
+        activeNotificationsSyncJob?.cancel()
+        activeNotificationsSyncJob = viewModelScope.launch {
+            _isSyncingNotifications.value = true
+            try {
+                val currentItems = if (_workItemsOrg.value.equals(normOrg, ignoreCase = true)) {
+                    _allWorkItems.value
+                } else {
+                    emptyList()
+                }
+                val outcome = repository.syncOrganizationNotifications(
+                    organization = normOrg,
+                    pat = pat,
+                    knownWorkItems = currentItems
+                )
+                if (outcome.newlyHydratedWorkItems.isNotEmpty() &&
+                    _workItemsOrg.value.equals(normOrg, ignoreCase = true)
+                ) {
+                    mergeHydratedWorkItemsSuspend(outcome.newlyHydratedWorkItems)
+                }
+                val activeOrgNow = (_connectionStatus.value as? ConnectionStatus.Connected)?.organization
+                    ?: _defaultOrganization.value
+                if (activeOrgNow == null || activeOrgNow.equals(normOrg, ignoreCase = true)) {
+                    _notificationsState.value = outcome.state
+                }
+                if (postDeviceNotifications && outcome.newlyTriggeredNotifications.isNotEmpty()) {
+                    val appContext = getApplication<Application>().applicationContext
+                    outcome.newlyTriggeredNotifications.forEach { notif ->
+                        NotificationHelper.postSystemNotification(appContext, notif)
+                    }
+                }
+            } finally {
+                _isSyncingNotifications.value = false
+            }
+        }
+    }
+
+    /**
+     * Sets or clears a manual user identity override for the active organization and re-syncs
+     * notifications immediately so Assigned and Mentioned items reflect the chosen identity.
+     */
+    fun setManualIdentityOverride(overrideName: String?) {
+        val acc = getActiveAccount()
+        val org = acc?.organization ?: _defaultOrganization.value ?: repository.getConfiguredUrl()
+        if (org.isBlank()) return
+        viewModelScope.launch {
+            val updated = repository.setManualIdentityOverride(org, overrideName)
+            _notificationsState.value = updated
+            syncNotificationsForActiveOrganization(postDeviceNotifications = false)
+        }
+    }
+
+    /**
+     * Marks all notifications (or all notifications in [category]) as read for the active organization.
+     */
+    fun markAllNotificationsRead(category: String? = null) {
+        val acc = getActiveAccount()
+        val org = acc?.organization ?: _defaultOrganization.value ?: repository.getConfiguredUrl()
+        if (org.isBlank()) return
+        viewModelScope.launch {
+            val updated = repository.markAllNotificationsRead(org, category)
+            _notificationsState.value = updated
+        }
+    }
+
+    /**
+     * Handles clicking a notification item on the Notifications screen:
+     * 1. Marks the notification as read.
+     * 2. Opens the corresponding Work Item Detail view (using the in-memory WorkItem or a
+     *    hydrated fallback while fetching latest details/comments).
+     */
+    fun onNotificationClicked(notification: AppNotificationItem) {
+        val acc = getActiveAccount()
+        val org = notification.organization.ifBlank {
+            acc?.organization ?: _defaultOrganization.value ?: repository.getConfiguredUrl()
+        }
+        if (org.isNotBlank()) {
+            viewModelScope.launch {
+                val updated = repository.markNotificationRead(org, notification.id)
+                _notificationsState.value = updated
+            }
+        }
+
+        val existingItem = _allWorkItems.value.firstOrNull { it.id == notification.workItemId }
+        if (existingItem != null) {
+            selectWorkItem(existingItem)
+            return
+        }
+
+        val fallbackItem = WorkItem(
+            id = notification.workItemId,
+            title = notification.workItemTitle,
+            workItemType = notification.workItemType,
+            state = notification.workItemState,
+            teamProject = notification.teamProject,
+            assignedToName = if (notification.category == NotificationCategory.ASSIGNED) {
+                manualIdentityOverride.value ?: detectedUserIdentity.value
+            } else {
+                null
+            },
+            createdDate = notification.createdDateIso,
+            changedDate = notification.createdDateIso
+        )
+        selectWorkItem(fallbackItem)
+
+        val pat = acc?.pat ?: repository.getConfiguredPat()
+        if (org.isNotBlank() && pat.isNotBlank()) {
+            viewModelScope.launch {
+                val searchRes = repository.searchWorkItemsOnServer(
+                    organization = org,
+                    pat = pat,
+                    query = notification.workItemId.toString(),
+                    project = notification.teamProject,
+                    alreadyLoadedIds = emptySet()
+                )
+                searchRes.onSuccess { fetched ->
+                    val hydrated = fetched.firstOrNull { it.id == notification.workItemId }
+                    if (hydrated != null) {
+                        mergeHydratedWorkItemsSuspend(listOf(hydrated))
+                        if (_selectedWorkItem.value?.id == hydrated.id) {
+                            _selectedWorkItem.value = hydrated
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Handles deep-link navigation when the user taps an Android system push notification.
+     */
+    fun handleNotificationDeepLink(
+        organization: String?,
+        workItemId: Int,
+        notificationId: String?
+    ) {
+        if (workItemId <= 0) return
+        val targetOrg = organization?.takeIf { it.isNotBlank() }
+            ?: (_connectionStatus.value as? ConnectionStatus.Connected)?.organization
+            ?: _defaultOrganization.value
+            ?: ""
+
+        if (targetOrg.isNotBlank()) {
+            val activeOrg = (_connectionStatus.value as? ConnectionStatus.Connected)?.organization
+            if (activeOrg != null && !activeOrg.equals(targetOrg, ignoreCase = true)) {
+                switchOrganization(targetOrg)
+            }
+            viewModelScope.launch {
+                val updated = if (!notificationId.isNullOrBlank()) {
+                    repository.markNotificationRead(targetOrg, notificationId)
+                } else {
+                    repository.markNotificationsReadForWorkItem(targetOrg, workItemId)
+                }
+                _notificationsState.value = updated
+            }
+        }
+
+        val matchingNotif = _notificationsState.value.notifications.firstOrNull {
+            it.id == notificationId || it.workItemId == workItemId
+        }
+        if (matchingNotif != null) {
+            onNotificationClicked(matchingNotif)
+            return
+        }
+
+        val existingItem = _allWorkItems.value.firstOrNull { it.id == workItemId }
+        if (existingItem != null) {
+            selectWorkItem(existingItem)
         }
     }
 

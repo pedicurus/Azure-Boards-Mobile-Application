@@ -51,6 +51,8 @@ import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.NotificationsNone
 import androidx.compose.material.icons.filled.PersonOutline
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SearchOff
@@ -113,6 +115,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
+import com.example.data.model.AppNotificationItem
 import com.example.data.model.OrganizationAccount
 import com.example.data.model.WorkItem
 import com.example.data.model.WorkItemComment
@@ -224,9 +227,20 @@ fun WorkItemsScreen(
     onRefresh: () -> Unit,
     onDisconnect: () -> Unit,
     onUpdateWorkItem: (WorkItem) -> Unit = {},
+    assignedNotifications: List<AppNotificationItem> = emptyList(),
+    mentionedNotifications: List<AppNotificationItem> = emptyList(),
+    unreadNotificationsCount: Int = 0,
+    isSyncingNotifications: Boolean = false,
+    detectedUserIdentity: String? = null,
+    manualIdentityOverride: String? = null,
+    onManualIdentityOverrideChange: (String?) -> Unit = {},
+    onRefreshNotifications: () -> Unit = {},
+    onNotificationClick: (AppNotificationItem) -> Unit = {},
+    onMarkAllNotificationsRead: (String?) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showCreateSheet by remember { mutableStateOf(false) }
+    var showNotificationsPage by remember { mutableStateOf(false) }
 
     // Handle hardware/gesture back to dismiss detail or create sheet when open
     BackHandler(enabled = selectedWorkItem != null) {
@@ -234,6 +248,9 @@ fun WorkItemsScreen(
     }
     BackHandler(enabled = showCreateSheet) {
         showCreateSheet = false
+    }
+    BackHandler(enabled = showNotificationsPage && selectedWorkItem == null) {
+        showNotificationsPage = false
     }
 
     var showSettingsDialog by remember { mutableStateOf(false) }
@@ -350,6 +367,32 @@ fun WorkItemsScreen(
                         }
                     }
 
+                    // Bell symbol next to the Settings icon
+                    IconButton(
+                        onClick = {
+                            if (isSearchBarOpen) {
+                                focusManager.clearFocus()
+                                keyboardController?.hide()
+                            }
+                            showNotificationsPage = true
+                            onRefreshNotifications()
+                        },
+                        modifier = Modifier
+                            .size(40.dp)
+                            .testTag("notifications_bell_button")
+                    ) {
+                        Icon(
+                            imageVector = if (unreadNotificationsCount > 0) {
+                                Icons.Default.Notifications
+                            } else {
+                                Icons.Default.NotificationsNone
+                            },
+                            contentDescription = "Notifications",
+                            tint = if (unreadNotificationsCount > 0) AccentPurple else SettingsIconColor,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
                     IconButton(
                         onClick = { showSettingsDialog = true },
                         modifier = Modifier
@@ -460,22 +503,6 @@ fun WorkItemsScreen(
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1
                         )
-                        if (activeSecondaryFilterCount > 0) {
-                            Surface(
-                                shape = CircleShape,
-                                color = AccentPurple,
-                                modifier = Modifier.size(18.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Text(
-                                        text = activeSecondaryFilterCount.toString(),
-                                        color = Color.White,
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                        }
                         Icon(
                             imageVector = if (isFiltersSectionVisible) {
                                 Icons.Default.KeyboardArrowUp
@@ -1131,6 +1158,30 @@ fun WorkItemsScreen(
             )
         }
 
+        // Full-page Notifications View when the Bell icon is touched
+        AnimatedVisibility(
+            visible = showNotificationsPage,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            val effectiveIdentity = manualIdentityOverride?.takeIf { it.isNotBlank() } ?: detectedUserIdentity
+            NotificationsScreen(
+                organization = organization,
+                effectiveUserIdentity = effectiveIdentity,
+                assignedNotifications = assignedNotifications,
+                mentionedNotifications = mentionedNotifications,
+                isSyncingNotifications = isSyncingNotifications,
+                onRefreshNotifications = onRefreshNotifications,
+                onNotificationClick = { notifItem ->
+                    onNotificationClick(notifItem)
+                },
+                onMarkAllRead = onMarkAllNotificationsRead,
+                onOpenIdentitySettings = { showSettingsDialog = true },
+                onClose = { showNotificationsPage = false }
+            )
+        }
+
         // Settings / Account Options Dialog
         if (showSettingsDialog) {
             AzureBoardsSettingsDialog(
@@ -1144,6 +1195,10 @@ fun WorkItemsScreen(
                 defaultProject = defaultProject,
                 selectedProject = selectedProject,
                 totalCount = totalCount,
+                detectedUserIdentity = detectedUserIdentity,
+                manualIdentityOverride = manualIdentityOverride,
+                availableAssignees = availableAssignees,
+                onManualIdentityOverrideChange = onManualIdentityOverrideChange,
                 onDismiss = { showSettingsDialog = false },
                 onSwitchOrganization = { orgName ->
                     onOrganizationSelect(orgName)

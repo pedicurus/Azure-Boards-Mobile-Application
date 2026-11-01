@@ -3195,6 +3195,550 @@ class AzureDevOpsRepository(context: Context) {
         areaPaths.toList() to iterationPaths.toList()
     }
 
+    data class NotificationSyncOutcome(
+        val state: com.example.data.model.CachedNotificationsState,
+        val newlyTriggeredNotifications: List<com.example.data.model.AppNotificationItem>,
+        val newlyHydratedWorkItems: List<WorkItem> = emptyList()
+    )
+
+    fun getCachedNotificationsStateSync(organization: String): com.example.data.model.CachedNotificationsState {
+        val normOrg = extractOrganization(organization)
+        if (normOrg.isBlank()) {
+            return com.example.data.model.CachedNotificationsState(organization = "")
+        }
+        return localStore.loadNotificationsStateSync(normOrg)
+            ?: com.example.data.model.CachedNotificationsState(organization = normOrg)
+    }
+
+    suspend fun getCachedNotificationsState(organization: String): com.example.data.model.CachedNotificationsState =
+        withContext(Dispatchers.IO) {
+            getCachedNotificationsStateSync(organization)
+        }
+
+    suspend fun setManualIdentityOverride(
+        organization: String,
+        identityOverride: String?
+    ): com.example.data.model.CachedNotificationsState = withContext(Dispatchers.IO) {
+        val normOrg = extractOrganization(organization)
+        val current = getCachedNotificationsStateSync(normOrg)
+        val cleanOverride = identityOverride?.trim()?.takeIf { it.isNotEmpty() }
+        // Reset baselines when the user switches identity override so their Assigned & Mentioned tabs rebuild for that identity
+        val identityChanged = !current.manualIdentityOverride.equals(cleanOverride, ignoreCase = true)
+        val updated = if (identityChanged) {
+            current.copy(
+                manualIdentityOverride = cleanOverride,
+                baselineAssignedInitialized = false,
+                baselineMentionsInitialized = false,
+                knownAssignedItemStates = emptyMap()
+            )
+        } else {
+            current.copy(manualIdentityOverride = cleanOverride)
+        }
+        localStore.saveNotificationsState(updated)
+        updated
+    }
+
+    suspend fun markNotificationRead(
+        organization: String,
+        notificationId: String
+    ): com.example.data.model.CachedNotificationsState = withContext(Dispatchers.IO) {
+        val normOrg = extractOrganization(organization)
+        val current = getCachedNotificationsStateSync(normOrg)
+        val updatedList = current.notifications.map { item ->
+            if (item.id == notificationId && !item.isRead) item.copy(isRead = true) else item
+        }
+        val updated = current.copy(notifications = updatedList)
+        localStore.saveNotificationsState(updated)
+        updated
+    }
+
+    suspend fun markNotificationsReadForWorkItem(
+        organization: String,
+        workItemId: Int
+    ): com.example.data.model.CachedNotificationsState = withContext(Dispatchers.IO) {
+        val normOrg = extractOrganization(organization)
+        val current = getCachedNotificationsStateSync(normOrg)
+        var changed = false
+        val updatedList = current.notifications.map { item ->
+            if (item.workItemId == workItemId && !item.isRead) {
+                changed = true
+                item.copy(isRead = true)
+            } else {
+                item
+            }
+        }
+        if (!changed) return@withContext current
+        val updated = current.copy(notifications = updatedList)
+        localStore.saveNotificationsState(updated)
+        updated
+    }
+
+    suspend fun markAllNotificationsRead(
+        organization: String,
+        category: String? = null
+    ): com.example.data.model.CachedNotificationsState = withContext(Dispatchers.IO) {
+        val normOrg = extractOrganization(organization)
+        val current = getCachedNotificationsStateSync(normOrg)
+        val updatedList = current.notifications.map { item ->
+            if ((category == null || item.category == category) && !item.isRead) {
+                item.copy(isRead = true)
+            } else {
+                item
+            }
+        }
+        val updated = current.copy(notifications = updatedList)
+        localStore.saveNotificationsState(updated)
+        updated
+    }
+
+    private fun parseIsoToEpochMs(iso: String?): Long {
+        val clean = iso?.trim().orEmpty()
+        if (clean.isEmpty()) return 0L
+        val patterns = arrayOf(
+            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss"
+        )
+        for (pattern in patterns) {
+            try {
+                val sdf = java.text.SimpleDateFormat(pattern, java.util.Locale.US).apply {
+                    timeZone = java.util.TimeZone.getTimeZone("UTC")
+                }
+                val parsed = sdf.parse(clean.take(24))
+                if (parsed != null) return parsed.time
+            } catch (_: Exception) {
+            }
+        }
+        return 0L
+    }
+
+    private fun matchesUserIdentity(
+        candidateName: String?,
+        candidateEmail: String?,
+        effectiveDisplayName: String?,
+        detectedEmail: String?
+    ): Boolean {
+        val cName = candidateName?.trim()?.lowercase().orEmpty()
+        val cEmail = candidateEmail?.trim()?.lowercase().orEmpty()
+        val targetName = effectiveDisplayName?.trim()?.lowercase().orEmpty()
+        val targetEmail = detectedEmail?.trim()?.lowercase().orEmpty()
+
+        if (targetName.isNotEmpty() && cName.isNotEmpty()) {
+            if (cName == targetName || cName.contains(targetName) || targetName.contains(cName)) {
+                return true
+            }
+        }
+        if (targetEmail.isNotEmpty()) {
+            if (cEmail.isNotEmpty() && cEmail == targetEmail) return true
+            if (cName.isNotEmpty() && cName == targetEmail) return true
+            val emailPrefix = targetEmail.substringBefore('@')
+            if (emailPrefix.length >= 3 && cEmail.startsWith("$emailPrefix@")) return true
+        }
+        return false
+    }
+
+    private fun commentMentionsIdentity(
+        commentText: String,
+        effectiveDisplayName: String?,
+        detectedEmail: String?,
+        detectedUserId: String?
+    ): Boolean {
+        val lowerText = commentText.lowercase()
+        val targetName = effectiveDisplayName?.trim()?.lowercase().orEmpty()
+        val targetEmail = detectedEmail?.trim()?.lowercase().orEmpty()
+        val targetId = detectedUserId?.trim()?.lowercase().orEmpty()
+
+        if (targetName.isNotEmpty()) {
+            if (lowerText.contains("@$targetName")) return true
+            // Also check first name token if @FirstName is used and is at least 3 chars
+            val firstToken = targetName.substringBefore(' ').trim()
+            if (firstToken.length >= 3 && Regex("(?<![\\w@])@${Regex.escape(firstToken)}(?![\\w])").containsMatchIn(lowerText)) {
+                return true
+            }
+        }
+        if (targetEmail.isNotEmpty()) {
+            if (lowerText.contains("@$targetEmail")) return true
+            val emailPrefix = targetEmail.substringBefore('@').trim()
+            if (emailPrefix.length >= 3 && Regex("(?<![\\w@])@${Regex.escape(emailPrefix)}(?![\\w])").containsMatchIn(lowerText)) {
+                return true
+            }
+        }
+        if (targetId.isNotEmpty() && lowerText.contains(targetId)) {
+            return true
+        }
+        return false
+    }
+
+    /**
+     * Evaluates freshly loaded or posted comments on a single [workItem] for `@mentions` of the current user.
+     */
+    suspend fun evaluateWorkItemCommentsForMentions(
+        organization: String,
+        workItem: WorkItem,
+        comments: List<com.example.data.model.WorkItemComment>,
+        allowSystemNotification: Boolean = true
+    ): NotificationSyncOutcome = withContext(Dispatchers.IO) {
+        val normOrg = extractOrganization(organization)
+        val currentState = getCachedNotificationsStateSync(normOrg)
+        val effectiveName = currentState.manualIdentityOverride?.takeIf { it.isNotBlank() }
+            ?: currentState.detectedDisplayName
+        val detectedEmail = currentState.detectedEmail
+        val detectedUserId = currentState.detectedUserId
+
+        if (effectiveName.isNullOrBlank() && detectedEmail.isNullOrBlank()) {
+            return@withContext NotificationSyncOutcome(currentState, emptyList())
+        }
+
+        val existingById = currentState.notifications.associateBy { it.id }.toMutableMap()
+        val notifiedSet = currentState.notifiedNotificationIds.toMutableSet()
+        val newlyTriggered = mutableListOf<com.example.data.model.AppNotificationItem>()
+
+        for (comment in comments) {
+            if (commentMentionsIdentity(comment.text, effectiveName, detectedEmail, detectedUserId)) {
+                val notifId = "mention_${normOrg.lowercase()}_${workItem.id}_${comment.id}"
+                val isAuthorSelf = matchesUserIdentity(
+                    candidateName = comment.authorName,
+                    candidateEmail = comment.authorEmail,
+                    effectiveDisplayName = effectiveName,
+                    detectedEmail = detectedEmail
+                ) || comment.authorName.equals("You", ignoreCase = true)
+
+                val existing = existingById[notifId]
+                if (existing == null) {
+                    val epoch = parseIsoToEpochMs(comment.createdDate).takeIf { it > 0L }
+                        ?: System.currentTimeMillis()
+                    val shouldMarkUnread = allowSystemNotification && !isAuthorSelf
+                    val notifItem = com.example.data.model.AppNotificationItem(
+                        id = notifId,
+                        organization = normOrg,
+                        workItemId = workItem.id,
+                        workItemTitle = workItem.title,
+                        workItemType = workItem.workItemType,
+                        workItemState = workItem.state,
+                        teamProject = workItem.teamProject,
+                        category = com.example.data.model.NotificationCategory.MENTIONED,
+                        actorName = comment.authorName,
+                        messageSnippet = comment.text,
+                        createdDateIso = comment.createdDate,
+                        formattedDate = comment.formattedDate.ifBlank { formatCommentTimestamp(comment.createdDate) },
+                        epochMs = epoch,
+                        commentId = comment.id,
+                        isRead = !shouldMarkUnread
+                    )
+                    existingById[notifId] = notifItem
+                    if (shouldMarkUnread && notifId !in notifiedSet) {
+                        newlyTriggered.add(notifItem)
+                    }
+                    notifiedSet.add(notifId)
+                }
+            }
+        }
+
+        val sortedNotifications = existingById.values
+            .sortedWith(compareByDescending<com.example.data.model.AppNotificationItem> { it.epochMs }.thenByDescending { it.workItemId })
+            .take(150)
+
+        val updatedState = currentState.copy(
+            notifications = sortedNotifications,
+            notifiedNotificationIds = notifiedSet.toList().takeLast(400)
+        )
+        localStore.saveNotificationsState(updatedState)
+        NotificationSyncOutcome(updatedState, newlyTriggered)
+    }
+
+    /**
+     * Synchronizes Assigned and Mentioned notifications for [organization]:
+     * 1. Auto-detects the authenticated user's display name & email via `_apis/connectionData` and `@Me` WIQL.
+     * 2. Detects work items newly assigned to the user (`Assigned` section).
+     * 3. Scans recently updated work items' discussions for `@mentions` of the user (`Mentioned` section).
+     */
+    suspend fun syncOrganizationNotifications(
+        organization: String,
+        pat: String,
+        knownWorkItems: List<WorkItem> = emptyList()
+    ): NotificationSyncOutcome = withContext(Dispatchers.IO) {
+        val normOrg = extractOrganization(organization)
+        val cleanPat = pat.trim()
+        if (normOrg.isBlank() || cleanPat.isBlank()) {
+            return@withContext NotificationSyncOutcome(
+                com.example.data.model.CachedNotificationsState(organization = normOrg),
+                emptyList()
+            )
+        }
+
+        var currentState = getCachedNotificationsStateSync(normOrg)
+        val service = AzureDevOpsClient.createService(cleanPat)
+
+        // 1. Resolve Authenticated User Identity from _apis/connectionData if not yet detected
+        var detectedName = currentState.detectedDisplayName
+        var detectedEmail = currentState.detectedEmail
+        var detectedUserId = currentState.detectedUserId
+
+        if (detectedName.isNullOrBlank()) {
+            runCatching {
+                val connResp = service.getConnectionData(organization = normOrg)
+                if (connResp.isSuccessful) {
+                    val user = connResp.body()?.authenticatedUser ?: connResp.body()?.authorizedUser
+                    if (user != null) {
+                        detectedName = user.customDisplayName?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: user.providerDisplayName?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: detectedName
+                        val propAccount = (user.properties?.get("Account") as? Map<*, *>)?.get("\$value") as? String
+                        detectedEmail = user.uniqueName?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: propAccount?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: detectedEmail
+                        detectedUserId = user.id?.trim()?.takeIf { it.isNotEmpty() } ?: detectedUserId
+                    }
+                }
+            }
+        }
+
+        // 2. Query @Me Assigned Work Items on server (authoritative for PAT owner)
+        val manualOverride = currentState.manualIdentityOverride?.trim()?.takeIf { it.isNotEmpty() }
+        val newlyHydratedItems = mutableListOf<WorkItem>()
+        val itemsById = knownWorkItems.associateBy { it.id }.toMutableMap()
+
+        val assignedToMeServerIds = if (manualOverride == null) {
+            runCatching {
+                val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] = @Me ORDER BY [System.ChangedDate] DESC"
+                service.queryWorkItems(
+                    organization = normOrg,
+                    request = WiqlQueryRequest(query = wiql)
+                ).body()?.workItems.orEmpty().map { it.id }.take(40)
+            }.getOrDefault(emptyList())
+        } else {
+            val escapedOverride = manualOverride.replace("'", "''")
+            runCatching {
+                val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] CONTAINS '$escapedOverride' ORDER BY [System.ChangedDate] DESC"
+                service.queryWorkItems(
+                    organization = normOrg,
+                    request = WiqlQueryRequest(query = wiql)
+                ).body()?.workItems.orEmpty().map { it.id }.take(40)
+            }.getOrDefault(emptyList())
+        }
+
+        val missingAssignedIds = assignedToMeServerIds.filter { it !in itemsById }.take(25)
+        if (missingAssignedIds.isNotEmpty()) {
+            runCatching {
+                val rawBatch = hydrateRawItemsByIds(service, normOrg, missingAssignedIds)
+                val parsedBatch = parseAndLinkRawWorkItems(rawBatch)
+                parsedBatch.forEach { item ->
+                    itemsById[item.id] = item
+                    newlyHydratedItems.add(item)
+                }
+            }
+        }
+
+        // Fallback: if connectionData didn't return a display name, infer it from @Me assigned items
+        if (detectedName.isNullOrBlank() && manualOverride == null && assignedToMeServerIds.isNotEmpty()) {
+            val firstMeItem = assignedToMeServerIds.mapNotNull { itemsById[it] }
+                .firstOrNull { !it.assignedToName.isNullOrBlank() }
+            if (firstMeItem != null) {
+                detectedName = firstMeItem.assignedToName?.trim()
+                if (detectedEmail.isNullOrBlank()) {
+                    detectedEmail = firstMeItem.assignedToEmail?.trim()
+                }
+            }
+        }
+
+        val effectiveIdentityName = manualOverride ?: detectedName
+        val assignedServerIdSet = assignedToMeServerIds.toSet()
+
+        // Collect all items assigned to the effective user identity
+        val allAssignedItems = itemsById.values.filter { item ->
+            if (isExcludedNonWorkItemType(item.workItemType)) return@filter false
+            if (manualOverride == null && item.id in assignedServerIdSet) {
+                true
+            } else if (!effectiveIdentityName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) {
+                matchesUserIdentity(
+                    candidateName = item.assignedToName,
+                    candidateEmail = item.assignedToEmail,
+                    effectiveDisplayName = effectiveIdentityName,
+                    detectedEmail = if (manualOverride == null) detectedEmail else null
+                )
+            } else {
+                false
+            }
+        }.sortedWith(
+            compareByDescending<WorkItem> { it.changedDate ?: "" }.thenByDescending { it.id }
+        )
+
+        val existingNotificationsById = currentState.notifications.associateBy { it.id }.toMutableMap()
+        val notifiedSet = currentState.notifiedNotificationIds.toMutableSet()
+        val knownAssignedMap = currentState.knownAssignedItemStates.toMutableMap()
+        val isInitialAssignedBaseline = !currentState.baselineAssignedInitialized
+        val newlyTriggered = mutableListOf<com.example.data.model.AppNotificationItem>()
+
+        // Track currently assigned item IDs so if an item is unassigned and later re-assigned to the user, we notify again
+        val currentAssignedKeySet = allAssignedItems.map { it.id.toString() }.toSet()
+        knownAssignedMap.keys.retainAll(currentAssignedKeySet)
+
+        for (item in allAssignedItems.take(35)) {
+            val itemKey = item.id.toString()
+            val previouslyKnownAssignee = knownAssignedMap[itemKey]
+            val currentAssigneeSig = (item.assignedToName ?: effectiveIdentityName ?: "me").trim().lowercase()
+            knownAssignedMap[itemKey] = currentAssigneeSig
+
+            val notifId = "assigned_${normOrg.lowercase()}_${item.id}"
+            val existingNotif = existingNotificationsById[notifId]
+            val changedIso = item.changedDate ?: item.createdDate.orEmpty()
+            val epoch = parseIsoToEpochMs(changedIso).takeIf { it > 0L } ?: System.currentTimeMillis()
+
+            if (previouslyKnownAssignee == null) {
+                // Newly discovered assignment to this user!
+                val isUnread = !isInitialAssignedBaseline
+                val notif = com.example.data.model.AppNotificationItem(
+                    id = notifId,
+                    organization = normOrg,
+                    workItemId = item.id,
+                    workItemTitle = item.title,
+                    workItemType = item.workItemType,
+                    workItemState = item.state,
+                    teamProject = item.teamProject,
+                    category = com.example.data.model.NotificationCategory.ASSIGNED,
+                    actorName = item.assignedToName ?: effectiveIdentityName,
+                    messageSnippet = "Assigned to ${item.assignedToName ?: effectiveIdentityName ?: "you"} • ${item.state}",
+                    createdDateIso = changedIso,
+                    formattedDate = formatCommentTimestamp(changedIso),
+                    epochMs = epoch,
+                    commentId = null,
+                    isRead = !isUnread
+                )
+                existingNotificationsById[notifId] = notif
+                if (isUnread && notifId !in notifiedSet) {
+                    newlyTriggered.add(notif)
+                }
+                notifiedSet.add(notifId)
+            } else if (existingNotif != null) {
+                // Keep work item title, state, and type fresh in the Assigned feed
+                existingNotificationsById[notifId] = existingNotif.copy(
+                    workItemTitle = item.title,
+                    workItemType = item.workItemType,
+                    workItemState = item.state,
+                    teamProject = item.teamProject,
+                    messageSnippet = "Assigned to ${item.assignedToName ?: effectiveIdentityName ?: "you"} • ${item.state}"
+                )
+            }
+        }
+
+        // 3. Scan recently changed work items for Discussion @mentions
+        val isInitialMentionsBaseline = !currentState.baselineMentionsInitialized
+        val lastCheckedIso = currentState.lastCheckedChangedDateIso
+        var maxObservedChangedIso = lastCheckedIso
+
+        if (!effectiveIdentityName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) {
+            val candidateItemsForComments = itemsById.values
+                .filter { !it.teamProject.isNullOrBlank() && !isExcludedNonWorkItemType(it.workItemType) }
+                .sortedByDescending { it.changedDate ?: "" }
+                .let { sorted ->
+                    if (isInitialMentionsBaseline || lastCheckedIso.isNullOrBlank()) {
+                        sorted.take(10)
+                    } else {
+                        sorted.filter { (it.changedDate ?: "") > lastCheckedIso }.take(10)
+                    }
+                }
+
+            if (candidateItemsForComments.isNotEmpty()) {
+                val commentResults = coroutineScope {
+                    candidateItemsForComments.map { workItem ->
+                        async {
+                            val proj = workItem.teamProject?.trim().orEmpty()
+                            val comments = fetchWorkItemComments(
+                                organization = normOrg,
+                                pat = cleanPat,
+                                project = proj,
+                                workItemId = workItem.id
+                            ).getOrDefault(emptyList())
+                            workItem to comments
+                        }
+                    }.awaitAll()
+                }
+
+                for ((workItem, comments) in commentResults) {
+                    val itemChanged = workItem.changedDate?.trim()
+                    if (!itemChanged.isNullOrEmpty() && (maxObservedChangedIso == null || itemChanged > maxObservedChangedIso)) {
+                        maxObservedChangedIso = itemChanged
+                    }
+
+                    for (comment in comments) {
+                        if (commentMentionsIdentity(comment.text, effectiveIdentityName, detectedEmail, detectedUserId)) {
+                            val notifId = "mention_${normOrg.lowercase()}_${workItem.id}_${comment.id}"
+                            val isAuthorSelf = matchesUserIdentity(
+                                candidateName = comment.authorName,
+                                candidateEmail = comment.authorEmail,
+                                effectiveDisplayName = effectiveIdentityName,
+                                detectedEmail = detectedEmail
+                            ) || comment.authorName.equals("You", ignoreCase = true)
+
+                            if (!existingNotificationsById.containsKey(notifId)) {
+                                val epoch = parseIsoToEpochMs(comment.createdDate).takeIf { it > 0L }
+                                    ?: System.currentTimeMillis()
+                                val shouldNotify = !isInitialMentionsBaseline && !isAuthorSelf
+                                val notifItem = com.example.data.model.AppNotificationItem(
+                                    id = notifId,
+                                    organization = normOrg,
+                                    workItemId = workItem.id,
+                                    workItemTitle = workItem.title,
+                                    workItemType = workItem.workItemType,
+                                    workItemState = workItem.state,
+                                    teamProject = workItem.teamProject,
+                                    category = com.example.data.model.NotificationCategory.MENTIONED,
+                                    actorName = comment.authorName,
+                                    messageSnippet = comment.text,
+                                    createdDateIso = comment.createdDate,
+                                    formattedDate = comment.formattedDate.ifBlank { formatCommentTimestamp(comment.createdDate) },
+                                    epochMs = epoch,
+                                    commentId = comment.id,
+                                    isRead = !shouldNotify
+                                )
+                                existingNotificationsById[notifId] = notifItem
+                                if (shouldNotify && notifId !in notifiedSet) {
+                                    newlyTriggered.add(notifItem)
+                                }
+                                notifiedSet.add(notifId)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (maxObservedChangedIso == null) {
+                maxObservedChangedIso = itemsById.values
+                    .mapNotNull { it.changedDate?.trim() }
+                    .filter { it.isNotEmpty() }
+                    .maxOrNull()
+            }
+        }
+
+        val sortedNotifications = existingNotificationsById.values
+            .sortedWith(
+                compareByDescending<com.example.data.model.AppNotificationItem> { it.epochMs }
+                    .thenByDescending { it.workItemId }
+            )
+            .take(150)
+
+        currentState = currentState.copy(
+            organization = normOrg,
+            detectedDisplayName = detectedName ?: currentState.detectedDisplayName,
+            detectedEmail = detectedEmail ?: currentState.detectedEmail,
+            detectedUserId = detectedUserId ?: currentState.detectedUserId,
+            notifications = sortedNotifications,
+            notifiedNotificationIds = notifiedSet.toList().takeLast(400),
+            baselineAssignedInitialized = true,
+            baselineMentionsInitialized = true,
+            knownAssignedItemStates = knownAssignedMap,
+            lastCheckedChangedDateIso = maxObservedChangedIso ?: currentState.lastCheckedChangedDateIso
+        )
+
+        localStore.saveNotificationsState(currentState)
+
+        NotificationSyncOutcome(
+            state = currentState,
+            newlyTriggeredNotifications = newlyTriggered,
+            newlyHydratedWorkItems = newlyHydratedItems
+        )
+    }
+
     private fun cleanHtml(html: String?): String? {
         if (html.isNullOrBlank()) return null
         return HtmlCompat.fromHtml(html, HtmlCompat.FROM_HTML_MODE_COMPACT).toString().trim()
