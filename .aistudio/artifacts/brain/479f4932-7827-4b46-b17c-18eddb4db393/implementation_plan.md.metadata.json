@@ -1,6 +1,6 @@
 {
-  "summary": "Plan to resolve push notification delivery for discussion @mentions, enabling self-mention push alerts for testing, fixing WIQL syntax for comment discovery, posting push notifications when comments are submitted in the app, and ensuring identity GUID resolution.",
-  "updatedAt": "2026-11-02T15:33:42.042687403Z",
+  "summary": "Implementation plan for refactoring the monolithic AzureDevOpsViewModel into focused feature ViewModels (ConnectionViewModel, WorkItemsViewModel, NotificationsViewModel) with structured UI states, Type-Safe Compose Navigation, Android Keystore AES-GCM encrypted PAT storage, WorkManager background sync, and Manual AppContainer dependency injection.",
+  "updatedAt": "2026-11-02T20:38:46.659891477Z",
   "requestFeedback": true,
   "userFacing": true
 }

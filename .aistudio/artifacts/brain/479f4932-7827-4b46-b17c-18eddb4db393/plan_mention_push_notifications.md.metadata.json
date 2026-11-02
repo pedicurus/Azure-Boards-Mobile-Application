@@ -1,0 +1,5 @@
+{
+  "summary": "Archived implementation plan for fixing push notifications on discussion @mentions (including self-mentions, WIQL CONTAINS WORDS syntax, and immediate comment push triggers).",
+  "updatedAt": "2026-11-02T20:38:23.881121054Z",
+  "userFacing": true
+}

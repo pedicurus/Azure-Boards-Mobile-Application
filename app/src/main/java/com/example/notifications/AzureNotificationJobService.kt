@@ -2,7 +2,7 @@ package com.example.notifications
 
 import android.app.job.JobParameters
 import android.app.job.JobService
-import com.example.data.repository.AzureDevOpsRepository
+import com.example.di.AppContainer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -11,8 +11,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
- * Periodic background JobService that checks saved Azure DevOps organizations for newly assigned
- * work items and new discussion @mentions, posting device system notifications when found.
+ * Periodic background JobService that delegates to [AzureSyncWorker] to check saved
+ * Azure DevOps organizations (using encrypted PAT credentials via [AppContainer]) for newly
+ * assigned work items and new discussion `@mentions`.
  */
 class AzureNotificationJobService : JobService() {
 
@@ -23,21 +24,11 @@ class AzureNotificationJobService : JobService() {
         val appContext = applicationContext
         activeJob = serviceScope.launch {
             try {
-                val repository = AzureDevOpsRepository(appContext)
-                val accounts = repository.getSavedOrganizations()
-                for (account in accounts) {
-                    if (account.organization.isBlank() || account.pat.isBlank()) continue
-                    val cachedSnapshot = repository.getCachedOrganizationSnapshotSync(account.organization)
-                    val knownItems = cachedSnapshot?.workItems.orEmpty()
-                    val outcome = repository.syncOrganizationNotifications(
-                        organization = account.organization,
-                        pat = account.pat,
-                        knownWorkItems = knownItems
-                    )
-                    outcome.newlyTriggeredNotifications.forEach { notif ->
-                        NotificationHelper.postSystemNotification(appContext, notif)
-                    }
-                }
+                val container = AppContainer.getInstance(appContext)
+                AzureSyncWorker.executeBackgroundSync(
+                    context = appContext,
+                    repository = container.repository
+                )
             } catch (_: Exception) {
                 // Ignore transient background errors
             } finally {

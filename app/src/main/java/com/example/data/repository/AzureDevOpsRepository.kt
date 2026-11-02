@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Base64
 import com.example.data.api.AzureDevOpsClient
+import com.example.data.local.EncryptedTokenStore
 import com.example.data.local.WorkItemLocalStore
 import com.example.data.model.CachedOrganizationMetadata
 import com.example.data.model.CachedOrganizationSnapshot
@@ -32,7 +33,10 @@ data class DeltaSyncResult(
     val totalServerCount: Int
 )
 
-class AzureDevOpsRepository(context: Context) {
+class AzureDevOpsRepository(
+    context: Context,
+    private val tokenStore: EncryptedTokenStore = EncryptedTokenStore(context.applicationContext ?: context)
+) {
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences("azure_boards_prefs", Context.MODE_PRIVATE)
@@ -606,7 +610,8 @@ class AzureDevOpsRepository(context: Context) {
         }.distinctBy { it.organization.lowercase() }
 
         val serialized = remembered.joinToString("|") { acc ->
-            "${encodeField(extractOrganization(acc.organization))}:${encodeField(acc.pat.trim())}"
+            val encryptedPat = tokenStore.encryptToken(acc.pat.trim())
+            "${encodeField(extractOrganization(acc.organization))}:${encodeField(encryptedPat)}"
         }
         prefs.edit().putString(KEY_SAVED_ORGS, serialized).commit()
     }
@@ -614,11 +619,16 @@ class AzureDevOpsRepository(context: Context) {
     fun getManuallySavedOrganizations(): List<OrganizationAccount> {
         val raw = prefs.getString(KEY_SAVED_ORGS, null)
         if (raw.isNullOrBlank()) return emptyList()
-        return raw.split("|").mapNotNull { entry ->
+        var needsMigration = false
+        val accounts = raw.split("|").mapNotNull { entry ->
             val parts = entry.split(":")
             if (parts.size == 2) {
                 val org = extractOrganization(decodeField(parts[0]))
-                val pat = decodeField(parts[1]).trim()
+                val decodedPatField = decodeField(parts[1]).trim()
+                if (!tokenStore.isEncrypted(decodedPatField) && decodedPatField.isNotBlank()) {
+                    needsMigration = true
+                }
+                val pat = tokenStore.decryptToken(decodedPatField).trim()
                 if (org.isNotBlank() && pat.isNotBlank()) {
                     OrganizationAccount(organization = org, pat = pat, isRemembered = true)
                 } else {
@@ -628,6 +638,11 @@ class AzureDevOpsRepository(context: Context) {
                 null
             }
         }.distinctBy { it.organization.lowercase() }
+
+        if (needsMigration && accounts.isNotEmpty()) {
+            persistOrganizationsList(accounts)
+        }
+        return accounts
     }
 
     fun isExplicitlyDisconnected(): Boolean {

@@ -138,18 +138,6 @@ object NotificationHelper {
     }
 
     fun schedulePeriodicBackgroundSync(context: Context) {
-        runCatching {
-            val scheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as? JobScheduler
-                ?: return
-            val existing = scheduler.allPendingJobs.any { it.id == BACKGROUND_SYNC_JOB_ID }
-            if (existing) return
-
-            val component = ComponentName(context, AzureNotificationJobService::class.java)
-            val jobInfo = JobInfo.Builder(BACKGROUND_SYNC_JOB_ID, component)
-                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                .setPeriodic(PERIODIC_INTERVAL_MS)
-                .build()
-            scheduler.schedule(jobInfo)
-        }
+        AzureSyncWorker.schedulePeriodicSync(context)
     }
 }
