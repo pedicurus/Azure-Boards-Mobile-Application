@@ -77,6 +77,7 @@ import com.example.R
 import com.example.ui.components.readClipboardText
 import com.example.ui.components.writeClipboardText
 import com.example.ui.theme.TypeBug
+import com.example.data.model.OrganizationAccount
 
 private val LoginBgTop = Color(0xFFFFFFFF)
 private val LoginBgBottom = Color(0xFFDFE4F1)
@@ -90,6 +91,7 @@ private val LoginInputFill = Color(0xFFF8FAFC)
 fun ConnectionScreen(
     initialOrg: String,
     initialPat: String,
+    availableAccounts: List<OrganizationAccount> = emptyList(),
     isLoading: Boolean,
     errorMessage: String?,
     onConnect: (org: String, pat: String, rememberCredentials: Boolean) -> Unit,
@@ -199,6 +201,50 @@ fun ConnectionScreen(
                                 )
                             }
                         }
+                    }
+
+                    // Quick-switch between configured organizations
+                    if (availableAccounts.isNotEmpty()) {
+                        Text(
+                            text = "Configured Organizations",
+                            color = LoginTextMuted,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            availableAccounts.take(5).forEach { acc ->
+                                val isSelected = orgInput.equals(acc.organization, ignoreCase = true)
+                                Surface(
+                                    color = if (isSelected) LoginAzureBlue.copy(alpha = 0.12f) else LoginInputFill,
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isSelected) LoginAzureBlue else LoginCardBorder
+                                    ),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            orgInput = acc.organization
+                                            patInput = acc.pat
+                                            if (errorMessage != null) onDismissError()
+                                        }
+                                        .testTag("account_chip_${acc.organization.lowercase()}")
+                                ) {
+                                    Text(
+                                        text = acc.organization,
+                                        color = if (isSelected) LoginAzureBlue else LoginTextDark,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(14.dp))
                     }
 
                     // Azure DevOps URL

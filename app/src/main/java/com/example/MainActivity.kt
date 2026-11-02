@@ -205,6 +205,7 @@ fun AzureBoardsApp(
             ConnectionScreen(
                 initialOrg = viewModel.getInitialOrg(),
                 initialPat = viewModel.getInitialPat(),
+                availableAccounts = viewModel.availableAccounts,
                 isLoading = isLoading || connectionStatus is ConnectionStatus.Connecting,
                 errorMessage = errorMessage,
                 onConnect = { org, pat, remember -> viewModel.connect(org, pat, remember) },

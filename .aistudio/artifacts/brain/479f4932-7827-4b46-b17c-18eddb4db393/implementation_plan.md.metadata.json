@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan to ensure at least 10 mentioned and assigned items are discovered and strictly display only the 10 most recent items in each tab on the Notifications page.",
-  "updatedAt":  "2026-11-01T06:47:13.514314960Z",
+  "summary":  "Implementation plan to refactor work item discussion mentions to use Azure DevOps Markdown format (@<member>), preserve and resolve Azure identity GUIDs when posting comments, and render clean @Display Name pill badges in discussion threads and notifications.",
+  "updatedAt":  "2026-11-02T09:25:58.563946780Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

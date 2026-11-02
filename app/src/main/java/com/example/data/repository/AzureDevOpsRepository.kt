@@ -124,6 +124,278 @@ class AzureDevOpsRepository(context: Context) {
                 stateCategoryCache[scopedKey] = normalizedCat
             }
         }
+
+        data class KnownIdentityRecord(
+            val id: String? = null,
+            val displayName: String,
+            val email: String? = null,
+            val avatarUrl: String? = null
+        )
+
+        private val knownIdentitiesByLowerName = ConcurrentHashMap<String, KnownIdentityRecord>()
+        private val knownIdentitiesByLowerEmail = ConcurrentHashMap<String, KnownIdentityRecord>()
+        private val knownIdentitiesByLowerId = ConcurrentHashMap<String, KnownIdentityRecord>()
+
+        private val BRACKETED_MENTION_REGEX = Regex("@<([^>\\r\\n]+)>")
+        private val VSS_MENTION_ANCHOR_REGEX = Regex(
+            "<a\\b[^>]*data-vss-mention\\s*=\\s*\"(?:version:\\d+\\.\\d+,)?([^\"]+)\"[^>]*>(.*?)</a>",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+        )
+        private val UUID_LIKE_REGEX = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+        fun registerKnownIdentity(
+            id: String?,
+            displayName: String?,
+            email: String?,
+            avatarUrl: String? = null
+        ) {
+            val cleanName = displayName?.trim()?.removePrefix("@")?.trim().orEmpty()
+            val cleanId = id?.trim()?.takeIf { it.isNotEmpty() }
+            val cleanEmail = email?.trim()?.takeIf { it.isNotEmpty() }
+            val cleanAvatar = avatarUrl?.trim()?.takeIf { it.isNotEmpty() }
+
+            if (cleanName.isBlank() ||
+                cleanName.equals("Unassigned", ignoreCase = true) ||
+                cleanName.equals("All", ignoreCase = true) ||
+                cleanName.equals("You", ignoreCase = true)
+            ) {
+                return
+            }
+
+            val nameKey = cleanName.lowercase()
+            val existingByName = knownIdentitiesByLowerName[nameKey]
+            val existingById = cleanId?.lowercase()?.let { knownIdentitiesByLowerId[it] }
+            val existingByEmail = cleanEmail?.lowercase()?.let { knownIdentitiesByLowerEmail[it] }
+
+            val merged = KnownIdentityRecord(
+                id = cleanId ?: existingByName?.id ?: existingByEmail?.id ?: existingById?.id,
+                displayName = cleanName,
+                email = cleanEmail ?: existingByName?.email ?: existingById?.email ?: existingByEmail?.email,
+                avatarUrl = cleanAvatar ?: existingByName?.avatarUrl ?: existingById?.avatarUrl ?: existingByEmail?.avatarUrl
+            )
+
+            knownIdentitiesByLowerName[nameKey] = merged
+            merged.id?.lowercase()?.let { knownIdentitiesByLowerId[it] = merged }
+            merged.email?.lowercase()?.let { knownIdentitiesByLowerEmail[it] = merged }
+        }
+
+        fun clearKnownIdentitiesForTesting() {
+            knownIdentitiesByLowerName.clear()
+            knownIdentitiesByLowerEmail.clear()
+            knownIdentitiesByLowerId.clear()
+        }
+
+        fun resolveIdentityRecord(token: String): KnownIdentityRecord? {
+            val clean = token.trim().removePrefix("@").removePrefix("<").removeSuffix(">").trim()
+            if (clean.isEmpty()) return null
+            val lower = clean.lowercase()
+
+            knownIdentitiesByLowerId[lower]?.let { return it }
+            knownIdentitiesByLowerName[lower]?.let { return it }
+            knownIdentitiesByLowerEmail[lower]?.let { return it }
+
+            // Check if token is "Display Name <email>" format
+            if (clean.contains('<') && clean.endsWith('>')) {
+                val namePart = clean.substringBefore('<').trim().lowercase()
+                val emailPart = clean.substringAfter('<').substringBeforeLast('>').trim().lowercase()
+                knownIdentitiesByLowerEmail[emailPart]?.let { return it }
+                knownIdentitiesByLowerName[namePart]?.let { return it }
+            }
+
+            // Fallback prefix match on email local-part
+            val emailPrefixMatch = knownIdentitiesByLowerEmail.entries.firstOrNull { (emailKey, _) ->
+                emailKey.substringBefore('@') == lower
+            }?.value
+            if (emailPrefixMatch != null) return emailPrefixMatch
+
+            return null
+        }
+
+        /**
+         * Formats an outgoing comment for Azure DevOps Markdown (`?format=markdown`):
+         * - Preserves raw Markdown text without HTML-escaping `<` or `>`.
+         * - Converts `@<member>` (display name or email) to `@<USER_GUID>` when the user's Azure
+         *   DevOps identity GUID is known, or keeps `@<member>` if no GUID is indexed yet.
+         * - Also upgrades any unbracketed `@Display Name` matching a known identity into `@<USER_GUID>`
+         *   or `@<Display Name>` so Azure Boards processes it as a Markdown mention.
+         */
+        fun serializeCommentForAzureMarkdown(rawComment: String): String {
+            val trimmed = rawComment.trim()
+            if (trimmed.isEmpty()) return ""
+
+            // 1. Resolve bracketed @<member> tokens
+            var processed = BRACKETED_MENTION_REGEX.replace(trimmed) { match ->
+                val inner = match.groupValues[1].trim()
+                val resolved = resolveIdentityRecord(inner)
+                when {
+                    !resolved?.id.isNullOrBlank() -> "@<${resolved!!.id}>"
+                    resolved != null -> "@<${resolved.displayName}>"
+                    else -> "@<$inner>"
+                }
+            }
+
+            // 2. Also convert unbracketed @DisplayName tokens for known people if not already bracketed
+            if (knownIdentitiesByLowerName.isNotEmpty()) {
+                val sortedRecords = knownIdentitiesByLowerName.values
+                    .distinctBy { it.displayName.lowercase() }
+                    .sortedByDescending { it.displayName.length }
+
+                for (record in sortedRecords) {
+                    val escapedName = Regex.escape(record.displayName)
+                    val unbracketedRegex = Regex("(?<![\\w@<])@$escapedName(?![\\w>])", RegexOption.IGNORE_CASE)
+                    processed = unbracketedRegex.replace(processed) {
+                        if (!record.id.isNullOrBlank()) "@<${record.id}>" else "@<${record.displayName}>"
+                    }
+                }
+            }
+
+            return processed
+        }
+
+        /**
+         * Formats an outgoing comment as HTML with `data-vss-mention` anchors for fallback
+         * endpoints (`System.History` patch or legacy comment API without `format=markdown`).
+         */
+        fun serializeCommentForHtmlFallback(rawComment: String): String {
+            val trimmed = rawComment.trim()
+            if (trimmed.isEmpty()) return ""
+
+            data class PlaceholderMention(val placeholder: String, val htmlReplacement: String)
+            val placeholders = mutableListOf<PlaceholderMention>()
+            var counter = 0
+
+            val withPlaceholders = BRACKETED_MENTION_REGEX.replace(trimmed) { match ->
+                val inner = match.groupValues[1].trim()
+                val resolved = resolveIdentityRecord(inner)
+                val tokenKey = "__AZ_MENTION_PLACEHOLDER_${counter++}__"
+                val displayName = (resolved?.displayName ?: inner)
+                    .replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                val htmlTag = if (!resolved?.id.isNullOrBlank()) {
+                    "<a href=\"#\" data-vss-mention=\"version:2.0,${resolved!!.id}\">@$displayName</a>"
+                } else {
+                    "@&lt;$displayName&gt;"
+                }
+                placeholders.add(PlaceholderMention(tokenKey, htmlTag))
+                tokenKey
+            }
+
+            var escaped = withPlaceholders
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\n", "<br/>")
+
+            for (item in placeholders) {
+                escaped = escaped.replace(item.placeholder, item.htmlReplacement)
+            }
+            return escaped
+        }
+
+        /**
+         * Normalizes a comment returned by Azure DevOps (`text` + optional `renderedText`) so that:
+         * 1. Any `<a data-vss-mention="version:2.0,{GUID}">@Display Name</a>` in `renderedText` or `text`
+         *    is indexed into the known identity registry and converted to `@<Display Name>`.
+         * 2. Any raw `@<GUID>` in Markdown `text` is resolved to `@<Display Name>`.
+         * 3. All `@<Display Name>` mentions are protected before stripping HTML tags so `HtmlCompat`
+         *    never strips `<Display Name>` as an unrecognized HTML element.
+         */
+        fun normalizeCommentTextFromAzure(
+            rawText: String?,
+            renderedText: String? = null
+        ): String? {
+            if (rawText.isNullOrBlank() && renderedText.isNullOrBlank()) return null
+
+            // 1. Harvest (GUID -> DisplayName) mappings from renderedText and rawText
+            val mentionMapByLowerId = mutableMapOf<String, String>()
+            fun harvestVssAnchors(source: String?) {
+                if (source.isNullOrBlank()) return
+                for (match in VSS_MENTION_ANCHOR_REGEX.findAll(source)) {
+                    val rawId = match.groupValues[1].trim()
+                    val innerHtml = match.groupValues[2]
+                    val cleanName = HtmlCompat.fromHtml(innerHtml, HtmlCompat.FROM_HTML_MODE_COMPACT)
+                        .toString()
+                        .trim()
+                        .removePrefix("@")
+                        .trim()
+                    if (rawId.isNotEmpty() && cleanName.isNotEmpty()) {
+                        mentionMapByLowerId[rawId.lowercase()] = cleanName
+                        registerKnownIdentity(id = rawId, displayName = cleanName, email = null)
+                    }
+                }
+            }
+            harvestVssAnchors(renderedText)
+            harvestVssAnchors(rawText)
+
+            val baseText = rawText?.takeIf { it.isNotBlank() } ?: renderedText.orEmpty()
+
+            // 2. Replace any <a ... data-vss-mention ...>@Name</a> in baseText with @<Name>
+            var working = VSS_MENTION_ANCHOR_REGEX.replace(baseText) { match ->
+                val rawId = match.groupValues[1].trim()
+                val innerHtml = match.groupValues[2]
+                val cleanName = HtmlCompat.fromHtml(innerHtml, HtmlCompat.FROM_HTML_MODE_COMPACT)
+                    .toString()
+                    .trim()
+                    .removePrefix("@")
+                    .trim()
+                val resolvedName = cleanName.ifEmpty {
+                    mentionMapByLowerId[rawId.lowercase()]
+                        ?: resolveIdentityRecord(rawId)?.displayName
+                        ?: rawId
+                }
+                "@<$resolvedName>"
+            }
+
+            // 3. Resolve @<GUID> or @<token> to @<Display Name>
+            working = BRACKETED_MENTION_REGEX.replace(working) { match ->
+                val inner = match.groupValues[1].trim()
+                val fromRendered = mentionMapByLowerId[inner.lowercase()]
+                val fromDirectory = resolveIdentityRecord(inner)?.displayName
+                val finalName = fromRendered ?: fromDirectory ?: inner
+                "@<$finalName>"
+            }
+
+            // 4. Protect @<...> mentions before running HtmlCompat.fromHtml so <Name> is not stripped as an HTML tag
+            val mentionPlaceholders = mutableListOf<Pair<String, String>>()
+            var pIndex = 0
+            val protectedText = BRACKETED_MENTION_REGEX.replace(working) { match ->
+                val key = "__AZ_MNT_TOKEN_${pIndex++}__"
+                mentionPlaceholders.add(key to match.value)
+                key
+            }
+
+            val looksLikeHtml = protectedText.contains("<p", ignoreCase = true) ||
+                protectedText.contains("<div", ignoreCase = true) ||
+                protectedText.contains("<br", ignoreCase = true) ||
+                protectedText.contains("<span", ignoreCase = true) ||
+                protectedText.contains("<a ", ignoreCase = true) ||
+                protectedText.contains("&lt;", ignoreCase = true) ||
+                protectedText.contains("&gt;", ignoreCase = true) ||
+                protectedText.contains("&amp;", ignoreCase = true) ||
+                protectedText.contains("&nbsp;", ignoreCase = true)
+
+            var cleaned = if (looksLikeHtml) {
+                HtmlCompat.fromHtml(protectedText, HtmlCompat.FROM_HTML_MODE_COMPACT).toString().trim()
+            } else {
+                protectedText.trim()
+            }
+
+            for ((key, originalMention) in mentionPlaceholders) {
+                cleaned = cleaned.replace(key, originalMention)
+            }
+
+            // 5. If HTML unescaping revealed @<...> (e.g. from legacy @&lt;Name&gt;), resolve those too
+            cleaned = BRACKETED_MENTION_REGEX.replace(cleaned) { match ->
+                val inner = match.groupValues[1].trim()
+                val fromRendered = mentionMapByLowerId[inner.lowercase()]
+                val fromDirectory = resolveIdentityRecord(inner)?.displayName
+                val finalName = fromRendered ?: fromDirectory ?: inner
+                "@<$finalName>"
+            }
+
+            return cleaned.takeIf { it.isNotBlank() }
+        }
     }
 
     /**
@@ -135,6 +407,14 @@ class AzureDevOpsRepository(context: Context) {
         if (normOrg.isBlank()) return null
         val snapshot = localStore.loadSnapshotSync(normOrg) ?: return null
         val orgKey = normOrg.lowercase()
+        snapshot.workItems.forEach { item ->
+            registerKnownIdentity(
+                id = item.assignedToId,
+                displayName = item.assignedToName,
+                email = item.assignedToEmail,
+                avatarUrl = item.assignedToAvatar
+            )
+        }
         val hydratedSet = Collections.synchronizedSet(snapshot.workItems.map { it.id }.toMutableSet())
         hydratedIdsByOrg[orgKey] = hydratedSet
         unloadedProposedIdsByOrg[orgKey] = Collections.synchronizedList(
@@ -331,7 +611,7 @@ class AzureDevOpsRepository(context: Context) {
         prefs.edit().putString(KEY_SAVED_ORGS, serialized).commit()
     }
 
-    fun getSavedOrganizations(): List<OrganizationAccount> {
+    fun getManuallySavedOrganizations(): List<OrganizationAccount> {
         val raw = prefs.getString(KEY_SAVED_ORGS, null)
         if (raw.isNullOrBlank()) return emptyList()
         return raw.split("|").mapNotNull { entry ->
@@ -350,12 +630,29 @@ class AzureDevOpsRepository(context: Context) {
         }.distinctBy { it.organization.lowercase() }
     }
 
+    fun isExplicitlyDisconnected(): Boolean {
+        return prefs.getBoolean("pref_azure_explicit_disconnect", false)
+    }
+
+    fun setExplicitlyDisconnected(disconnected: Boolean) {
+        prefs.edit().putBoolean("pref_azure_explicit_disconnect", disconnected).apply()
+    }
+
+    /**
+     * Returns all available saved organizations stored locally in the app.
+     */
+    fun getSavedOrganizations(): List<OrganizationAccount> {
+        return getManuallySavedOrganizations()
+    }
+
     fun saveOrganizationAccount(account: OrganizationAccount) {
         val normOrg = extractOrganization(account.organization)
         val cleanPat = account.pat.trim()
         if (normOrg.isBlank() || cleanPat.isBlank()) return
 
-        val existing = getSavedOrganizations().toMutableList()
+        setExplicitlyDisconnected(false)
+
+        val existing = getManuallySavedOrganizations().toMutableList()
         val existingIdx = existing.indexOfFirst { it.organization.equals(normOrg, ignoreCase = true) }
 
         if (account.isRemembered) {
@@ -381,13 +678,13 @@ class AzureDevOpsRepository(context: Context) {
         val normOrg = extractOrganization(organization)
         if (normOrg.isBlank()) return
         localStore.clearOrganizationCache(normOrg)
-        val remaining = getSavedOrganizations().filterNot {
+        val remaining = getManuallySavedOrganizations().filterNot {
             it.organization.equals(normOrg, ignoreCase = true)
         }
         persistOrganizationsList(remaining)
         val currentDefaultOrg = getDefaultOrganization()
         if (currentDefaultOrg != null && currentDefaultOrg.equals(normOrg, ignoreCase = true)) {
-            saveDefaultOrganization(remaining.firstOrNull()?.organization)
+            saveDefaultOrganization(getSavedOrganizations().firstOrNull()?.organization)
         }
     }
 
@@ -500,6 +797,7 @@ class AzureDevOpsRepository(context: Context) {
         prefs.edit()
             .remove(KEY_SAVED_ORGS)
             .remove(KEY_DEFAULT_ORG)
+            .putBoolean("pref_azure_explicit_disconnect", true)
             .apply()
     }
 
@@ -1075,13 +1373,37 @@ class AzureDevOpsRepository(context: Context) {
                 ?: "General"
 
             val assignedMap = f["System.AssignedTo"] as? Map<*, *>
+            val assignedId = (assignedMap?.get("id") as? String)?.trim()?.takeIf { it.isNotEmpty() }
             val assignedName = assignedMap?.get("displayName") as? String
             val assignedEmail = assignedMap?.get("uniqueName") as? String
             val avatarUrl = (assignedMap?.get("_links") as? Map<*, *>)
                 ?.let { links -> (links["avatar"] as? Map<*, *>)?.get("href") as? String }
+                ?: (assignedMap?.get("imageUrl") as? String)
+
+            // Index all identity fields present on the work item for @<member> mention resolution
+            val identityFieldKeys = arrayOf(
+                "System.AssignedTo",
+                "System.CreatedBy",
+                "System.ChangedBy",
+                "Microsoft.VSTS.Common.ActivatedBy",
+                "Microsoft.VSTS.Common.ResolvedBy",
+                "Microsoft.VSTS.Common.ClosedBy"
+            )
+            for (fieldKey in identityFieldKeys) {
+                val idMap = f[fieldKey] as? Map<*, *> ?: continue
+                val uId = (idMap["id"] as? String)?.trim()
+                val uName = (idMap["displayName"] as? String)?.trim()
+                val uEmail = (idMap["uniqueName"] as? String)?.trim()
+                val uAvatar = (idMap["_links"] as? Map<*, *>)
+                    ?.let { links -> (links["avatar"] as? Map<*, *>)?.get("href") as? String }
+                    ?: (idMap["imageUrl"] as? String)
+                registerKnownIdentity(id = uId, displayName = uName, email = uEmail, avatarUrl = uAvatar)
+            }
 
             val createdDate = f["System.CreatedDate"] as? String
             val changedDate = f["System.ChangedDate"] as? String
+            val activatedDate = (f["Microsoft.VSTS.Common.ActivatedDate"] as? String)
+                ?: (f["Microsoft.VSTS.Common.StateChangeDate"] as? String)
             val description = (f["System.Description"] as? String)
                 ?: (f["Microsoft.VSTS.Common.AcceptanceCriteria"] as? String)
             val areaPath = f["System.AreaPath"] as? String
@@ -1119,11 +1441,12 @@ class AzureDevOpsRepository(context: Context) {
                 workItemType = type,
                 state = state,
                 teamProject = teamProject,
+                assignedToId = assignedId,
                 assignedToName = assignedName,
                 assignedToEmail = assignedEmail,
                 assignedToAvatar = avatarUrl,
                 createdDate = createdDate,
-                changedDate = changedDate,
+                changedDate = changedDate ?: activatedDate ?: createdDate,
                 description = cleanHtml(description),
                 areaPath = areaPath,
                 iterationPath = iterationPath,
@@ -2947,19 +3270,31 @@ class AzureDevOpsRepository(context: Context) {
         fallbackWorkItemId: Int
     ): com.example.data.model.WorkItemComment? {
         if (raw.isDeleted == true) return null
-        val cleanedText = cleanHtml(raw.text)?.trim().orEmpty()
+        val authorId = raw.createdBy?.id?.trim()?.takeIf { it.isNotBlank() }
+        val authorEmail = raw.createdBy?.uniqueName?.trim()?.takeIf { it.isNotBlank() }
+        val authorAvatar = raw.createdBy?.imageUrl?.trim()?.takeIf { it.isNotBlank() }
+        val authorName = raw.createdBy?.displayName?.trim()?.takeIf { it.isNotBlank() }
+            ?: authorEmail
+            ?: "User"
+
+        registerKnownIdentity(
+            id = authorId,
+            displayName = raw.createdBy?.displayName,
+            email = authorEmail,
+            avatarUrl = authorAvatar
+        )
+
+        val cleanedText = normalizeCommentTextFromAzure(raw.text, raw.renderedText)?.trim().orEmpty()
         if (cleanedText.isBlank()) return null
         val rawDate = raw.createdDate?.trim().orEmpty()
-        val authorName = raw.createdBy?.displayName?.trim()?.takeIf { it.isNotBlank() }
-            ?: raw.createdBy?.uniqueName?.trim()?.takeIf { it.isNotBlank() }
-            ?: "User"
         return com.example.data.model.WorkItemComment(
             id = raw.id ?: rawDate.hashCode(),
             workItemId = raw.workItemId ?: fallbackWorkItemId,
             text = cleanedText,
             authorName = authorName,
-            authorEmail = raw.createdBy?.uniqueName?.trim()?.takeIf { it.isNotBlank() },
-            authorAvatar = raw.createdBy?.imageUrl?.trim()?.takeIf { it.isNotBlank() },
+            authorId = authorId,
+            authorEmail = authorEmail,
+            authorAvatar = authorAvatar,
             createdDate = rawDate,
             formattedDate = formatCommentTimestamp(rawDate)
         )
@@ -2980,13 +3315,31 @@ class AzureDevOpsRepository(context: Context) {
         }
         try {
             val service = AzureDevOpsClient.createService(pat)
-            val response = service.getWorkItemComments(
-                organization = normalizedOrg,
-                project = project.trim(),
-                workItemId = workItemId,
-                top = 100,
-                order = "desc"
-            )
+            val cleanProject = project.trim()
+            var response = runCatching {
+                service.getWorkItemComments(
+                    organization = normalizedOrg,
+                    project = cleanProject,
+                    workItemId = workItemId,
+                    top = 100,
+                    order = "desc",
+                    expand = "renderedText",
+                    apiVersion = "7.1-preview.4"
+                )
+            }.getOrNull()
+
+            if (response == null || !response.isSuccessful) {
+                response = service.getWorkItemComments(
+                    organization = normalizedOrg,
+                    project = cleanProject,
+                    workItemId = workItemId,
+                    top = 100,
+                    order = "desc",
+                    expand = null,
+                    apiVersion = "7.0-preview.3"
+                )
+            }
+
             if (!response.isSuccessful) {
                 return@withContext Result.failure(
                     Exception("Failed to load comments (${response.code()}): ${response.message()}")
@@ -3005,7 +3358,8 @@ class AzureDevOpsRepository(context: Context) {
     }
 
     /**
-     * Posts a new comment on [workItemId] in Azure Boards (with fallback to System.History patch).
+     * Posts a new comment on [workItemId] in Azure Boards using Markdown (`format=markdown`)
+     * and `@<member>` mention syntax (resolving known user GUIDs so Azure triggers real mentions).
      */
     suspend fun addWorkItemCommentOnServer(
         organization: String,
@@ -3021,21 +3375,37 @@ class AzureDevOpsRepository(context: Context) {
         }
         try {
             val service = AzureDevOpsClient.createService(pat)
-            val htmlBody = trimmedText
-                .replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace("\n", "<br/>")
+            val markdownBody = serializeCommentForAzureMarkdown(trimmedText)
+            val htmlFallbackBody = serializeCommentForHtmlFallback(trimmedText)
+            val normalizedLocalText = normalizeCommentTextFromAzure(trimmedText) ?: trimmedText
 
             if (project.isNotBlank()) {
-                val commentResp = runCatching {
+                val cleanProject = project.trim()
+                // Primary: Post as Markdown (format=markdown, api-version=7.1-preview.4) with @<member> / @<GUID>
+                var commentResp = runCatching {
                     service.addWorkItemComment(
                         organization = normalizedOrg,
-                        project = project.trim(),
+                        project = cleanProject,
                         workItemId = workItemId,
-                        request = com.example.data.model.AddWorkItemCommentRequest(text = htmlBody)
+                        format = "markdown",
+                        apiVersion = "7.1-preview.4",
+                        request = com.example.data.model.AddWorkItemCommentRequest(text = markdownBody)
                     )
                 }.getOrNull()
+
+                // Secondary fallback: legacy comment endpoint (7.0-preview.3) if server rejects 7.1-preview.4
+                if (commentResp == null || !commentResp.isSuccessful) {
+                    commentResp = runCatching {
+                        service.addWorkItemComment(
+                            organization = normalizedOrg,
+                            project = cleanProject,
+                            workItemId = workItemId,
+                            format = null,
+                            apiVersion = "7.0-preview.3",
+                            request = com.example.data.model.AddWorkItemCommentRequest(text = htmlFallbackBody)
+                        )
+                    }.getOrNull()
+                }
 
                 if (commentResp?.isSuccessful == true && commentResp.body() != null) {
                     val mapped = mapRawCommentToDomain(commentResp.body()!!, workItemId)
@@ -3050,7 +3420,7 @@ class AzureDevOpsRepository(context: Context) {
                 JsonPatchOperation(
                     op = "add",
                     path = "/fields/System.History",
-                    value = htmlBody
+                    value = htmlFallbackBody
                 )
             )
             val patchResp = service.updateWorkItem(
@@ -3072,7 +3442,7 @@ class AzureDevOpsRepository(context: Context) {
                 com.example.data.model.WorkItemComment(
                     id = (System.currentTimeMillis() and 0x7FFFFFFF).toInt(),
                     workItemId = workItemId,
-                    text = trimmedText,
+                    text = normalizedLocalText,
                     authorName = "You",
                     createdDate = nowIso,
                     formattedDate = formatCommentTimestamp(nowIso)
@@ -3291,6 +3661,47 @@ class AzureDevOpsRepository(context: Context) {
         updated
     }
 
+    fun getStartOfCurrentMonthEpochMs(nowEpochMs: Long = System.currentTimeMillis()): Long {
+        val cal = java.util.Calendar.getInstance()
+        cal.timeInMillis = nowEpochMs
+        cal.set(java.util.Calendar.DAY_OF_MONTH, 1)
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        cal.set(java.util.Calendar.MINUTE, 0)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 0)
+        return cal.timeInMillis
+    }
+
+    /**
+     * Immediately removes any ASSIGNED notification for [workItemId] when the item is unassigned
+     * or reassigned to someone else.
+     */
+    suspend fun removeAssignedNotificationForWorkItem(
+        organization: String,
+        workItemId: Int
+    ): com.example.data.model.CachedNotificationsState = withContext(Dispatchers.IO) {
+        val normOrg = extractOrganization(organization)
+        val current = getCachedNotificationsStateSync(normOrg)
+        val updatedList = current.notifications.filterNot { item ->
+            item.category == com.example.data.model.NotificationCategory.ASSIGNED &&
+                item.workItemId == workItemId
+        }
+        val updatedKnownMap = current.knownAssignedItemStates.toMutableMap().apply {
+            remove(workItemId.toString())
+        }
+        if (updatedList.size == current.notifications.size &&
+            updatedKnownMap.size == current.knownAssignedItemStates.size
+        ) {
+            return@withContext current
+        }
+        val updated = current.copy(
+            notifications = updatedList,
+            knownAssignedItemStates = updatedKnownMap
+        )
+        localStore.saveNotificationsState(updated)
+        updated
+    }
+
     private fun parseIsoToEpochMs(iso: String?): Long {
         val clean = iso?.trim().orEmpty()
         if (clean.isEmpty()) return 0L
@@ -3312,7 +3723,7 @@ class AzureDevOpsRepository(context: Context) {
         return 0L
     }
 
-    private fun matchesUserIdentity(
+    fun matchesUserIdentity(
         candidateName: String?,
         candidateEmail: String?,
         effectiveDisplayName: String?,
@@ -3323,21 +3734,27 @@ class AzureDevOpsRepository(context: Context) {
         val targetName = effectiveDisplayName?.trim()?.lowercase().orEmpty()
         val targetEmail = detectedEmail?.trim()?.lowercase().orEmpty()
 
-        if (targetName.isNotEmpty() && cName.isNotEmpty()) {
-            if (cName == targetName || cName.contains(targetName) || targetName.contains(cName)) {
-                return true
-            }
-        }
+        if (cName.isEmpty() && cEmail.isEmpty()) return false
+        if (cName == "unassigned") return false
+
         if (targetEmail.isNotEmpty()) {
             if (cEmail.isNotEmpty() && cEmail == targetEmail) return true
             if (cName.isNotEmpty() && cName == targetEmail) return true
             val emailPrefix = targetEmail.substringBefore('@')
             if (emailPrefix.length >= 3 && cEmail.startsWith("$emailPrefix@")) return true
         }
+        if (targetName.isNotEmpty() && cName.isNotEmpty()) {
+            if (cName == targetName) return true
+            // Allow matching when manual override is a partial name (at least 3 chars) matching whole word/token
+            val tokens = cName.split(' ', '-', '_', '.', '(', ')', '<', '>').filter { it.isNotEmpty() }
+            if (targetName.length >= 3 && (tokens.contains(targetName) || cName.startsWith("$targetName "))) {
+                return true
+            }
+        }
         return false
     }
 
-    private fun commentMentionsIdentity(
+    fun commentMentionsIdentity(
         commentText: String,
         effectiveDisplayName: String?,
         detectedEmail: String?,
@@ -3348,8 +3765,18 @@ class AzureDevOpsRepository(context: Context) {
         val targetEmail = detectedEmail?.trim()?.lowercase().orEmpty()
         val targetId = detectedUserId?.trim()?.lowercase().orEmpty()
 
+        if (targetId.isNotEmpty()) {
+            if (lowerText.contains("@<$targetId>") ||
+                lowerText.contains(targetId) ||
+                (lowerText.contains("data-vss-mention") && lowerText.contains(targetId))
+            ) {
+                return true
+            }
+        }
+
         if (targetName.isNotEmpty()) {
-            if (lowerText.contains("@$targetName") ||
+            if (lowerText.contains("@<$targetName>") ||
+                lowerText.contains("@$targetName") ||
                 (lowerText.contains("data-vss-mention") && lowerText.contains(targetName)) ||
                 lowerText.contains("@ $targetName")
             ) {
@@ -3358,8 +3785,9 @@ class AzureDevOpsRepository(context: Context) {
             // Check parts of the name (e.g. first name or last name if at least 3 chars)
             val nameParts = targetName.split(' ', '-', '_', '.').map { it.trim() }.filter { it.length >= 3 }
             for (part in nameParts) {
-                if (lowerText.contains("@$part") ||
-                    Regex("(?<![\\w@])@${Regex.escape(part)}(?![\\w])").containsMatchIn(lowerText)
+                if (lowerText.contains("@<$part>") ||
+                    lowerText.contains("@$part") ||
+                    Regex("(?<![\\w@])@<?${Regex.escape(part)}>?(?![\\w])").containsMatchIn(lowerText)
                 ) {
                     return true
                 }
@@ -3370,19 +3798,19 @@ class AzureDevOpsRepository(context: Context) {
             }
         }
         if (targetEmail.isNotEmpty()) {
-            if (lowerText.contains("@$targetEmail") || lowerText.contains(targetEmail)) return true
+            if (lowerText.contains("@<$targetEmail>") || lowerText.contains("@$targetEmail") || lowerText.contains(targetEmail)) {
+                return true
+            }
             val emailPrefix = targetEmail.substringBefore('@').trim()
             if (emailPrefix.length >= 3) {
-                if (lowerText.contains("@$emailPrefix") ||
-                    Regex("(?<![\\w@])@${Regex.escape(emailPrefix)}(?![\\w])").containsMatchIn(lowerText) ||
+                if (lowerText.contains("@<$emailPrefix>") ||
+                    lowerText.contains("@$emailPrefix") ||
+                    Regex("(?<![\\w@])@<?${Regex.escape(emailPrefix)}>?(?![\\w])").containsMatchIn(lowerText) ||
                     (lowerText.contains(emailPrefix) && (lowerText.contains("@") || lowerText.contains("mention")))
                 ) {
                     return true
                 }
             }
-        }
-        if (targetId.isNotEmpty() && (lowerText.contains(targetId) || (lowerText.contains("data-vss-mention") && lowerText.contains(targetId)))) {
-            return true
         }
         return false
     }
@@ -3410,6 +3838,8 @@ class AzureDevOpsRepository(context: Context) {
         val existingById = currentState.notifications.associateBy { it.id }.toMutableMap()
         val notifiedSet = currentState.notifiedNotificationIds.toMutableSet()
         val newlyTriggered = mutableListOf<com.example.data.model.AppNotificationItem>()
+        val startOfMonthMs = getStartOfCurrentMonthEpochMs()
+        val recentPushCutoffMs = System.currentTimeMillis() - 48L * 60L * 60L * 1000L // Last 48 hours for push alerts when opening an item
 
         for (comment in comments) {
             if (commentMentionsIdentity(comment.text, effectiveName, detectedEmail, detectedUserId)) {
@@ -3425,7 +3855,9 @@ class AzureDevOpsRepository(context: Context) {
                 if (existing == null) {
                     val epoch = parseIsoToEpochMs(comment.createdDate).takeIf { it > 0L }
                         ?: System.currentTimeMillis()
-                    val shouldMarkUnread = allowSystemNotification && !isAuthorSelf
+                    val isThisMonth = epoch >= startOfMonthMs
+                    val isJustMentioned = epoch >= recentPushCutoffMs && isThisMonth
+                    val shouldMarkUnread = allowSystemNotification && !isAuthorSelf && isThisMonth
                     val notifItem = com.example.data.model.AppNotificationItem(
                         id = notifId,
                         organization = normOrg,
@@ -3444,7 +3876,7 @@ class AzureDevOpsRepository(context: Context) {
                         isRead = !shouldMarkUnread
                     )
                     existingById[notifId] = notifItem
-                    if (shouldMarkUnread && notifId !in notifiedSet) {
+                    if (shouldMarkUnread && isJustMentioned && notifId !in notifiedSet) {
                         newlyTriggered.add(notifItem)
                     }
                     notifiedSet.add(notifId)
@@ -3458,18 +3890,23 @@ class AzureDevOpsRepository(context: Context) {
 
         val updatedState = currentState.copy(
             notifications = sortedNotifications,
-            notifiedNotificationIds = notifiedSet.toList().takeLast(400)
+            notifiedNotificationIds = notifiedSet.toList().takeLast(500)
         )
         localStore.saveNotificationsState(updatedState)
-        NotificationSyncOutcome(updatedState, newlyTriggered)
+        NotificationSyncOutcome(
+            state = updatedState,
+            newlyTriggeredNotifications = newlyTriggered.sortedByDescending { it.epochMs }.take(5)
+        )
     }
 
     /**
      * Synchronizes Assigned and Mentioned notifications for [organization]:
      * 1. Auto-detects the authenticated user's display name & email via `_apis/connectionData` and `@Me` WIQL.
-     * 2. Detects work items newly assigned to the user (`Assigned` section).
-     * 3. Scans work items and executes WIQL discussion history search for `@mentions` of the user,
-     *    querying deeper until at least 10 mentions are found (or available items exhausted).
+     * 2. Queries authoritative `@Me` assigned work items and immediately prunes any previously stored
+     *    `ASSIGNED` notification whose work item is no longer assigned to the user.
+     * 3. Orders all notifications by `epochMs` descending (newest first).
+     * 4. Triggers system push notifications ONLY for brand-new assignments or `@mentions` that happened
+     *    recently (in this month and since the last sync check).
      */
     suspend fun syncOrganizationNotifications(
         organization: String,
@@ -3512,48 +3949,59 @@ class AzureDevOpsRepository(context: Context) {
             }
         }
 
+        registerKnownIdentity(
+            id = detectedUserId,
+            displayName = detectedName,
+            email = detectedEmail
+        )
+
         // 2. Query @Me Assigned Work Items on server (authoritative for PAT owner)
         val manualOverride = currentState.manualIdentityOverride?.trim()?.takeIf { it.isNotEmpty() }
         val newlyHydratedItems = mutableListOf<WorkItem>()
         val itemsById = knownWorkItems.associateBy { it.id }.toMutableMap()
 
+        var assignedQuerySucceeded = false
         val assignedToMeServerIds = if (manualOverride == null) {
             runCatching {
-                val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] = @Me ORDER BY [System.ChangedDate] DESC"
-                service.queryWorkItems(
+                val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] = @Me AND [System.State] <> 'Removed' ORDER BY [System.ChangedDate] DESC"
+                val resp = service.queryWorkItems(
                     organization = normOrg,
                     request = WiqlQueryRequest(query = wiql)
-                ).body()?.workItems.orEmpty().map { it.id }.take(50)
+                )
+                if (resp.isSuccessful) {
+                    assignedQuerySucceeded = true
+                    resp.body()?.workItems.orEmpty().map { it.id }.take(100)
+                } else {
+                    emptyList()
+                }
             }.getOrDefault(emptyList())
         } else {
             val escapedOverride = manualOverride.replace("'", "''")
             runCatching {
-                val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] CONTAINS '$escapedOverride' ORDER BY [System.ChangedDate] DESC"
-                service.queryWorkItems(
+                val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] CONTAINS '$escapedOverride' AND [System.State] <> 'Removed' ORDER BY [System.ChangedDate] DESC"
+                val resp = service.queryWorkItems(
                     organization = normOrg,
                     request = WiqlQueryRequest(query = wiql)
-                ).body()?.workItems.orEmpty().map { it.id }.take(50)
-            }.getOrDefault(emptyList())
-        }
-
-        // Fallback: if connectionData didn't return a display name, infer it from @Me assigned items
-        if (detectedName.isNullOrBlank() && manualOverride == null && assignedToMeServerIds.isNotEmpty()) {
-            val firstMeItem = assignedToMeServerIds.mapNotNull { itemsById[it] }
-                .firstOrNull { !it.assignedToName.isNullOrBlank() }
-            if (firstMeItem != null) {
-                detectedName = firstMeItem.assignedToName?.trim()
-                if (detectedEmail.isNullOrBlank()) {
-                    detectedEmail = firstMeItem.assignedToEmail?.trim()
+                )
+                if (resp.isSuccessful) {
+                    assignedQuerySucceeded = true
+                    resp.body()?.workItems.orEmpty().map { it.id }.take(100)
+                } else {
+                    emptyList()
                 }
-            }
+            }.getOrDefault(emptyList())
         }
 
         val effectiveIdentityName = manualOverride ?: detectedName
 
         // 2b. Query Work Items where [System.History] contains user mention or user identity
         val mentionServerIds = mutableSetOf<Int>()
-        if (!effectiveIdentityName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) {
+        if (!effectiveIdentityName.isNullOrBlank() || !detectedEmail.isNullOrBlank() || !detectedUserId.isNullOrBlank()) {
             val mentionQueryTokens = mutableListOf<String>()
+            val escapedUserId = detectedUserId?.replace("'", "''")?.trim()
+            if (!escapedUserId.isNullOrBlank() && manualOverride == null) {
+                mentionQueryTokens.add(escapedUserId)
+            }
             val escapedName = effectiveIdentityName?.replace("'", "''")?.trim()
             if (!escapedName.isNullOrBlank()) {
                 mentionQueryTokens.add(escapedName)
@@ -3570,7 +4018,7 @@ class AzureDevOpsRepository(context: Context) {
                 }
             }
 
-            for (token in mentionQueryTokens.take(3)) {
+            for (token in mentionQueryTokens.distinct().take(4)) {
                 runCatching {
                     val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.History] CONTAINS '$token' ORDER BY [System.ChangedDate] DESC"
                     val resp = service.queryWorkItems(
@@ -3579,12 +4027,14 @@ class AzureDevOpsRepository(context: Context) {
                     )
                     resp.body()?.workItems.orEmpty().map { it.id }.forEach { mentionServerIds.add(it) }
                 }
-                if (mentionServerIds.size >= 30) break
+                if (mentionServerIds.size >= 40) break
             }
         }
 
         // Hydrate any missing work items from assigned and mention queries
-        val combinedMissingIds = (assignedToMeServerIds + mentionServerIds).filter { it !in itemsById }.take(50)
+        val missingAssignedIds = assignedToMeServerIds.filter { it !in itemsById }
+        val missingMentionIds = mentionServerIds.filter { it !in itemsById }.take(40)
+        val combinedMissingIds = (missingAssignedIds + missingMentionIds).distinct().take(100)
         if (combinedMissingIds.isNotEmpty()) {
             runCatching {
                 val rawBatch = hydrateRawItemsByIds(service, normOrg, combinedMissingIds)
@@ -3596,25 +4046,51 @@ class AzureDevOpsRepository(context: Context) {
             }
         }
 
+        // Fallback: if connectionData didn't return a display name, infer it from @Me assigned items after hydration
+        if (detectedName.isNullOrBlank() && manualOverride == null && assignedToMeServerIds.isNotEmpty()) {
+            val firstMeItem = assignedToMeServerIds.mapNotNull { itemsById[it] }
+                .firstOrNull { !it.assignedToName.isNullOrBlank() && !it.isUnassigned }
+            if (firstMeItem != null) {
+                detectedName = firstMeItem.assignedToName?.trim()
+                if (detectedEmail.isNullOrBlank()) {
+                    detectedEmail = firstMeItem.assignedToEmail?.trim()
+                }
+            }
+        }
+
+        val resolvedEffectiveName = manualOverride ?: detectedName
         val assignedServerIdSet = assignedToMeServerIds.toSet()
 
-        // Collect all items assigned to the effective user identity
+        // Collect ONLY items that are currently assigned to the effective user identity right now
         val allAssignedItems = itemsById.values.filter { item ->
             if (isExcludedNonWorkItemType(item.workItemType)) return@filter false
-            if (manualOverride == null && item.id in assignedServerIdSet) {
-                true
-            } else if (!effectiveIdentityName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) {
+            if (item.isUnassigned) return@filter false
+            if (item.normStateLower == "removed") return@filter false
+
+            if (assignedQuerySucceeded && manualOverride == null) {
+                // Authoritative @Me server result + verify local item wasn't just reassigned away
+                item.id in assignedServerIdSet && (
+                    (resolvedEffectiveName.isNullOrBlank() && detectedEmail.isNullOrBlank()) ||
+                        matchesUserIdentity(
+                            candidateName = item.assignedToName,
+                            candidateEmail = item.assignedToEmail,
+                            effectiveDisplayName = resolvedEffectiveName,
+                            detectedEmail = detectedEmail
+                        )
+                    )
+            } else if (!resolvedEffectiveName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) {
                 matchesUserIdentity(
                     candidateName = item.assignedToName,
                     candidateEmail = item.assignedToEmail,
-                    effectiveDisplayName = effectiveIdentityName,
+                    effectiveDisplayName = resolvedEffectiveName,
                     detectedEmail = if (manualOverride == null) detectedEmail else null
                 )
             } else {
                 false
             }
         }.sortedWith(
-            compareByDescending<WorkItem> { it.changedDate ?: "" }.thenByDescending { it.id }
+            compareByDescending<WorkItem> { parseIsoToEpochMs(it.changedDate ?: it.createdDate) }
+                .thenByDescending { it.id }
         )
 
         val existingNotificationsById = currentState.notifications.associateBy { it.id }.toMutableMap()
@@ -3623,24 +4099,39 @@ class AzureDevOpsRepository(context: Context) {
         val isInitialAssignedBaseline = !currentState.baselineAssignedInitialized
         val newlyTriggered = mutableListOf<com.example.data.model.AppNotificationItem>()
 
+        val startOfCurrentMonthMs = getStartOfCurrentMonthEpochMs()
+        val lastCheckedEpochMs = parseIsoToEpochMs(currentState.lastCheckedChangedDateIso)
+        val recentPushCutoffMs = maxOf(
+            startOfCurrentMonthMs,
+            if (lastCheckedEpochMs > 0L) lastCheckedEpochMs - 5 * 60 * 1000L else System.currentTimeMillis() - 24 * 60 * 60 * 1000L
+        )
+
+        // Immediately prune any existing ASSIGNED notification that is no longer assigned to the user
+        val currentAssignedWorkItemIds = allAssignedItems.map { it.id }.toSet()
+        val staleAssignedNotifKeys = existingNotificationsById.ValuesToKeysToRemoveForUnassigned(currentAssignedWorkItemIds)
+        staleAssignedNotifKeys.forEach { existingNotificationsById.remove(it) }
+
         // Track currently assigned item IDs so if an item is unassigned and later re-assigned to the user, we notify again
-        val currentAssignedKeySet = allAssignedItems.map { it.id.toString() }.toSet()
+        val currentAssignedKeySet = currentAssignedWorkItemIds.map { it.toString() }.toSet()
         knownAssignedMap.keys.retainAll(currentAssignedKeySet)
 
-        for (item in allAssignedItems.take(50)) {
+        for (item in allAssignedItems.take(80)) {
             val itemKey = item.id.toString()
             val previouslyKnownAssignee = knownAssignedMap[itemKey]
-            val currentAssigneeSig = (item.assignedToName ?: effectiveIdentityName ?: "me").trim().lowercase()
+            val currentAssigneeSig = (item.assignedToName ?: resolvedEffectiveName ?: "me").trim().lowercase()
             knownAssignedMap[itemKey] = currentAssigneeSig
 
             val notifId = "assigned_${normOrg.lowercase()}_${item.id}"
             val existingNotif = existingNotificationsById[notifId]
             val changedIso = item.changedDate ?: item.createdDate.orEmpty()
-            val epoch = parseIsoToEpochMs(changedIso).takeIf { it > 0L } ?: System.currentTimeMillis()
+            val epoch = parseIsoToEpochMs(changedIso).takeIf { it > 0L } ?: 0L
 
-            if (previouslyKnownAssignee == null) {
+            val isRecentAssignment = epoch >= startOfCurrentMonthMs
+            val isJustAssignedForPush = !isInitialAssignedBaseline && epoch >= recentPushCutoffMs
+
+            if (previouslyKnownAssignee == null && existingNotif == null) {
                 // Newly discovered assignment to this user
-                val isUnread = !isInitialAssignedBaseline
+                val isUnread = !isInitialAssignedBaseline && isRecentAssignment
                 val notif = com.example.data.model.AppNotificationItem(
                     id = notifId,
                     organization = normOrg,
@@ -3650,8 +4141,8 @@ class AzureDevOpsRepository(context: Context) {
                     workItemState = item.state,
                     teamProject = item.teamProject,
                     category = com.example.data.model.NotificationCategory.ASSIGNED,
-                    actorName = item.assignedToName ?: effectiveIdentityName,
-                    messageSnippet = "Assigned to ${item.assignedToName ?: effectiveIdentityName ?: "you"} • ${item.state}",
+                    actorName = item.assignedToName ?: resolvedEffectiveName,
+                    messageSnippet = "Assigned to ${item.assignedToName ?: resolvedEffectiveName ?: "you"} • ${item.state}",
                     createdDateIso = changedIso,
                     formattedDate = formatCommentTimestamp(changedIso),
                     epochMs = epoch,
@@ -3659,18 +4150,23 @@ class AzureDevOpsRepository(context: Context) {
                     isRead = !isUnread
                 )
                 existingNotificationsById[notifId] = notif
-                if (isUnread && notifId !in notifiedSet) {
+                if (isUnread && isJustAssignedForPush && notifId !in notifiedSet) {
                     newlyTriggered.add(notif)
                 }
                 notifiedSet.add(notifId)
             } else if (existingNotif != null) {
-                // Keep work item title, state, and type fresh in the Assigned feed
+                // Keep work item title, state, type, and timestamp fresh in the Assigned feed
+                val updatedEpoch = if (epoch > 0L) epoch else existingNotif.epochMs
+                val updatedIso = changedIso.ifBlank { existingNotif.createdDateIso }
                 existingNotificationsById[notifId] = existingNotif.copy(
                     workItemTitle = item.title,
                     workItemType = item.workItemType,
                     workItemState = item.state,
                     teamProject = item.teamProject,
-                    messageSnippet = "Assigned to ${item.assignedToName ?: effectiveIdentityName ?: "you"} • ${item.state}"
+                    createdDateIso = updatedIso,
+                    formattedDate = formatCommentTimestamp(updatedIso),
+                    epochMs = updatedEpoch,
+                    messageSnippet = "Assigned to ${item.assignedToName ?: resolvedEffectiveName ?: "you"} • ${item.state}"
                 )
             }
         }
@@ -3693,13 +4189,13 @@ class AzureDevOpsRepository(context: Context) {
         val lastCheckedIso = currentState.lastCheckedChangedDateIso
         var maxObservedChangedIso = lastCheckedIso
 
-        fun currentMentionCount(): Int = existingNotificationsById.values.count {
-            it.category == com.example.data.model.NotificationCategory.MENTIONED
+        fun currentThisMonthMentionCount(): Int = existingNotificationsById.values.count {
+            it.category == com.example.data.model.NotificationCategory.MENTIONED &&
+                it.epochMs >= startOfCurrentMonthMs
         }
 
-        if (!effectiveIdentityName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) {
-            // Process candidates in batches of 15 until at least 10 mentions are found (or candidates exhausted, up to 90 items)
-            val candidateChunks = candidateItemsList.take(90).chunked(15)
+        if (!resolvedEffectiveName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) {
+            val candidateChunks = candidateItemsList.take(75).chunked(15)
             for (chunk in candidateChunks) {
                 val commentResults = coroutineScope {
                     chunk.map { workItem ->
@@ -3723,19 +4219,21 @@ class AzureDevOpsRepository(context: Context) {
                     }
 
                     for (comment in comments) {
-                        if (commentMentionsIdentity(comment.text, effectiveIdentityName, detectedEmail, detectedUserId)) {
+                        if (commentMentionsIdentity(comment.text, resolvedEffectiveName, detectedEmail, detectedUserId)) {
                             val notifId = "mention_${normOrg.lowercase()}_${workItem.id}_${comment.id}"
                             val isAuthorSelf = matchesUserIdentity(
                                 candidateName = comment.authorName,
                                 candidateEmail = comment.authorEmail,
-                                effectiveDisplayName = effectiveIdentityName,
+                                effectiveDisplayName = resolvedEffectiveName,
                                 detectedEmail = detectedEmail
                             ) || comment.authorName.equals("You", ignoreCase = true)
 
-                            if (!existingNotificationsById.containsKey(notifId)) {
-                                val epoch = parseIsoToEpochMs(comment.createdDate).takeIf { it > 0L }
-                                    ?: System.currentTimeMillis()
-                                val shouldNotify = !isInitialMentionsBaseline && !isAuthorSelf
+                            val existingMention = existingNotificationsById[notifId]
+                            if (existingMention == null) {
+                                val epoch = parseIsoToEpochMs(comment.createdDate).takeIf { it > 0L } ?: 0L
+                                val isRecentMention = epoch >= startOfCurrentMonthMs
+                                val isJustMentionedForPush = !isInitialMentionsBaseline && !isAuthorSelf && epoch >= recentPushCutoffMs
+                                val shouldMarkUnread = !isInitialMentionsBaseline && !isAuthorSelf && isRecentMention
                                 val notifItem = com.example.data.model.AppNotificationItem(
                                     id = notifId,
                                     organization = normOrg,
@@ -3751,20 +4249,28 @@ class AzureDevOpsRepository(context: Context) {
                                     formattedDate = comment.formattedDate.ifBlank { formatCommentTimestamp(comment.createdDate) },
                                     epochMs = epoch,
                                     commentId = comment.id,
-                                    isRead = !shouldNotify
+                                    isRead = !shouldMarkUnread
                                 )
                                 existingNotificationsById[notifId] = notifItem
-                                if (shouldNotify && notifId !in notifiedSet) {
+                                if (isJustMentionedForPush && notifId !in notifiedSet) {
                                     newlyTriggered.add(notifItem)
                                 }
                                 notifiedSet.add(notifId)
+                            } else {
+                                // Keep work item metadata updated on existing mention notifications
+                                existingNotificationsById[notifId] = existingMention.copy(
+                                    workItemTitle = workItem.title,
+                                    workItemType = workItem.workItemType,
+                                    workItemState = workItem.state,
+                                    teamProject = workItem.teamProject
+                                )
                             }
                         }
                     }
                 }
 
-                // Stop scanning further if we have successfully accumulated at least 10 mentions
-                if (currentMentionCount() >= 10) {
+                // Stop scanning further once we have checked enough recent items
+                if (currentThisMonthMentionCount() >= 15 || existingNotificationsById.values.count { it.category == com.example.data.model.NotificationCategory.MENTIONED } >= 30) {
                     break
                 }
             }
@@ -3777,6 +4283,10 @@ class AzureDevOpsRepository(context: Context) {
             }
         }
 
+        val nowIso = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }.format(java.util.Date())
+
         val sortedNotifications = existingNotificationsById.values
             .sortedWith(
                 compareByDescending<com.example.data.model.AppNotificationItem> { it.epochMs }
@@ -3784,26 +4294,42 @@ class AzureDevOpsRepository(context: Context) {
             )
             .take(150)
 
+        // Ensure push notifications only emit the most recent items that were just assigned or mentioned
+        val recentNewlyTriggered = newlyTriggered
+            .sortedByDescending { it.epochMs }
+            .take(5)
+
         currentState = currentState.copy(
             organization = normOrg,
             detectedDisplayName = detectedName ?: currentState.detectedDisplayName,
             detectedEmail = detectedEmail ?: currentState.detectedEmail,
             detectedUserId = detectedUserId ?: currentState.detectedUserId,
             notifications = sortedNotifications,
-            notifiedNotificationIds = notifiedSet.toList().takeLast(400),
+            notifiedNotificationIds = notifiedSet.toList().takeLast(500),
             baselineAssignedInitialized = true,
             baselineMentionsInitialized = true,
             knownAssignedItemStates = knownAssignedMap,
-            lastCheckedChangedDateIso = maxObservedChangedIso ?: currentState.lastCheckedChangedDateIso
+            lastCheckedChangedDateIso = listOfNotNull(maxObservedChangedIso, currentState.lastCheckedChangedDateIso, nowIso).maxOrNull()
         )
 
         localStore.saveNotificationsState(currentState)
 
         NotificationSyncOutcome(
             state = currentState,
-            newlyTriggeredNotifications = newlyTriggered,
+            newlyTriggeredNotifications = recentNewlyTriggered,
             newlyHydratedWorkItems = newlyHydratedItems
         )
+    }
+
+    private fun Map<String, com.example.data.model.AppNotificationItem>.ValuesToKeysToRemoveForUnassigned(
+        currentlyAssignedWorkItemIds: Set<Int>
+    ): List<String> {
+        return entries
+            .filter { (_, notif) ->
+                notif.category == com.example.data.model.NotificationCategory.ASSIGNED &&
+                    notif.workItemId !in currentlyAssignedWorkItemIds
+            }
+            .map { it.key }
     }
 
     private fun cleanHtml(html: String?): String? {

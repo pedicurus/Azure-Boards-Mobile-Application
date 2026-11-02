@@ -50,6 +50,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
@@ -1115,7 +1116,7 @@ fun FigmaItemDetailView(
                                                     val currentText = commentFieldValue.text
                                                     val safeStart = activeMentionToken.startIndex.coerceIn(0, currentText.length)
                                                     val safeEnd = activeMentionToken.endIndex.coerceIn(safeStart, currentText.length)
-                                                    val mentionInsertion = "@${candidate.displayName} "
+                                                    val mentionInsertion = "@<${candidate.displayName}> "
                                                     val newText = buildString(currentText.length + mentionInsertion.length) {
                                                         append(currentText, 0, safeStart)
                                                         append(mentionInsertion)
@@ -2347,7 +2348,8 @@ fun WorkItemDetailSheet(
     }
 }
 
-private data class MentionCandidate(
+internal data class MentionCandidate(
+    val userId: String? = null,
     val displayName: String,
     val email: String?,
     val lowerName: String,
@@ -2355,20 +2357,25 @@ private data class MentionCandidate(
     val initial: String
 )
 
-private data class MentionToken(
+internal data class MentionToken(
     val startIndex: Int,
     val endIndex: Int,
     val query: String
 )
 
-private fun buildMentionPeopleIndex(
+internal fun buildMentionPeopleIndex(
     availableAssignees: List<String>,
     allWorkItems: List<WorkItem>,
     comments: List<WorkItemComment>
 ): List<MentionCandidate> {
-    val byLowerName = LinkedHashMap<String, Pair<String, String?>>()
+    data class MutablePersonEntry(
+        var userId: String?,
+        val displayName: String,
+        var email: String?
+    )
+    val byLowerName = LinkedHashMap<String, MutablePersonEntry>()
 
-    fun register(rawName: String?, rawEmail: String?) {
+    fun register(rawId: String?, rawName: String?, rawEmail: String?, rawAvatar: String? = null) {
         val cleanName = rawName?.trim().orEmpty()
         if (cleanName.isBlank() ||
             cleanName.equals("Unassigned", ignoreCase = true) ||
@@ -2377,39 +2384,60 @@ private fun buildMentionPeopleIndex(
         ) {
             return
         }
-        val key = cleanName.lowercase()
+        val cleanId = rawId?.trim()?.takeIf { it.isNotBlank() }
         val cleanEmail = rawEmail?.trim()?.takeIf { it.isNotBlank() }
+        com.example.data.repository.AzureDevOpsRepository.registerKnownIdentity(
+            id = cleanId,
+            displayName = cleanName,
+            email = cleanEmail,
+            avatarUrl = rawAvatar
+        )
+
+        val key = cleanName.lowercase()
         val existing = byLowerName[key]
-        if (existing == null || (existing.second == null && cleanEmail != null)) {
-            byLowerName[key] = cleanName to cleanEmail
+        if (existing == null) {
+            val resolvedRecord = com.example.data.repository.AzureDevOpsRepository.resolveIdentityRecord(cleanName)
+            byLowerName[key] = MutablePersonEntry(
+                userId = cleanId ?: resolvedRecord?.id,
+                displayName = cleanName,
+                email = cleanEmail ?: resolvedRecord?.email
+            )
+        } else {
+            if (existing.userId == null && cleanId != null) {
+                existing.userId = cleanId
+            }
+            if (existing.email == null && cleanEmail != null) {
+                existing.email = cleanEmail
+            }
         }
     }
 
     for (name in availableAssignees) {
-        register(name, null)
+        register(null, name, null)
     }
     for (item in allWorkItems) {
-        register(item.assignedToName, item.assignedToEmail)
+        register(item.assignedToId, item.assignedToName, item.assignedToEmail, item.assignedToAvatar)
     }
     for (comment in comments) {
-        register(comment.authorName, comment.authorEmail)
+        register(comment.authorId, comment.authorName, comment.authorEmail, comment.authorAvatar)
     }
 
     return byLowerName.values
-        .map { (name, email) ->
-            val firstChar = name.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "?"
+        .map { entry ->
+            val firstChar = entry.displayName.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "?"
             MentionCandidate(
-                displayName = name,
-                email = email,
-                lowerName = name.lowercase(),
-                lowerEmail = email?.lowercase(),
+                userId = entry.userId,
+                displayName = entry.displayName,
+                email = entry.email,
+                lowerName = entry.displayName.lowercase(),
+                lowerEmail = entry.email?.lowercase(),
                 initial = firstChar
             )
         }
         .sortedBy { it.lowerName }
 }
 
-private fun extractActiveMentionToken(textFieldValue: TextFieldValue): MentionToken? {
+internal fun extractActiveMentionToken(textFieldValue: TextFieldValue): MentionToken? {
     val text = textFieldValue.text
     if (text.isEmpty()) return null
     val cursor = textFieldValue.selection.end.coerceIn(0, text.length)
@@ -2418,7 +2446,8 @@ private fun extractActiveMentionToken(textFieldValue: TextFieldValue): MentionTo
     var idx = cursor - 1
     while (idx >= 0) {
         val ch = text[idx]
-        if (ch == '\n' || ch == '\r') {
+        // Stop if we hit a newline or the closing '>' of an already-completed @<member> mention
+        if (ch == '\n' || ch == '\r' || ch == '>') {
             return null
         }
         if (ch == '@') {
@@ -2427,7 +2456,9 @@ private fun extractActiveMentionToken(textFieldValue: TextFieldValue): MentionTo
                 text[idx - 1] in listOf('(', '[', '{', ',', ';', ':', '-', '/')
             if (!validBoundary) return null
 
-            val query = text.substring(idx + 1, cursor)
+            val rawQuery = text.substring(idx + 1, cursor)
+            if (rawQuery.contains('>')) return null
+            val query = rawQuery.removePrefix("<")
             // Stop treating as an active mention if user typed two consecutive spaces or finished a long phrase
             if (query.contains("  ") || query.length > 35) return null
             return MentionToken(
@@ -2441,21 +2472,52 @@ private fun extractActiveMentionToken(textFieldValue: TextFieldValue): MentionTo
     return null
 }
 
-private fun formatCommentWithMentions(
+internal fun formatCommentWithMentions(
     text: String,
     knownPeopleNames: List<String>
 ): AnnotatedString {
     if (!text.contains('@')) {
         return AnnotatedString(text)
     }
+    val mentionStyle = SpanStyle(
+        color = NeumorphicTeal,
+        fontWeight = FontWeight.Bold,
+        background = NeumorphicTeal.copy(alpha = 0.12f)
+    )
+    val sortedNames = knownPeopleNames.sortedByDescending { it.length }
+
     return buildAnnotatedString {
-        append(text)
-        val sortedNames = knownPeopleNames.sortedByDescending { it.length }
         var searchIndex = 0
         while (searchIndex < text.length) {
             val atIndex = text.indexOf('@', searchIndex)
-            if (atIndex < 0) break
+            if (atIndex < 0) {
+                append(text.substring(searchIndex))
+                break
+            }
 
+            if (atIndex > searchIndex) {
+                append(text.substring(searchIndex, atIndex))
+            }
+
+            // 1. Check for Azure DevOps Markdown bracketed mention: @<member> or @<GUID>
+            if (atIndex + 1 < text.length && text[atIndex + 1] == '<') {
+                val closeBracketIndex = text.indexOf('>', atIndex + 2)
+                val newlineIndex = text.indexOf('\n', atIndex + 2)
+                if (closeBracketIndex > atIndex + 2 && (newlineIndex < 0 || closeBracketIndex < newlineIndex)) {
+                    val innerToken = text.substring(atIndex + 2, closeBracketIndex).trim()
+                    val resolvedName = com.example.data.repository.AzureDevOpsRepository
+                        .resolveIdentityRecord(innerToken)
+                        ?.displayName
+                        ?: innerToken.removePrefix("@").trim()
+                    withStyle(mentionStyle) {
+                        append("@$resolvedName")
+                    }
+                    searchIndex = closeBracketIndex + 1
+                    continue
+                }
+            }
+
+            // 2. Check for known person display name after '@'
             val afterAt = text.substring(atIndex + 1)
             val matchedKnownName = sortedNames.firstOrNull { candidateName ->
                 afterAt.startsWith(candidateName, ignoreCase = true) &&
@@ -2464,19 +2526,13 @@ private fun formatCommentWithMentions(
             }
 
             if (matchedKnownName != null) {
-                val endIdx = atIndex + 1 + matchedKnownName.length
-                addStyle(
-                    style = SpanStyle(
-                        color = NeumorphicTeal,
-                        fontWeight = FontWeight.Bold,
-                        background = NeumorphicTeal.copy(alpha = 0.12f)
-                    ),
-                    start = atIndex,
-                    end = endIdx
-                )
-                searchIndex = endIdx
+                val actualSlice = text.substring(atIndex, atIndex + 1 + matchedKnownName.length)
+                withStyle(mentionStyle) {
+                    append(actualSlice)
+                }
+                searchIndex = atIndex + 1 + matchedKnownName.length
             } else {
-                // Highlight single-token @handle if not in knownPeopleNames
+                // 3. Highlight single-token @handle if not in knownPeopleNames
                 var tokenEnd = atIndex + 1
                 while (tokenEnd < text.length &&
                     (text[tokenEnd].isLetterOrDigit() || text[tokenEnd] in listOf('_', '.', '-'))
@@ -2484,17 +2540,12 @@ private fun formatCommentWithMentions(
                     tokenEnd++
                 }
                 if (tokenEnd > atIndex + 1) {
-                    addStyle(
-                        style = SpanStyle(
-                            color = NeumorphicTeal,
-                            fontWeight = FontWeight.Bold,
-                            background = NeumorphicTeal.copy(alpha = 0.12f)
-                        ),
-                        start = atIndex,
-                        end = tokenEnd
-                    )
+                    withStyle(mentionStyle) {
+                        append(text.substring(atIndex, tokenEnd))
+                    }
                     searchIndex = tokenEnd
                 } else {
+                    append('@')
                     searchIndex = atIndex + 1
                 }
             }

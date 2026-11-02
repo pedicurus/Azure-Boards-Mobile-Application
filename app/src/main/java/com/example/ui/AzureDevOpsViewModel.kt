@@ -410,7 +410,10 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         .map { state ->
             state.notifications
                 .filter { it.category == NotificationCategory.ASSIGNED }
-                .take(10)
+                .sortedWith(
+                    compareByDescending<AppNotificationItem> { it.epochMs }
+                        .thenByDescending { it.workItemId }
+                )
         }
         .distinctUntilChanged()
         .flowOn(Dispatchers.Default)
@@ -420,7 +423,10 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         .map { state ->
             state.notifications
                 .filter { it.category == NotificationCategory.MENTIONED }
-                .take(10)
+                .sortedWith(
+                    compareByDescending<AppNotificationItem> { it.epochMs }
+                        .thenByDescending { it.workItemId }
+                )
         }
         .distinctUntilChanged()
         .flowOn(Dispatchers.Default)
@@ -428,7 +434,8 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
 
     val unreadNotificationsCount: StateFlow<Int> = _notificationsState
         .map { state ->
-            state.notifications.count { !it.isRead }
+            val startOfMonthMs = repository.getStartOfCurrentMonthEpochMs()
+            state.notifications.count { !it.isRead && it.epochMs >= startOfMonthMs }
         }
         .distinctUntilChanged()
         .flowOn(Dispatchers.Default)
@@ -1395,10 +1402,13 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         }
 
         // Auto-connect to the Default Organization if saved credentials exist
+        val isExplicitDisconnected = repository.isExplicitlyDisconnected()
         val savedOrgs = repository.getSavedOrganizations()
         val defOrgName = repository.getDefaultOrganization() ?: savedOrgs.firstOrNull()?.organization
-        val defAccount = savedOrgs.firstOrNull { it.organization.equals(defOrgName, ignoreCase = true) }
-            ?: savedOrgs.firstOrNull()
+        val defAccount = if (!isExplicitDisconnected) {
+            savedOrgs.firstOrNull { it.organization.equals(defOrgName, ignoreCase = true) }
+                ?: savedOrgs.firstOrNull()
+        } else null
 
         if (defAccount != null) {
             _defaultOrganization.value = defAccount.organization
@@ -1492,10 +1502,14 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    val availableAccounts: List<OrganizationAccount>
+        get() = repository.getSavedOrganizations()
+
     fun getInitialOrg(): String = getActiveAccount()?.organization ?: repository.getConfiguredUrl()
     fun getInitialPat(): String = getActiveAccount()?.pat ?: repository.getConfiguredPat()
 
     fun connect(organization: String, pat: String, rememberCredentials: Boolean = true) {
+        repository.setExplicitlyDisconnected(false)
         val normalizedOrg = repository.extractOrganization(organization)
         val cleanPat = pat.trim()
         val isAlreadyInApp = _connectionStatus.value is ConnectionStatus.Connected || _organizations.value.isNotEmpty()
@@ -2904,6 +2918,32 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
 
         pendingDirtyItems[normalizedUpdated.id] = normalizedUpdated
         persistCurrentItemsInBackground()
+
+        // If the work item is unassigned or reassigned to someone else, immediately remove its ASSIGNED notification
+        val currentNotifState = _notificationsState.value
+        val effectiveName = currentNotifState.manualIdentityOverride?.takeIf { it.isNotBlank() }
+            ?: currentNotifState.detectedDisplayName
+        val detectedEmail = if (currentNotifState.manualIdentityOverride.isNullOrBlank()) {
+            currentNotifState.detectedEmail
+        } else null
+        val isStillAssignedToMe = !normalizedUpdated.isUnassigned &&
+            (!effectiveName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) &&
+            repository.matchesUserIdentity(
+                candidateName = normalizedUpdated.assignedToName,
+                candidateEmail = normalizedUpdated.assignedToEmail,
+                effectiveDisplayName = effectiveName,
+                detectedEmail = detectedEmail
+            )
+        if (!isStillAssignedToMe) {
+            val acc = getActiveAccount()
+            val org = acc?.organization ?: _defaultOrganization.value ?: repository.getConfiguredUrl()
+            if (org.isNotBlank()) {
+                viewModelScope.launch {
+                    val updatedNotifState = repository.removeAssignedNotificationForWorkItem(org, normalizedUpdated.id)
+                    _notificationsState.value = updatedNotifState
+                }
+            }
+        }
 
         val onlyTextChanged = currentInMemory != null &&
             currentInMemory.state == normalizedUpdated.state &&

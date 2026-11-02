@@ -149,7 +149,8 @@ interface AzureDevOpsService {
         @Path("workItemId") workItemId: Int,
         @Query("\$top") top: Int = 50,
         @Query("order") order: String = "desc",
-        @Query("api-version") apiVersion: String = "7.0-preview.3"
+        @Query("\$expand") expand: String? = "renderedText",
+        @Query("api-version") apiVersion: String = "7.1-preview.4"
     ): Response<com.example.data.model.WorkItemCommentsResponse>
 
     @POST("{organization}/{project}/_apis/wit/workItems/{workItemId}/comments")
@@ -157,7 +158,8 @@ interface AzureDevOpsService {
         @Path("organization") organization: String,
         @Path("project") project: String,
         @Path("workItemId") workItemId: Int,
-        @Query("api-version") apiVersion: String = "7.0-preview.3",
+        @Query("format") format: String? = "markdown",
+        @Query("api-version") apiVersion: String = "7.1-preview.4",
         @Body request: com.example.data.model.AddWorkItemCommentRequest
     ): Response<com.example.data.model.RawWorkItemComment>
 

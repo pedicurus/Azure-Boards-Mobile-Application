@@ -31,7 +31,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.AssignmentInd
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.NotificationsNone
 import androidx.compose.material.icons.filled.Person
@@ -39,6 +43,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
@@ -79,6 +84,10 @@ import com.example.ui.components.isAlmostPersian
 import com.example.ui.theme.getAzureStateColor
 import com.example.ui.theme.getAzureTypeColor
 import com.example.ui.theme.getAzureTypeVectorIcon
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 
 private val NotifBgTop = Color(0xFFF6F7FB)
 private val NotifBgBottom = Color(0xFFECEEF6)
@@ -87,6 +96,21 @@ private val NotifTextDark = Color(0xFF0D101C)
 private val NotifTextMuted = Color(0xFF6E7591)
 private val NotifCardBorder = Color(0xFFDCE1EF)
 private val NotifUnreadTint = Color(0xFFF0F7FF)
+
+internal fun computeStartOfCurrentMonthEpochMs(nowEpochMs: Long = System.currentTimeMillis()): Long {
+    val cal = Calendar.getInstance()
+    cal.timeInMillis = nowEpochMs
+    cal.set(Calendar.DAY_OF_MONTH, 1)
+    cal.set(Calendar.HOUR_OF_DAY, 0)
+    cal.set(Calendar.MINUTE, 0)
+    cal.set(Calendar.SECOND, 0)
+    cal.set(Calendar.MILLISECOND, 0)
+    return cal.timeInMillis
+}
+
+internal fun formatCurrentMonthLabel(nowEpochMs: Long = System.currentTimeMillis()): String {
+    return SimpleDateFormat("MMMM yyyy", Locale.US).format(Date(nowEpochMs))
+}
 
 @Composable
 fun NotificationsScreen(
@@ -119,16 +143,67 @@ fun NotificationsScreen(
 
     // 0 = Assigned tab, 1 = Mentioned tab
     var selectedTabIndex by rememberSaveable { mutableIntStateOf(0) }
+    var showOlderAssigned by rememberSaveable { mutableStateOf(false) }
+    var showOlderMentioned by rememberSaveable { mutableStateOf(false) }
 
-    val unreadAssignedCount = remember(assignedNotifications) {
-        assignedNotifications.count { !it.isRead }
-    }
-    val unreadMentionedCount = remember(mentionedNotifications) {
-        mentionedNotifications.count { !it.isRead }
-    }
-    val totalUnreadCount = unreadAssignedCount + unreadMentionedCount
+    val startOfMonthMs = remember { computeStartOfCurrentMonthEpochMs() }
+    val currentMonthName = remember { formatCurrentMonthLabel() }
 
-    val activeItems = (if (selectedTabIndex == 0) assignedNotifications else mentionedNotifications).take(10)
+    val sortedAssigned = remember(assignedNotifications) {
+        assignedNotifications.sortedWith(
+            compareByDescending<AppNotificationItem> { it.epochMs }
+                .thenByDescending { it.workItemId }
+        )
+    }
+    val sortedMentioned = remember(mentionedNotifications) {
+        mentionedNotifications.sortedWith(
+            compareByDescending<AppNotificationItem> { it.epochMs }
+                .thenByDescending { it.workItemId }
+        )
+    }
+
+    val thisMonthAssigned = remember(sortedAssigned, startOfMonthMs) {
+        sortedAssigned.filter { it.epochMs >= startOfMonthMs }
+    }
+    val olderAssigned = remember(sortedAssigned, startOfMonthMs) {
+        sortedAssigned.filter { it.epochMs < startOfMonthMs }
+    }
+
+    val thisMonthMentioned = remember(sortedMentioned, startOfMonthMs) {
+        sortedMentioned.filter { it.epochMs >= startOfMonthMs }
+    }
+    val olderMentioned = remember(sortedMentioned, startOfMonthMs) {
+        sortedMentioned.filter { it.epochMs < startOfMonthMs }
+    }
+
+    val unreadAssignedCount = remember(thisMonthAssigned, olderAssigned, showOlderAssigned) {
+        if (showOlderAssigned) {
+            sortedAssigned.count { !it.isRead }
+        } else {
+            thisMonthAssigned.count { !it.isRead }
+        }
+    }
+    val unreadMentionedCount = remember(thisMonthMentioned, olderMentioned, showOlderMentioned) {
+        if (showOlderMentioned) {
+            sortedMentioned.count { !it.isRead }
+        } else {
+            thisMonthMentioned.count { !it.isRead }
+        }
+    }
+    val totalUnreadCount = remember(sortedAssigned, sortedMentioned) {
+        sortedAssigned.count { !it.isRead } + sortedMentioned.count { !it.isRead }
+    }
+
+    val activeThisMonthItems = if (selectedTabIndex == 0) thisMonthAssigned else thisMonthMentioned
+    val activeOlderItems = if (selectedTabIndex == 0) olderAssigned else olderMentioned
+    val isShowingOlder = if (selectedTabIndex == 0) showOlderAssigned else showOlderMentioned
+    val onToggleShowOlder: (Boolean) -> Unit = { expand ->
+        if (selectedTabIndex == 0) {
+            showOlderAssigned = expand
+        } else {
+            showOlderMentioned = expand
+        }
+    }
     val activeCategory = if (selectedTabIndex == 0) NotificationCategory.ASSIGNED else NotificationCategory.MENTIONED
 
     Column(
@@ -343,7 +418,7 @@ fun NotificationsScreen(
                 NotificationSectionTab(
                     title = stringResource(R.string.notifications_tab_assigned),
                     icon = Icons.Default.AssignmentInd,
-                    totalCount = assignedNotifications.size,
+                    totalCount = if (showOlderAssigned) sortedAssigned.size else thisMonthAssigned.size,
                     unreadCount = unreadAssignedCount,
                     selected = selectedTabIndex == 0,
                     onClick = { selectedTabIndex = 0 },
@@ -354,7 +429,7 @@ fun NotificationsScreen(
                 NotificationSectionTab(
                     title = stringResource(R.string.notifications_tab_mentioned),
                     icon = Icons.Default.AlternateEmail,
-                    totalCount = mentionedNotifications.size,
+                    totalCount = if (showOlderMentioned) sortedMentioned.size else thisMonthMentioned.size,
                     unreadCount = unreadMentionedCount,
                     selected = selectedTabIndex == 1,
                     onClick = { selectedTabIndex = 1 },
@@ -364,7 +439,7 @@ fun NotificationsScreen(
             }
         }
 
-        // Identity status bar (allows switching or setting identity in Settings if needed)
+        // Identity & Current Month Scope Bar
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -411,7 +486,7 @@ fun NotificationsScreen(
         }
 
         // Notifications List or Empty State
-        if (activeItems.isEmpty()) {
+        if (activeThisMonthItems.isEmpty() && (!isShowingOlder || activeOlderItems.isEmpty())) {
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
@@ -455,6 +530,12 @@ fun NotificationsScreen(
                     Text(
                         text = if (isSyncingNotifications) {
                             "Checking Azure Boards for notifications..."
+                        } else if (activeOlderItems.isNotEmpty()) {
+                            if (selectedTabIndex == 0) {
+                                "No assigned items in this month ($currentMonthName)"
+                            } else {
+                                "No @mentions in this month ($currentMonthName)"
+                            }
                         } else if (selectedTabIndex == 0) {
                             stringResource(R.string.notifications_empty_assigned_title)
                         } else {
@@ -469,7 +550,9 @@ fun NotificationsScreen(
                     Spacer(modifier = Modifier.height(6.dp))
 
                     Text(
-                        text = if (selectedTabIndex == 0) {
+                        text = if (activeOlderItems.isNotEmpty()) {
+                            "Only items from this month are shown by default to keep your notifications fresh. You have ${activeOlderItems.size} older item${if (activeOlderItems.size == 1) "" else "s"} from previous months."
+                        } else if (selectedTabIndex == 0) {
                             stringResource(R.string.notifications_empty_assigned_subtitle)
                         } else {
                             stringResource(R.string.notifications_empty_mentioned_subtitle)
@@ -480,6 +563,32 @@ fun NotificationsScreen(
                     )
 
                     Spacer(modifier = Modifier.height(16.dp))
+
+                    if (activeOlderItems.isNotEmpty()) {
+                        Button(
+                            onClick = { onToggleShowOlder(true) },
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = NotifAccentBlue,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier.testTag("notifications_see_more_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.History,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "See More Items (${activeOlderItems.size})",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+                    }
 
                     OutlinedButton(
                         onClick = onRefreshNotifications,
@@ -516,14 +625,215 @@ fun NotificationsScreen(
                     .fillMaxWidth()
                     .testTag("notifications_list_${activeCategory.lowercase()}")
             ) {
-                items(
-                    items = activeItems,
-                    key = { it.id }
-                ) { item ->
-                    NotificationItemCard(
-                        item = item,
-                        onClick = { onNotificationClick(item) }
-                    )
+                // "In This Month" Section Header
+                item(key = "header_this_month") {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp, horizontal = 2.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CalendarMonth,
+                                contentDescription = null,
+                                tint = NotifAccentBlue,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = "In This Month ($currentMonthName)",
+                                color = NotifTextDark,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Surface(
+                            color = NotifAccentBlue.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                text = "${activeThisMonthItems.size}",
+                                color = NotifAccentBlue,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+
+                if (activeThisMonthItems.isEmpty()) {
+                    item(key = "empty_this_month_banner") {
+                        Surface(
+                            color = Color.White,
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, NotifCardBorder),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = if (selectedTabIndex == 0) {
+                                    "No work items assigned in $currentMonthName."
+                                } else {
+                                    "No @mentions in $currentMonthName."
+                                },
+                                color = NotifTextMuted,
+                                fontSize = 12.sp,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 14.dp, horizontal = 16.dp)
+                            )
+                        }
+                    }
+                } else {
+                    items(
+                        items = activeThisMonthItems,
+                        key = { it.id }
+                    ) { item ->
+                        NotificationItemCard(
+                            item = item,
+                            onClick = { onNotificationClick(item) }
+                        )
+                    }
+                }
+
+                // "See More Items" Button or Expanded Older Items
+                if (activeOlderItems.isNotEmpty()) {
+                    if (!isShowingOlder) {
+                        item(key = "see_more_items_button") {
+                            Surface(
+                                onClick = { onToggleShowOlder(true) },
+                                shape = RoundedCornerShape(14.dp),
+                                color = Color.White,
+                                border = BorderStroke(1.dp, NotifAccentBlue.copy(alpha = 0.45f)),
+                                shadowElevation = 1.dp,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 6.dp)
+                                    .testTag("notifications_see_more_button")
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 13.dp, horizontal = 16.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ExpandMore,
+                                        contentDescription = null,
+                                        tint = NotifAccentBlue,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "See More Items (${activeOlderItems.size})",
+                                        color = NotifAccentBlue,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        item(key = "header_earlier_items") {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 8.dp, bottom = 2.dp)
+                            ) {
+                                HorizontalDivider(
+                                    color = NotifCardBorder,
+                                    modifier = Modifier.padding(bottom = 10.dp)
+                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.History,
+                                            contentDescription = null,
+                                            tint = NotifTextMuted,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = "Earlier (${activeOlderItems.size})",
+                                            color = NotifTextDark,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+
+                                    Text(
+                                        text = "Show Only This Month",
+                                        color = NotifAccentBlue,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .clickable { onToggleShowOlder(false) }
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                            .testTag("notifications_show_less_button")
+                                    )
+                                }
+                            }
+                        }
+
+                        items(
+                            items = activeOlderItems,
+                            key = { "older_${it.id}" }
+                        ) { item ->
+                            NotificationItemCard(
+                                item = item,
+                                onClick = { onNotificationClick(item) }
+                            )
+                        }
+
+                        item(key = "collapse_older_footer") {
+                            Surface(
+                                onClick = { onToggleShowOlder(false) },
+                                shape = RoundedCornerShape(14.dp),
+                                color = Color.White,
+                                border = BorderStroke(1.dp, NotifCardBorder),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 4.dp)
+                                    .testTag("notifications_collapse_older_button")
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 12.dp, horizontal = 16.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ExpandLess,
+                                        contentDescription = null,
+                                        tint = NotifTextMuted,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Show Only This Month",
+                                        color = NotifTextDark,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -822,21 +1132,30 @@ private fun NotificationItemCard(
     }
 }
 
-private fun highlightMentionsInNotificationText(text: String) = buildAnnotatedString {
-    val mentionRegex = Regex("@[\\p{L}\\p{N}._-]+(?:\\s+[\\p{L}\\p{N}._-]+)?")
+internal fun highlightMentionsInNotificationText(text: String) = buildAnnotatedString {
+    val mentionRegex = Regex("@<([^>\\r\\n]+)>|@[\\p{L}\\p{N}._-]+(?:\\s+[\\p{L}\\p{N}._-]+)?")
+    val pillStyle = SpanStyle(
+        color = NotifAccentBlue,
+        fontWeight = FontWeight.Bold,
+        background = NotifAccentBlue.copy(alpha = 0.12f)
+    )
     var lastIndex = 0
     for (match in mentionRegex.findAll(text)) {
         if (match.range.first > lastIndex) {
             append(text.substring(lastIndex, match.range.first))
         }
-        withStyle(
-            SpanStyle(
-                color = NotifAccentBlue,
-                fontWeight = FontWeight.Bold,
-                background = NotifAccentBlue.copy(alpha = 0.12f)
-            )
-        ) {
-            append(match.value)
+        val bracketedInner = match.groups[1]?.value?.trim()
+        val displayPillText = if (!bracketedInner.isNullOrEmpty()) {
+            val resolvedName = com.example.data.repository.AzureDevOpsRepository
+                .resolveIdentityRecord(bracketedInner)
+                ?.displayName
+                ?: bracketedInner.removePrefix("@").trim()
+            "@$resolvedName"
+        } else {
+            match.value
+        }
+        withStyle(pillStyle) {
+            append(displayPillText)
         }
         lastIndex = match.range.last + 1
     }

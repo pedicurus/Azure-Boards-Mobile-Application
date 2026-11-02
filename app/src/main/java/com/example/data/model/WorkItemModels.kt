@@ -26,6 +26,7 @@ data class WorkItem(
     val workItemType: String,
     val state: String,
     val teamProject: String? = null,
+    val assignedToId: String? = null,
     val assignedToName: String? = null,
     val assignedToEmail: String? = null,
     val assignedToAvatar: String? = null,
@@ -375,6 +376,7 @@ data class WorkItemComment(
     val workItemId: Int,
     val text: String,
     val authorName: String,
+    val authorId: String? = null,
     val authorEmail: String? = null,
     val authorAvatar: String? = null,
     val createdDate: String = "",
@@ -393,10 +395,21 @@ data class RawWorkItemComment(
     @param:Json(name = "id") val id: Int? = null,
     @param:Json(name = "workItemId") val workItemId: Int? = null,
     @param:Json(name = "text") val text: String? = null,
+    @param:Json(name = "renderedText") val renderedText: String? = null,
+    @param:Json(name = "format") val format: String? = null,
+    @param:Json(name = "mentions") val mentions: List<RawCommentMention>? = null,
     @param:Json(name = "createdBy") val createdBy: RawCommentIdentity? = null,
     @param:Json(name = "createdDate") val createdDate: String? = null,
     @param:Json(name = "modifiedDate") val modifiedDate: String? = null,
     @param:Json(name = "isDeleted") val isDeleted: Boolean? = false
+)
+
+@JsonClass(generateAdapter = true)
+data class RawCommentMention(
+    @param:Json(name = "artifactId") val artifactId: String? = null,
+    @param:Json(name = "artifactType") val artifactType: String? = null,
+    @param:Json(name = "commentId") val commentId: Int? = null,
+    @param:Json(name = "targetId") val targetId: String? = null
 )
 
 @JsonClass(generateAdapter = true)
