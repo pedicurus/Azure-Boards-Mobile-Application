@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -15,14 +16,21 @@ import com.example.ui.screens.WorkItemsScreen
 import com.example.ui.viewmodel.ConnectionViewModel
 import com.example.ui.viewmodel.NotificationsViewModel
 import com.example.ui.viewmodel.WorkItemsViewModel
+import kotlinx.serialization.Serializable
 
 /**
- * Typed navigation destinations for the Azure Boards app.
+ * Type-safe navigation destinations for the Azure Boards app using Kotlinx Serialization.
  */
-sealed class AzureDestination(val route: String) {
-    data object Connection : AzureDestination("connection")
-    data object WorkItems : AzureDestination("work_items")
+sealed interface AzureRoute {
+    @Serializable
+    data object Connection : AzureRoute
+
+    @Serializable
+    data object WorkItems : AzureRoute
 }
+
+// Backwards-compatible alias for any legacy references
+typealias AzureDestination = AzureRoute
 
 @Composable
 fun AzureBoardsNavHost(
@@ -36,23 +44,23 @@ fun AzureBoardsNavHost(
     val notificationsUiState by notificationsViewModel.uiState.collectAsStateWithLifecycle()
 
     val isConnected = connectionUiState.isConnected
-    val startDestination = if (isConnected) {
-        AzureDestination.WorkItems.route
-    } else {
-        AzureDestination.Connection.route
-    }
+    val startDestination: Any = if (isConnected) AzureRoute.WorkItems else AzureRoute.Connection
 
     LaunchedEffect(isConnected) {
-        val targetRoute = if (isConnected) {
-            AzureDestination.WorkItems.route
+        val currentDestination = navController.currentDestination
+        if (isConnected) {
+            if (currentDestination?.hasRoute<AzureRoute.WorkItems>() != true) {
+                navController.navigate(AzureRoute.WorkItems) {
+                    popUpTo<AzureRoute.Connection> { inclusive = true }
+                    launchSingleTop = true
+                }
+            }
         } else {
-            AzureDestination.Connection.route
-        }
-        val currentRoute = navController.currentDestination?.route
-        if (currentRoute != null && currentRoute != targetRoute) {
-            navController.navigate(targetRoute) {
-                popUpTo(navController.graph.id) { inclusive = true }
-                launchSingleTop = true
+            if (currentDestination?.hasRoute<AzureRoute.Connection>() != true) {
+                navController.navigate(AzureRoute.Connection) {
+                    popUpTo<AzureRoute.WorkItems> { inclusive = true }
+                    launchSingleTop = true
+                }
             }
         }
     }
@@ -65,7 +73,7 @@ fun AzureBoardsNavHost(
         popEnterTransition = { fadeIn() },
         popExitTransition = { fadeOut() }
     ) {
-        composable(route = AzureDestination.Connection.route) {
+        composable<AzureRoute.Connection> {
             ConnectionScreen(
                 initialOrg = connectionViewModel.getInitialOrg(),
                 initialPat = connectionViewModel.getInitialPat(),
@@ -80,7 +88,7 @@ fun AzureBoardsNavHost(
             )
         }
 
-        composable(route = AzureDestination.WorkItems.route) {
+        composable<AzureRoute.WorkItems> {
             WorkItemsScreen(
                 organization = connectionUiState.activeOrganization.ifBlank { workItemsUiState.organization },
                 organizations = connectionUiState.organizations,

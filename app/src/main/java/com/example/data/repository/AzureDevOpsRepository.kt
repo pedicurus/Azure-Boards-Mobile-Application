@@ -42,6 +42,7 @@ class AzureDevOpsRepository(
         context.getSharedPreferences("azure_boards_prefs", Context.MODE_PRIVATE)
 
     private val localStore = WorkItemLocalStore(context.applicationContext ?: context)
+    private val accountRepository = AzureAccountRepository(context, tokenStore, localStore)
 
     private val hydratedIdsByOrg = ConcurrentHashMap<String, MutableSet<Int>>()
     private val unloadedProposedIdsByOrg = ConcurrentHashMap<String, MutableList<Int>>()
@@ -616,232 +617,59 @@ class AzureDevOpsRepository(
         prefs.edit().putString(KEY_SAVED_ORGS, serialized).commit()
     }
 
-    fun getManuallySavedOrganizations(): List<OrganizationAccount> {
-        val raw = prefs.getString(KEY_SAVED_ORGS, null)
-        if (raw.isNullOrBlank()) return emptyList()
-        var needsMigration = false
-        val accounts = raw.split("|").mapNotNull { entry ->
-            val parts = entry.split(":")
-            if (parts.size == 2) {
-                val org = extractOrganization(decodeField(parts[0]))
-                val decodedPatField = decodeField(parts[1]).trim()
-                if (!tokenStore.isEncrypted(decodedPatField) && decodedPatField.isNotBlank()) {
-                    needsMigration = true
-                }
-                val pat = tokenStore.decryptToken(decodedPatField).trim()
-                if (org.isNotBlank() && pat.isNotBlank()) {
-                    OrganizationAccount(organization = org, pat = pat, isRemembered = true)
-                } else {
-                    null
-                }
-            } else {
-                null
-            }
-        }.distinctBy { it.organization.lowercase() }
+    fun getManuallySavedOrganizations(): List<OrganizationAccount> =
+        accountRepository.getManuallySavedOrganizations()
 
-        if (needsMigration && accounts.isNotEmpty()) {
-            persistOrganizationsList(accounts)
-        }
-        return accounts
-    }
+    fun isExplicitlyDisconnected(): Boolean =
+        accountRepository.isExplicitlyDisconnected()
 
-    fun isExplicitlyDisconnected(): Boolean {
-        return prefs.getBoolean("pref_azure_explicit_disconnect", false)
-    }
-
-    fun setExplicitlyDisconnected(disconnected: Boolean) {
-        prefs.edit().putBoolean("pref_azure_explicit_disconnect", disconnected).apply()
-    }
+    fun setExplicitlyDisconnected(disconnected: Boolean) =
+        accountRepository.setExplicitlyDisconnected(disconnected)
 
     /**
      * Returns all available saved organizations stored locally in the app.
      */
-    fun getSavedOrganizations(): List<OrganizationAccount> {
-        return getManuallySavedOrganizations()
-    }
+    fun getSavedOrganizations(): List<OrganizationAccount> =
+        accountRepository.getSavedOrganizations()
 
-    fun saveOrganizationAccount(account: OrganizationAccount) {
-        val normOrg = extractOrganization(account.organization)
-        val cleanPat = account.pat.trim()
-        if (normOrg.isBlank() || cleanPat.isBlank()) return
+    fun saveOrganizationAccount(account: OrganizationAccount) =
+        accountRepository.saveOrganizationAccount(account)
 
-        setExplicitlyDisconnected(false)
+    fun removeOrganizationAccount(organization: String) =
+        accountRepository.removeOrganizationAccount(organization)
 
-        val existing = getManuallySavedOrganizations().toMutableList()
-        val existingIdx = existing.indexOfFirst { it.organization.equals(normOrg, ignoreCase = true) }
+    fun getDefaultOrganization(): String? =
+        accountRepository.getDefaultOrganization()
 
-        if (account.isRemembered) {
-            val normalizedAccount = OrganizationAccount(normOrg, cleanPat, isRemembered = true)
-            if (existingIdx >= 0) {
-                existing[existingIdx] = normalizedAccount
-            } else {
-                existing.add(normalizedAccount)
-            }
-            persistOrganizationsList(existing)
-            if (getDefaultOrganization().isNullOrBlank() || existing.size == 1) {
-                saveDefaultOrganization(normOrg)
-            }
-        } else {
-            if (existingIdx >= 0) {
-                existing.removeAt(existingIdx)
-                persistOrganizationsList(existing)
-            }
-        }
-    }
+    fun saveDefaultOrganization(organization: String?) =
+        accountRepository.saveDefaultOrganization(organization)
 
-    fun removeOrganizationAccount(organization: String) {
-        val normOrg = extractOrganization(organization)
-        if (normOrg.isBlank()) return
-        localStore.clearOrganizationCache(normOrg)
-        val remaining = getManuallySavedOrganizations().filterNot {
-            it.organization.equals(normOrg, ignoreCase = true)
-        }
-        persistOrganizationsList(remaining)
-        val currentDefaultOrg = getDefaultOrganization()
-        if (currentDefaultOrg != null && currentDefaultOrg.equals(normOrg, ignoreCase = true)) {
-            saveDefaultOrganization(getSavedOrganizations().firstOrNull()?.organization)
-        }
-    }
-
-    fun getDefaultOrganization(): String? {
-        val savedDefault = prefs.getString(KEY_DEFAULT_ORG, null)?.trim()?.takeIf { it.isNotBlank() }
-        val savedOrgs = getSavedOrganizations()
-        if (savedDefault != null) {
-            val matched = savedOrgs.firstOrNull { it.organization.equals(savedDefault, ignoreCase = true) }
-            if (matched != null) return matched.organization
-        }
-        return savedOrgs.firstOrNull()?.organization
-    }
-
-    fun saveDefaultOrganization(organization: String?) {
-        val normOrg = organization?.let { extractOrganization(it) }?.takeIf { it.isNotBlank() }
-        if (normOrg != null) {
-            prefs.edit().putString(KEY_DEFAULT_ORG, normOrg).commit()
-        } else {
-            prefs.edit().remove(KEY_DEFAULT_ORG).commit()
-        }
-    }
-
-    /**
-     * Resolves the configured Azure DevOps URL/Organization from saved accounts.
-     */
-    fun getConfiguredUrl(): String {
-        val defaultOrg = getDefaultOrganization()
-        if (!defaultOrg.isNullOrBlank()) return defaultOrg
-
-        return getSavedOrganizations().firstOrNull()?.organization.orEmpty()
-    }
+    fun getConfiguredUrl(): String =
+        accountRepository.getConfiguredUrl()
 
     /**
      * Resolves the configured Azure DevOps PAT from saved accounts.
      */
-    fun getConfiguredPat(): String {
-        val defaultOrg = getDefaultOrganization()
-        val savedOrgs = getSavedOrganizations()
-        if (!defaultOrg.isNullOrBlank()) {
-            val matched = savedOrgs.firstOrNull { it.organization.equals(defaultOrg, ignoreCase = true) }
-            if (matched != null) return matched.pat
-        }
-        return savedOrgs.firstOrNull()?.pat.orEmpty()
-    }
+    fun getConfiguredPat(): String =
+        accountRepository.getConfiguredPat()
 
-    fun getDefaultProject(organization: String? = null): String? {
-        val explicitOrg = organization?.let { extractOrganization(it) }?.takeIf { it.isNotBlank() }
-        val defOrg = getDefaultOrganization()
-        val targetOrg = explicitOrg ?: defOrg
-        if (!targetOrg.isNullOrBlank()) {
-            val perOrg = prefs.getString(KEY_DEFAULT_PROJECT_PREFIX + targetOrg.lowercase(), null)
-                ?.trim()
-                ?.takeIf { it.isNotBlank() }
-            if (perOrg != null) return perOrg
-            // Do not fall back to another organization's default project
-            if (explicitOrg != null && !explicitOrg.equals(defOrg, ignoreCase = true)) {
-                return null
-            }
-        }
-        return prefs.getString(KEY_DEFAULT_PROJECT, null)?.trim()?.takeIf { it.isNotBlank() }
-    }
+    fun getDefaultProject(organization: String? = null): String? =
+        accountRepository.getDefaultProject(organization)
 
-    fun saveDefaultProject(project: String, organization: String? = null) {
-        val trimmed = project.trim()
-        if (trimmed.isEmpty()) return
-        val explicitOrg = organization?.let { extractOrganization(it) }?.takeIf { it.isNotBlank() }
-        val defOrg = getDefaultOrganization()
-        val targetOrg = explicitOrg ?: defOrg
-        val editor = prefs.edit()
-        if (!targetOrg.isNullOrBlank()) {
-            editor.putString(KEY_DEFAULT_PROJECT_PREFIX + targetOrg.lowercase(), trimmed)
-            if (defOrg == null || targetOrg.equals(defOrg, ignoreCase = true)) {
-                editor.putString(KEY_DEFAULT_PROJECT, trimmed)
-            }
-        } else {
-            editor.putString(KEY_DEFAULT_PROJECT, trimmed)
-        }
-        editor.commit()
-    }
+    fun saveDefaultProject(project: String, organization: String? = null) =
+        accountRepository.saveDefaultProject(project, organization)
 
-    fun getCachedProjectsForOrg(organization: String): List<String> {
-        val normOrg = extractOrganization(organization)
-        if (normOrg.isBlank()) return emptyList()
-        val orgKey = normOrg.lowercase()
-        cachedProjectsByOrgMemory[orgKey]?.let { return it }
+    fun getCachedProjectsForOrg(organization: String): List<String> =
+        accountRepository.getCachedProjectsForOrg(organization)
 
-        val raw = prefs.getString(KEY_CACHED_PROJECTS_PREFIX + orgKey, null)
-            ?: return emptyList()
-        val parsed = raw.split("|").map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
-        cachedProjectsByOrgMemory[orgKey] = parsed
-        return parsed
-    }
+    fun saveCachedProjectsForOrg(organization: String, projects: List<String>) =
+        accountRepository.saveCachedProjectsForOrg(organization, projects)
 
-    fun saveCachedProjectsForOrg(organization: String, projects: List<String>) {
-        val normOrg = extractOrganization(organization)
-        if (normOrg.isBlank()) return
-        val orgKey = normOrg.lowercase()
-        val cleaned = projects.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
-        if (cleaned.isNotEmpty()) {
-            cachedProjectsByOrgMemory[orgKey] = cleaned
-            prefs.edit()
-                .putString(KEY_CACHED_PROJECTS_PREFIX + orgKey, cleaned.joinToString("|"))
-                .apply()
-        }
-    }
+    fun clearCredentials() =
+        accountRepository.clearCredentials()
 
-    fun clearCredentials() {
-        cachedProjectsByOrgMemory.clear()
-        localStore.clearAllCaches()
-        prefs.edit()
-            .remove(KEY_SAVED_ORGS)
-            .remove(KEY_DEFAULT_ORG)
-            .putBoolean("pref_azure_explicit_disconnect", true)
-            .apply()
-    }
-
-    /**
-     * Normalizes inputs like:
-     * - "https://dev.azure.com/organization/" -> "organization"
-     * - "dev.azure.com/organization" -> "organization"
-     * - "https://organization.visualstudio.com/" -> "organization"
-     * - "organization" -> "organization"
-     */
-    fun extractOrganization(input: String): String {
-        var clean = input.trim()
-        clean = clean.removePrefix("https://").removePrefix("http://")
-        clean = clean.trimEnd('/')
-
-        if (clean.contains("dev.azure.com/")) {
-            val parts = clean.split("dev.azure.com/")
-            if (parts.size > 1) {
-                return parts[1].split("/").firstOrNull()?.trim() ?: clean
-            }
-        }
-        if (clean.contains(".visualstudio.com")) {
-            val parts = clean.split(".visualstudio.com")
-            if (parts.isNotEmpty()) {
-                return parts[0].substringAfterLast("/").trim()
-            }
-        }
-        return clean.substringAfterLast("/").trim()
-    }
+    fun extractOrganization(input: String): String =
+        accountRepository.extractOrganization(input)
 
     /**
      * Performs a fast delta check against Azure DevOps when cached items already exist on device.
@@ -3272,13 +3100,8 @@ class AzureDevOpsRepository(
         }
     }
 
-    fun formatCommentTimestamp(isoDate: String?): String {
-        val clean = isoDate?.trim().orEmpty()
-        if (clean.length < 10) return ""
-        val datePart = clean.take(10)
-        val timePart = clean.substringAfter('T', "").take(5)
-        return if (timePart.length == 5) "$datePart · $timePart" else datePart
-    }
+    fun formatCommentTimestamp(isoDate: String?): String =
+        AzureIdentityRegistry.formatCommentTimestamp(isoDate)
 
     private fun mapRawCommentToDomain(
         raw: com.example.data.model.RawWorkItemComment,
@@ -3791,92 +3614,24 @@ class AzureDevOpsRepository(
         candidateEmail: String?,
         effectiveDisplayName: String?,
         detectedEmail: String?
-    ): Boolean {
-        val cName = candidateName?.trim()?.lowercase().orEmpty()
-        val cEmail = candidateEmail?.trim()?.lowercase().orEmpty()
-        val targetName = effectiveDisplayName?.trim()?.lowercase().orEmpty()
-        val targetEmail = detectedEmail?.trim()?.lowercase().orEmpty()
-
-        if (cName.isEmpty() && cEmail.isEmpty()) return false
-        if (cName == "unassigned") return false
-
-        if (targetEmail.isNotEmpty()) {
-            if (cEmail.isNotEmpty() && cEmail == targetEmail) return true
-            if (cName.isNotEmpty() && cName == targetEmail) return true
-            val emailPrefix = targetEmail.substringBefore('@')
-            if (emailPrefix.length >= 3 && cEmail.startsWith("$emailPrefix@")) return true
-        }
-        if (targetName.isNotEmpty() && cName.isNotEmpty()) {
-            if (cName == targetName) return true
-            // Allow matching when manual override is a partial name (at least 3 chars) matching whole word/token
-            val tokens = cName.split(' ', '-', '_', '.', '(', ')', '<', '>').filter { it.isNotEmpty() }
-            if (targetName.length >= 3 && (tokens.contains(targetName) || cName.startsWith("$targetName "))) {
-                return true
-            }
-        }
-        return false
-    }
+    ): Boolean = AzureIdentityRegistry.matchesUserIdentity(
+        candidateName = candidateName,
+        candidateEmail = candidateEmail,
+        effectiveDisplayName = effectiveDisplayName,
+        detectedEmail = detectedEmail
+    )
 
     fun commentMentionsIdentity(
         commentText: String,
         effectiveDisplayName: String?,
         detectedEmail: String?,
-        detectedUserId: String?
-    ): Boolean {
-        val lowerText = commentText.lowercase()
-        val targetName = effectiveDisplayName?.trim()?.lowercase().orEmpty()
-        val targetEmail = detectedEmail?.trim()?.lowercase().orEmpty()
-        val targetId = detectedUserId?.trim()?.lowercase().orEmpty()
-
-        if (targetId.isNotEmpty()) {
-            if (lowerText.contains("@<$targetId>") ||
-                lowerText.contains(targetId) ||
-                (lowerText.contains("data-vss-mention") && lowerText.contains(targetId))
-            ) {
-                return true
-            }
-        }
-
-        if (targetName.isNotEmpty()) {
-            if (lowerText.contains("@<$targetName>") ||
-                lowerText.contains("@$targetName") ||
-                (lowerText.contains("data-vss-mention") && lowerText.contains(targetName)) ||
-                lowerText.contains("@ $targetName")
-            ) {
-                return true
-            }
-            // Check parts of the name (e.g. first name or last name if at least 3 chars)
-            val nameParts = targetName.split(' ', '-', '_', '.').map { it.trim() }.filter { it.length >= 3 }
-            for (part in nameParts) {
-                if (lowerText.contains("@<$part>") ||
-                    lowerText.contains("@$part") ||
-                    Regex("(?<![\\w@])@<?${Regex.escape(part)}>?(?![\\w])").containsMatchIn(lowerText)
-                ) {
-                    return true
-                }
-            }
-            // If the targetName appears in the comment with a mention indicator
-            if (lowerText.contains(targetName) && (lowerText.contains("@") || lowerText.contains("mention") || lowerText.contains("<a "))) {
-                return true
-            }
-        }
-        if (targetEmail.isNotEmpty()) {
-            if (lowerText.contains("@<$targetEmail>") || lowerText.contains("@$targetEmail") || lowerText.contains(targetEmail)) {
-                return true
-            }
-            val emailPrefix = targetEmail.substringBefore('@').trim()
-            if (emailPrefix.length >= 3) {
-                if (lowerText.contains("@<$emailPrefix>") ||
-                    lowerText.contains("@$emailPrefix") ||
-                    Regex("(?<![\\w@])@<?${Regex.escape(emailPrefix)}>?(?![\\w])").containsMatchIn(lowerText) ||
-                    (lowerText.contains(emailPrefix) && (lowerText.contains("@") || lowerText.contains("mention")))
-                ) {
-                    return true
-                }
-            }
-        }
-        return false
-    }
+        detectedUserId: String? = null
+    ): Boolean = AzureIdentityRegistry.commentMentionsIdentity(
+        commentText = commentText,
+        effectiveDisplayName = effectiveDisplayName,
+        detectedEmail = detectedEmail,
+        detectedUserId = detectedUserId
+    )
 
     /**
      * Evaluates freshly loaded or posted comments on a single [workItem] for `@mentions` of the current user.

@@ -22,6 +22,11 @@ import com.example.ui.viewmodel.WorkItemsFilterAndHierarchyHelper.insertBoundedT
 import com.example.ui.viewmodel.WorkItemsFilterAndHierarchyHelper.matchesClassificationHierarchyFast
 import com.example.ui.viewmodel.WorkItemsFilterAndHierarchyHelper.normalizeClassificationPath
 import com.example.ui.viewmodel.WorkItemsFilterAndHierarchyHelper.projectScopedKey
+import com.example.ui.viewmodel.delegates.WorkItemCrudDelegate
+import com.example.ui.viewmodel.delegates.WorkItemFilterDelegate
+import com.example.ui.viewmodel.delegates.WorkItemHierarchyDelegate
+import com.example.ui.viewmodel.delegates.WorkItemProcessDelegate
+import com.example.ui.viewmodel.delegates.WorkItemStreamDelegate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -40,7 +45,6 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Collections
 import java.util.Date
@@ -50,6 +54,13 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Feature ViewModel responsible for Azure Boards work items, filtering, progressive background
  * streaming, delta sync, process metadata & hierarchy rules, optimistic CRUD, and item discussions.
+ *
+ * Decomposed with specialized feature delegates:
+ * - [WorkItemFilterDelegate]: Search and facet query filters
+ * - [WorkItemStreamDelegate]: Progressive sync and streaming state indicators
+ * - [WorkItemHierarchyDelegate]: Hierarchy, allowed child types, and discussion comments
+ * - [WorkItemCrudDelegate]: Dirty tracking, debounced jobs, and baseline tracking
+ * - [WorkItemProcessDelegate]: Classification trees and backlog metadata
  */
 class WorkItemsViewModel(
     application: Application,
@@ -58,81 +69,38 @@ class WorkItemsViewModel(
 
     private val repository = sessionManager.repository
 
+    // Feature Delegates
+    private val filterDelegate = WorkItemFilterDelegate()
+    private val streamDelegate = WorkItemStreamDelegate()
+    private val hierarchyDelegate = WorkItemHierarchyDelegate()
+    private val crudDelegate = WorkItemCrudDelegate()
+    private val processDelegate = WorkItemProcessDelegate(repository)
+
     private val _allWorkItems = MutableStateFlow<List<WorkItem>>(emptyList())
     val allWorkItems: StateFlow<List<WorkItem>> = _allWorkItems.asStateFlow()
 
-    /**
-     * Tracks which organization the items currently in [_allWorkItems] belong to.
-     */
     private val _workItemsOrg = MutableStateFlow<String?>(null)
 
-    /**
-     * Tracks the last server-synchronized state of each work item so we can compute JSON Patch
-     * operations accurately when syncing edits back to Azure DevOps.
-     */
-    private val serverSyncedItems = ConcurrentHashMap<Int, WorkItem>()
-
-    /**
-     * Tracks work items that have local unsaved/in-flight edits so a refresh never overwrites them
-     * before they finish syncing to Azure DevOps.
-     */
-    private val pendingDirtyItems = ConcurrentHashMap<Int, WorkItem>()
-
-    /**
-     * Active debounce jobs per work item ID for syncing edits to Azure DevOps.
-     */
-    private val updateJobs = ConcurrentHashMap<Int, Job>()
-
-    private val _projectProcessMap = MutableStateFlow<Map<String, Map<String, List<String>>>>(emptyMap())
-    private val _projectCategoryMap = MutableStateFlow<Map<String, Map<String, String>>>(emptyMap())
-    private val _projectBacklogLevelsMap = MutableStateFlow<Map<String, List<List<String>>>>(emptyMap())
-    private val _projectAreasMap = MutableStateFlow<Map<String, List<String>>>(emptyMap())
-    private val _projectIterationsMap = MutableStateFlow<Map<String, List<String>>>(emptyMap())
-
-    private val _searchQuery = MutableStateFlow("")
-    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
-
-    private val _selectedProject = MutableStateFlow<String?>(null)
-    val selectedProject: StateFlow<String?> = _selectedProject.asStateFlow()
-
-    private val _typeFilter = MutableStateFlow<String?>(null)
-    val typeFilter: StateFlow<String?> = _typeFilter.asStateFlow()
-
-    private val _stateFilter = MutableStateFlow<String?>(null)
-    val stateFilter: StateFlow<String?> = _stateFilter.asStateFlow()
-
-    private val _assigneeFilter = MutableStateFlow<String?>(null)
-    val assigneeFilter: StateFlow<String?> = _assigneeFilter.asStateFlow()
-
-    private val _areaFilter = MutableStateFlow<String?>(null)
-    val areaFilter: StateFlow<String?> = _areaFilter.asStateFlow()
-
-    private val _iterationFilter = MutableStateFlow<String?>(null)
-    val iterationFilter: StateFlow<String?> = _iterationFilter.asStateFlow()
+    // Filter delegate flows
+    val searchQuery: StateFlow<String> = filterDelegate.searchQuery
+    val selectedProject: StateFlow<String?> = filterDelegate.selectedProject
+    val typeFilter: StateFlow<String?> = filterDelegate.typeFilter
+    val stateFilter: StateFlow<String?> = filterDelegate.stateFilter
+    val assigneeFilter: StateFlow<String?> = filterDelegate.assigneeFilter
+    val areaFilter: StateFlow<String?> = filterDelegate.areaFilter
+    val iterationFilter: StateFlow<String?> = filterDelegate.iterationFilter
 
     private var userManuallySelectedProject = false
     private var userManuallySelectedType = false
 
-    private val _isLoading = MutableStateFlow(false)
-    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
-
-    private val _isLoadingMore = MutableStateFlow(false)
-    val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
-
-    private val _isSearchingServer = MutableStateFlow(false)
-    val isSearchingServer: StateFlow<Boolean> = _isSearchingServer.asStateFlow()
-
-    private val _isBackgroundSyncing = MutableStateFlow(false)
-    val isBackgroundSyncing: StateFlow<Boolean> = _isBackgroundSyncing.asStateFlow()
-
-    private val _syncProgress = MutableStateFlow<Float?>(null)
-    val syncProgress: StateFlow<Float?> = _syncProgress.asStateFlow()
-
-    private val _isPullRefreshing = MutableStateFlow(false)
-    val isPullRefreshing: StateFlow<Boolean> = _isPullRefreshing.asStateFlow()
-
-    private val _syncStatusText = MutableStateFlow<String?>(null)
-    val syncStatusText: StateFlow<String?> = _syncStatusText.asStateFlow()
+    // Stream delegate flows
+    val isLoading: StateFlow<Boolean> = streamDelegate.isLoading
+    val isLoadingMore: StateFlow<Boolean> = streamDelegate.isLoadingMore
+    val isSearchingServer: StateFlow<Boolean> = streamDelegate.isSearchingServer
+    val isBackgroundSyncing: StateFlow<Boolean> = streamDelegate.isBackgroundSyncing
+    val syncProgress: StateFlow<Float?> = streamDelegate.syncProgress
+    val isPullRefreshing: StateFlow<Boolean> = streamDelegate.isPullRefreshing
+    val syncStatusText: StateFlow<String?> = streamDelegate.syncStatusText
 
     private var backgroundStreamJob: Job? = null
     private var activeConnectJob: Job? = null
@@ -152,20 +120,16 @@ class WorkItemsViewModel(
         private const val BACKGROUND_STREAM_UI_THROTTLE_MS = 250L
     }
 
-    private val _selectedWorkItem = MutableStateFlow<WorkItem?>(null)
-    val selectedWorkItem: StateFlow<WorkItem?> = _selectedWorkItem.asStateFlow()
-
-    private val _selectedWorkItemComments = MutableStateFlow<List<WorkItemComment>>(emptyList())
-    val selectedWorkItemComments: StateFlow<List<WorkItemComment>> = _selectedWorkItemComments.asStateFlow()
-
-    private val _isLoadingComments = MutableStateFlow(false)
-    val isLoadingComments: StateFlow<Boolean> = _isLoadingComments.asStateFlow()
+    // Hierarchy delegate flows
+    val selectedWorkItem: StateFlow<WorkItem?> = hierarchyDelegate.selectedWorkItem
+    val selectedWorkItemComments: StateFlow<List<WorkItemComment>> = hierarchyDelegate.selectedWorkItemComments
+    val isLoadingComments: StateFlow<Boolean> = hierarchyDelegate.isLoadingComments
 
     private val commentsByWorkItemId = ConcurrentHashMap<Int, List<WorkItemComment>>()
     private var activeCommentsJob: Job? = null
 
     val selectedWorkItemChildren: StateFlow<List<WorkItem>> = combine(
-        _selectedWorkItem,
+        selectedWorkItem,
         _allWorkItems
     ) { selected, allItems ->
         if (selected == null) {
@@ -233,8 +197,8 @@ class WorkItemsViewModel(
                 .firstOrNull { it.key.equals(activeOrg, ignoreCase = true) }?.value
                 ?.takeIf { def -> knownOrgProjects.any { it.equals(def, ignoreCase = true) } }
                 ?: knownOrgProjects.firstOrNull()
-            if (fallback != null && !_selectedProject.value.equals(fallback, ignoreCase = true)) {
-                _selectedProject.value = fallback
+            if (fallback != null && !selectedProject.value.equals(fallback, ignoreCase = true)) {
+                filterDelegate.setProject(fallback)
             }
             return fallback
         }
@@ -262,7 +226,7 @@ class WorkItemsViewModel(
     private val projectScopedSnapshotFlow: StateFlow<ProjectScopedWorkItemsSnapshot> = combine(
         sessionManager.connectionStatus,
         _allWorkItems,
-        _selectedProject,
+        selectedProject,
         sessionManager.projectsByOrg,
         _workItemsOrg
     ) { status, items, rawProject, _, _ ->
@@ -293,8 +257,8 @@ class WorkItemsViewModel(
             SharingStarted.WhileSubscribed(5000),
             ProjectScopedWorkItemsSnapshot(
                 activeOrg = sessionManager.defaultOrganization.value.orEmpty(),
-                effectiveProject = _selectedProject.value,
-                effectiveProjectLower = _selectedProject.value?.trim()?.lowercase().orEmpty(),
+                effectiveProject = selectedProject.value,
+                effectiveProjectLower = selectedProject.value?.trim()?.lowercase().orEmpty(),
                 projectItems = emptyList(),
                 allItems = emptyList()
             )
@@ -302,7 +266,7 @@ class WorkItemsViewModel(
 
     private val projectAndTypeScopedSnapshotFlow: StateFlow<ProjectAndTypeScopedSnapshot> = combine(
         projectScopedSnapshotFlow,
-        _typeFilter
+        typeFilter
     ) { projSnap, type ->
         val typeLower = type?.trim()?.lowercase().orEmpty()
         val typedItems = if (typeLower.isEmpty()) {
@@ -327,10 +291,10 @@ class WorkItemsViewModel(
             SharingStarted.WhileSubscribed(5000),
             ProjectAndTypeScopedSnapshot(
                 activeOrg = sessionManager.defaultOrganization.value.orEmpty(),
-                effectiveProject = _selectedProject.value,
-                effectiveProjectLower = _selectedProject.value?.trim()?.lowercase().orEmpty(),
-                selectedType = _typeFilter.value,
-                selectedTypeLower = _typeFilter.value?.trim()?.lowercase().orEmpty(),
+                effectiveProject = selectedProject.value,
+                effectiveProjectLower = selectedProject.value?.trim()?.lowercase().orEmpty(),
+                selectedType = typeFilter.value,
+                selectedTypeLower = typeFilter.value?.trim()?.lowercase().orEmpty(),
                 projectAndTypeItems = emptyList(),
                 projectItems = emptyList()
             )
@@ -338,9 +302,9 @@ class WorkItemsViewModel(
 
     val availableTypes: StateFlow<List<String>> = combine(
         projectScopedSnapshotFlow,
-        _projectProcessMap,
-        _projectCategoryMap,
-        _projectBacklogLevelsMap
+        processDelegate.projectProcessMap,
+        processDelegate.projectCategoryMap,
+        processDelegate.projectBacklogLevelsMap
     ) { projSnap, processMap, categoryMap, backlogLevelsMap ->
         val project = projSnap.effectiveProject
         if (project.isNullOrBlank()) return@combine emptyList()
@@ -373,7 +337,7 @@ class WorkItemsViewModel(
 
     val availableStates: StateFlow<List<String>> = combine(
         projectAndTypeScopedSnapshotFlow,
-        _projectProcessMap
+        processDelegate.projectProcessMap
     ) { typeSnap, processMap ->
         val project = typeSnap.effectiveProject
         val type = typeSnap.selectedType
@@ -448,7 +412,7 @@ class WorkItemsViewModel(
 
     val projectAreas: StateFlow<List<String>> = combine(
         projectScopedSnapshotFlow,
-        _projectAreasMap
+        processDelegate.projectAreasMap
     ) { projSnap, areasMap ->
         val project = projSnap.effectiveProject
         if (project.isNullOrBlank()) return@combine emptyList()
@@ -463,7 +427,7 @@ class WorkItemsViewModel(
 
     val projectIterations: StateFlow<List<String>> = combine(
         projectScopedSnapshotFlow,
-        _projectIterationsMap
+        processDelegate.projectIterationsMap
     ) { projSnap, iterationsMap ->
         val project = projSnap.effectiveProject
         if (project.isNullOrBlank()) return@combine emptyList()
@@ -478,7 +442,7 @@ class WorkItemsViewModel(
 
     val hasMoreItems: StateFlow<Boolean> = combine(
         projectAndTypeScopedSnapshotFlow,
-        combine(_stateFilter, _proposedDisplayLimit, _stateDisplayLimits) { state, propLimit, stateLimits ->
+        combine(stateFilter, _proposedDisplayLimit, _stateDisplayLimits) { state, propLimit, stateLimits ->
             Triple(state, propLimit, stateLimits)
         }.distinctUntilChanged(),
         _hasMoreServerItems
@@ -506,13 +470,13 @@ class WorkItemsViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     val filteredWorkItems: StateFlow<List<WorkItem>> = combine(
-        combine(projectScopedSnapshotFlow, _searchQuery) { projSnap, query ->
+        combine(projectScopedSnapshotFlow, searchQuery) { projSnap, query ->
             projSnap to query
         }.distinctUntilChanged(),
-        combine(_typeFilter, _stateFilter, _assigneeFilter) { type, state, assignee ->
+        combine(typeFilter, stateFilter, assigneeFilter) { type, state, assignee ->
             Triple(type, state, assignee)
         }.distinctUntilChanged(),
-        combine(_areaFilter, _iterationFilter) { area, iteration ->
+        combine(areaFilter, iterationFilter) { area, iteration ->
             area to iteration
         }.distinctUntilChanged(),
         combine(_proposedDisplayLimit, _stateDisplayLimits) { propLimit, stateLimits ->
@@ -660,8 +624,8 @@ class WorkItemsViewModel(
     val totalWorkItemsCount: StateFlow<Int> = combine(
         projectScopedSnapshotFlow,
         filteredWorkItems,
-        _searchQuery,
-        combine(_typeFilter, _stateFilter, _assigneeFilter, _areaFilter, _iterationFilter) { t, s, a, ar, it ->
+        searchQuery,
+        combine(typeFilter, stateFilter, assigneeFilter, areaFilter, iterationFilter) { t, s, a, ar, it ->
             listOf(t, s, a, ar, it)
         }.distinctUntilChanged()
     ) { projSnap, filtered, query, filters ->
@@ -698,13 +662,13 @@ class WorkItemsViewModel(
         filteredWorkItems,
         _allWorkItems,
         totalWorkItemsCount,
-        _searchQuery,
-        _typeFilter,
-        _stateFilter,
-        _selectedProject,
-        _assigneeFilter,
-        _areaFilter,
-        _iterationFilter,
+        searchQuery,
+        typeFilter,
+        stateFilter,
+        selectedProject,
+        assigneeFilter,
+        areaFilter,
+        iterationFilter,
         availableTypes,
         availableStates,
         availableProjects,
@@ -712,19 +676,19 @@ class WorkItemsViewModel(
         projectFrequentTags,
         projectAreas,
         projectIterations,
-        _isLoading,
-        _isLoadingMore,
-        _isSearchingServer,
-        _isBackgroundSyncing,
-        _syncProgress,
-        _isPullRefreshing,
-        _syncStatusText,
+        isLoading,
+        isLoadingMore,
+        isSearchingServer,
+        isBackgroundSyncing,
+        syncProgress,
+        isPullRefreshing,
+        syncStatusText,
         hasMoreItems,
-        _selectedWorkItem,
+        selectedWorkItem,
         selectedWorkItemChildren,
-        _selectedWorkItemComments,
-        _isLoadingComments
-    ) { values ->
+        selectedWorkItemComments,
+        isLoadingComments
+    ) { values: Array<Any?> ->
         val status = values[0] as ConnectionStatus
         val defOrg = values[1] as String?
         @Suppress("UNCHECKED_CAST")
@@ -790,15 +754,17 @@ class WorkItemsViewModel(
             disconnect()
         }
         sessionManager.onDefaultProjectChangedForActiveOrg = { trimmedProj ->
-            val isDifferentProject = !_selectedProject.value.equals(trimmedProj, ignoreCase = true)
+            val isDifferentProject = !selectedProject.value.equals(trimmedProj, ignoreCase = true)
             userManuallySelectedProject = false
             userManuallySelectedType = false
             if (isDifferentProject) {
-                _areaFilter.value = null
-                _iterationFilter.value = null
+                filterDelegate.setAreaFilter(null)
+                filterDelegate.setIterationFilter(null)
             }
-            _selectedProject.value = trimmedProj
-            ensureProjectProcessLoaded(trimmedProj)
+            filterDelegate.setProject(trimmedProj)
+            if (!trimmedProj.isNullOrBlank()) {
+                ensureProjectProcessLoaded(trimmedProj)
+            }
         }
         sessionManager.onSelectWorkItemRequested = { item ->
             selectWorkItem(item)
@@ -845,7 +811,7 @@ class WorkItemsViewModel(
         } ?: repository.getDefaultProject()
         sessionManager.updateDefaultProject(initialDefProj)
         if (!initialDefProj.isNullOrBlank()) {
-            _selectedProject.value = initialDefProj
+            filterDelegate.setProject(initialDefProj)
         }
 
         if (!savedDefaultOrg.isNullOrBlank()) {
@@ -878,12 +844,12 @@ class WorkItemsViewModel(
                 } else {
                     null
                 }
-                val currentProj = _selectedProject.value
+                val currentProj = selectedProject.value
                 val isCurrentInList = currentProj != null && projects.any { it.equals(currentProj, ignoreCase = true) }
                 if (!userManuallySelectedProject || !isCurrentInList) {
                     val chosen = resolvedDefProj ?: projects.first()
-                    if (!_selectedProject.value.equals(chosen, ignoreCase = true)) {
-                        _selectedProject.value = chosen
+                    if (!selectedProject.value.equals(chosen, ignoreCase = true)) {
+                        filterDelegate.setProject(chosen)
                     }
                     ensureProjectProcessLoaded(chosen)
                 }
@@ -893,13 +859,13 @@ class WorkItemsViewModel(
         viewModelScope.launch {
             availableTypes.collectLatest { types ->
                 if (types.isEmpty()) return@collectLatest
-                val currentType = _typeFilter.value
+                val currentType = typeFilter.value
                 val isCurrentInList = currentType != null && types.any { it.equals(currentType, ignoreCase = true) }
                 if (!userManuallySelectedType || !isCurrentInList) {
                     val biggestType = types.first()
-                    if (_typeFilter.value != biggestType) {
-                        _typeFilter.value = biggestType
-                        _stateFilter.value = "All"
+                    if (typeFilter.value != biggestType) {
+                        filterDelegate.setTypeFilter(biggestType)
+                        filterDelegate.setStateFilter("All")
                     }
                 }
             }
@@ -908,10 +874,10 @@ class WorkItemsViewModel(
         viewModelScope.launch {
             availableStates.collectLatest { states ->
                 if (states.isEmpty()) return@collectLatest
-                val currentState = _stateFilter.value
+                val currentState = stateFilter.value
                 val isCurrentInList = currentState != null && states.any { it.equals(currentState, ignoreCase = true) }
                 if (currentState == null || !isCurrentInList) {
-                    _stateFilter.value = "All"
+                    filterDelegate.setStateFilter("All")
                 }
             }
         }
@@ -919,10 +885,10 @@ class WorkItemsViewModel(
 
     private fun observeOnDemandServerSearch() {
         viewModelScope.launch {
-            _searchQuery.collectLatest { rawQuery ->
+            searchQuery.collectLatest { rawQuery ->
                 val cleanQuery = rawQuery.trim()
                 if (cleanQuery.length < 2) {
-                    _isSearchingServer.value = false
+                    streamDelegate.setSearchingServer(false)
                     return@collectLatest
                 }
                 delay(280L)
@@ -937,12 +903,12 @@ class WorkItemsViewModel(
                     return@collectLatest
                 }
 
-                _isSearchingServer.value = true
+                streamDelegate.setSearchingServer(true)
                 val searchResult = repository.searchWorkItemsOnServer(
                     organization = org,
                     pat = pat,
                     query = cleanQuery,
-                    project = _selectedProject.value,
+                    project = selectedProject.value,
                     alreadyLoadedIds = existingIds
                 )
                 searchResult.onSuccess { fetchedSearchItems ->
@@ -950,7 +916,7 @@ class WorkItemsViewModel(
                         mergeHydratedWorkItemsSuspend(fetchedSearchItems)
                     }
                 }
-                _isSearchingServer.value = false
+                streamDelegate.setSearchingServer(false)
             }
         }
     }
@@ -961,21 +927,13 @@ class WorkItemsViewModel(
 
         val cachedMeta = repository.getCachedOrganizationMetadataSync(normOrg)
         if (cachedMeta != null) {
-            if (cachedMeta.processHierarchyByProject.isNotEmpty()) {
-                _projectProcessMap.value = _projectProcessMap.value + cachedMeta.processHierarchyByProject
-            }
-            if (cachedMeta.categoryMapByProject.isNotEmpty()) {
-                _projectCategoryMap.value = _projectCategoryMap.value + cachedMeta.categoryMapByProject
-            }
-            if (cachedMeta.backlogLevelsByProject.isNotEmpty()) {
-                _projectBacklogLevelsMap.value = _projectBacklogLevelsMap.value + cachedMeta.backlogLevelsByProject
-            }
-            if (cachedMeta.areasByProject.isNotEmpty()) {
-                _projectAreasMap.value = _projectAreasMap.value + cachedMeta.areasByProject
-            }
-            if (cachedMeta.iterationsByProject.isNotEmpty()) {
-                _projectIterationsMap.value = _projectIterationsMap.value + cachedMeta.iterationsByProject
-            }
+            processDelegate.updateMaps(
+                processMap = processDelegate.projectProcessMap.value + cachedMeta.processHierarchyByProject,
+                categoryMap = processDelegate.projectCategoryMap.value + cachedMeta.categoryMapByProject,
+                backlogLevelsMap = processDelegate.projectBacklogLevelsMap.value + cachedMeta.backlogLevelsByProject,
+                areasMap = processDelegate.projectAreasMap.value + cachedMeta.areasByProject,
+                iterationsMap = processDelegate.projectIterationsMap.value + cachedMeta.iterationsByProject
+            )
         }
 
         val cachedNotifs = repository.getCachedNotificationsStateSync(normOrg)
@@ -983,14 +941,14 @@ class WorkItemsViewModel(
 
         val snapshot = repository.getCachedOrganizationSnapshotSync(normOrg)
         if (snapshot != null && snapshot.workItems.isNotEmpty()) {
-            serverSyncedItems.clear()
-            snapshot.workItems.forEach { serverSyncedItems[it.id] = it }
+            crudDelegate.clearAll()
+            crudDelegate.recordServerSyncedItems(snapshot.workItems)
             _workItemsOrg.value = normOrg
             _allWorkItems.value = snapshot.workItems
             _proposedDisplayLimit.value = maxOf(PROPOSED_INITIAL_BATCH_SIZE, snapshot.workItems.size)
             _stateDisplayLimits.value = emptyMap()
             _hasMoreServerItems.value = repository.hasUnloadedServerItems(normOrg)
-            _isLoading.value = false
+            streamDelegate.setLoading(false)
             sessionManager.updateConnectionStatus(ConnectionStatus.Connected(normOrg))
         }
         return snapshot
@@ -1006,13 +964,13 @@ class WorkItemsViewModel(
             val initialUnloaded = repository.getRemainingUnloadedCount(normOrg)
             if (initialUnloaded <= 0) {
                 _hasMoreServerItems.value = false
-                _isBackgroundSyncing.value = false
-                _syncProgress.value = null
-                _syncStatusText.value = null
+                streamDelegate.setBackgroundSyncing(false)
+                streamDelegate.setSyncProgress(null)
+                streamDelegate.setSyncStatusText(null)
                 return@launch
             }
 
-            _isBackgroundSyncing.value = true
+            streamDelegate.setBackgroundSyncing(true)
             _hasMoreServerItems.value = true
 
             val pendingStreamBuffer = ArrayList<WorkItem>()
@@ -1041,8 +999,8 @@ class WorkItemsViewModel(
                 val loadedCount = _allWorkItems.value.size + pendingStreamBuffer.size
                 val remainingCount = repository.getRemainingUnloadedCount(normOrg)
                 val totalEstimate = (loadedCount + remainingCount).coerceAtLeast(1)
-                _syncProgress.value = (loadedCount.toFloat() / totalEstimate.toFloat()).coerceIn(0.05f, 0.99f)
-                _syncStatusText.value = "Syncing $loadedCount / $totalEstimate"
+                streamDelegate.setSyncProgress((loadedCount.toFloat() / totalEstimate.toFloat()).coerceIn(0.05f, 0.99f))
+                streamDelegate.setSyncStatusText("Syncing $loadedCount / $totalEstimate")
 
                 val alreadyIds = _allWorkItems.value.map { it.id }.toHashSet().apply {
                     pendingStreamBuffer.forEach { add(it.id) }
@@ -1074,9 +1032,9 @@ class WorkItemsViewModel(
 
             flushBufferedStreamItems(forcePersist = true)
             _hasMoreServerItems.value = repository.hasUnloadedServerItems(normOrg)
-            _isBackgroundSyncing.value = false
-            _syncProgress.value = null
-            _syncStatusText.value = null
+            streamDelegate.setBackgroundSyncing(false)
+            streamDelegate.setSyncProgress(null)
+            streamDelegate.setSyncStatusText(null)
         }
     }
 
@@ -1094,64 +1052,6 @@ class WorkItemsViewModel(
         snapshotPersistJob = viewModelScope.launch(Dispatchers.IO) {
             delay(200L)
             repository.saveCachedOrganizationSnapshot(targetOrg, itemsSnapshot)
-        }
-    }
-
-    private suspend fun fetchAndStoreProjectMetadata(
-        organization: String,
-        project: String,
-        pat: String
-    ) {
-        val normOrg = repository.extractOrganization(organization)
-        val cleanProject = project.trim()
-        if (normOrg.isBlank() || cleanProject.isBlank() || pat.isBlank()) return
-
-        val scopedKey = projectScopedKey(normOrg, cleanProject)
-        coroutineScope {
-            val processDeferred = async { repository.fetchProjectProcessHierarchy(normOrg, cleanProject, pat) }
-            val classificationDeferred = async {
-                repository.fetchProjectClassificationPaths(normOrg, cleanProject, pat)
-            }
-
-            val processHierarchy = processDeferred.await()
-            val activeTypes = processHierarchy.keys
-                .filterNot { AzureDevOpsRepository.isExcludedNonWorkItemType(it) }
-                .toList()
-            val backlogMeta = repository.fetchProjectBacklogMetadata(
-                organization = normOrg,
-                project = cleanProject,
-                pat = pat,
-                activeTypesHint = activeTypes
-            )
-            val (areas, iterations) = classificationDeferred.await()
-
-            val categoryMap = backlogMeta.categoryMap
-            val backlogLevels = backlogMeta.orderedBacklogLevels
-
-            if (processHierarchy.isNotEmpty()) {
-                _projectProcessMap.value = _projectProcessMap.value + (scopedKey to processHierarchy)
-            }
-            if (categoryMap.isNotEmpty()) {
-                _projectCategoryMap.value = _projectCategoryMap.value + (scopedKey to categoryMap)
-            }
-            if (backlogLevels.isNotEmpty()) {
-                _projectBacklogLevelsMap.value = _projectBacklogLevelsMap.value + (scopedKey to backlogLevels)
-            }
-            if (areas.isNotEmpty()) {
-                _projectAreasMap.value = _projectAreasMap.value + (scopedKey to areas)
-            }
-            if (iterations.isNotEmpty()) {
-                _projectIterationsMap.value = _projectIterationsMap.value + (scopedKey to iterations)
-            }
-
-            repository.saveCachedOrganizationMetadata(
-                organization = normOrg,
-                processHierarchyByProject = _projectProcessMap.value,
-                categoryMapByProject = _projectCategoryMap.value,
-                backlogLevelsByProject = _projectBacklogLevelsMap.value,
-                areasByProject = _projectAreasMap.value,
-                iterationsByProject = _projectIterationsMap.value
-            )
         }
     }
 
@@ -1190,16 +1090,16 @@ class WorkItemsViewModel(
                 _allWorkItems.value.isNotEmpty()
 
             if (!hasCachedItemsForOrg) {
-                _isLoading.value = true
+                streamDelegate.setLoading(true)
                 if (sessionManager.organizations.value.isEmpty()) {
                     sessionManager.updateConnectionStatus(ConnectionStatus.Connecting)
                 }
             } else {
-                _isLoading.value = false
+                streamDelegate.setLoading(false)
                 sessionManager.updateConnectionStatus(ConnectionStatus.Connected(normalizedOrg))
-                _isBackgroundSyncing.value = true
-                _syncProgress.value = null
-                _syncStatusText.value = "Checking for updates..."
+                streamDelegate.setBackgroundSyncing(true)
+                streamDelegate.setSyncProgress(null)
+                streamDelegate.setSyncStatusText("Checking for updates...")
             }
 
             val knownCachedProjs = repository.getCachedProjectsForOrg(normalizedOrg)
@@ -1217,7 +1117,7 @@ class WorkItemsViewModel(
                     val projsDef = async { repository.fetchProjects(normalizedOrg, cleanPat) }
                     val metaDef = async {
                         if (!preResolvedProj.isNullOrBlank()) {
-                            fetchAndStoreProjectMetadata(normalizedOrg, preResolvedProj, cleanPat)
+                            processDelegate.fetchAndStoreProjectMetadata(normalizedOrg, preResolvedProj, cleanPat)
                         }
                     }
                     metaDef.await()
@@ -1229,7 +1129,7 @@ class WorkItemsViewModel(
                         saveAccountIntoMemoryAndPrefs(normalizedOrg, cleanPat, rememberCredentials)
 
                         if (delta.deletedItemIds.isNotEmpty()) {
-                            delta.deletedItemIds.forEach { serverSyncedItems.remove(it) }
+                            delta.deletedItemIds.forEach { crudDelegate.clearPendingDirty(it) }
                             _allWorkItems.value = _allWorkItems.value.filterNot { it.id in delta.deletedItemIds }
                         }
                         if (delta.updatedOrNewItems.isNotEmpty()) {
@@ -1255,144 +1155,134 @@ class WorkItemsViewModel(
                             normalizedOrg,
                             mergedProjects
                         )
-                        val validSelectedProj = _selectedProject.value?.takeIf { current ->
+                        val validSelectedProj = selectedProject.value?.takeIf { current ->
                             mergedProjects.isEmpty() || mergedProjects.any { it.equals(current, ignoreCase = true) }
                         } ?: resolvedDefProj ?: mergedProjects.firstOrNull()
 
-                        if (validSelectedProj != null && !_selectedProject.value.equals(validSelectedProj, ignoreCase = true)) {
+                        if (validSelectedProj != null && !selectedProject.value.equals(validSelectedProj, ignoreCase = true)) {
                             userManuallySelectedProject = false
                             userManuallySelectedType = false
-                            _typeFilter.value = null
-                            _stateFilter.value = null
-                            _selectedProject.value = validSelectedProj
+                            filterDelegate.setTypeFilter(null)
+                            filterDelegate.setStateFilter(null)
+                            filterDelegate.setProject(validSelectedProj)
                         }
 
-                        val otherProjects = mergedProjects.filterNot { it.equals(preResolvedProj, ignoreCase = true) }
-                        if (otherProjects.isNotEmpty()) {
+                        val targetProj = selectedProject.value ?: validSelectedProj
+                        if (!targetProj.isNullOrBlank()) {
                             launch {
-                                otherProjects.map { proj ->
-                                    async { fetchAndStoreProjectMetadata(normalizedOrg, proj, cleanPat) }
+                                processDelegate.fetchAndStoreProjectMetadata(normalizedOrg, targetProj, cleanPat)
+                            }
+                        }
+
+                        val otherProjs = mergedProjects.filterNot { it.equals(targetProj, ignoreCase = true) }
+                        if (otherProjs.isNotEmpty()) {
+                            launch {
+                                otherProjs.map { proj ->
+                                    async {
+                                        processDelegate.fetchAndStoreProjectMetadata(normalizedOrg, proj, cleanPat)
+                                    }
                                 }.awaitAll()
                             }
                         }
 
-                        _isLoading.value = false
+                        streamDelegate.setLoading(false)
                         sessionManager.updateConnectionStatus(ConnectionStatus.Connected(normalizedOrg))
 
                         if (repository.hasUnloadedServerItems(normalizedOrg)) {
                             startIterativeBackgroundStream(normalizedOrg, cleanPat)
                         } else {
-                            _isBackgroundSyncing.value = false
-                            _syncProgress.value = null
-                            _syncStatusText.value = null
+                            streamDelegate.setBackgroundSyncing(false)
+                            streamDelegate.setSyncProgress(null)
+                            streamDelegate.setSyncStatusText(null)
                         }
                         sessionManager.onSyncNotificationsRequested?.invoke(true)
                     },
-                    onFailure = {
-                        _isBackgroundSyncing.value = false
-                        _syncProgress.value = null
-                        _syncStatusText.value = null
-                        _isLoading.value = false
+                    onFailure = { error ->
+                        streamDelegate.setLoading(false)
+                        streamDelegate.setBackgroundSyncing(false)
+                        streamDelegate.setSyncProgress(null)
+                        streamDelegate.setSyncStatusText(null)
+                        sessionManager.updateErrorMessage(error.message ?: "Failed to connect to Azure DevOps.")
                     }
                 )
                 return@launch
             }
 
-            val (result, fetchedProjs) = coroutineScope {
-                val itemsDeferred = async { repository.fetchWorkItems(normalizedOrg, cleanPat) }
-                val projectsDeferred = async { repository.fetchProjects(normalizedOrg, cleanPat) }
-                val preMetaDeferred = async {
-                    if (!preResolvedProj.isNullOrBlank()) {
-                        fetchAndStoreProjectMetadata(normalizedOrg, preResolvedProj, cleanPat)
-                    }
-                }
-                preMetaDeferred.await()
-                itemsDeferred.await() to projectsDeferred.await()
+            val (itemsResult, fetchedProjs) = coroutineScope {
+                val itemsDef = async { repository.fetchWorkItems(normalizedOrg, cleanPat) }
+                val projsDef = async { repository.fetchProjects(normalizedOrg, cleanPat) }
+                itemsDef.await() to projsDef.await()
             }
 
-            result.fold(
+            itemsResult.fold(
                 onSuccess = { items ->
                     saveAccountIntoMemoryAndPrefs(normalizedOrg, cleanPat, rememberCredentials)
 
-                    val fromItemsProjects = items.mapNotNull { it.teamProject?.trim() }.filter { it.isNotBlank() }
-                    val cachedForOrg = repository.getCachedProjectsForOrg(normalizedOrg)
-                    val mergedProjects = (fetchedProjs + fromItemsProjects + cachedForOrg)
-                        .distinctBy { it.lowercase() }
-                        .sorted()
-                    if (mergedProjects.isNotEmpty()) {
-                        repository.saveCachedProjectsForOrg(normalizedOrg, mergedProjects)
-                        sessionManager.putProjectsForOrg(normalizedOrg, mergedProjects)
-                    }
-
-                    val resolvedDefProj = sessionManager.resolveAndPersistDefaultProjectForOrg(
-                        normalizedOrg,
-                        mergedProjects
-                    )
-                    val targetProject = resolvedDefProj ?: mergedProjects.firstOrNull()
-
-                    userManuallySelectedProject = false
-                    userManuallySelectedType = false
-                    _searchQuery.value = ""
-                    _typeFilter.value = null
-                    _stateFilter.value = null
-                    _assigneeFilter.value = null
-                    _areaFilter.value = null
-                    _iterationFilter.value = null
-                    _selectedWorkItem.value = null
+                    crudDelegate.clearAll()
+                    crudDelegate.recordServerSyncedItems(items)
+                    _allWorkItems.value = items
+                    _workItemsOrg.value = normalizedOrg
+                    _proposedDisplayLimit.value = maxOf(PROPOSED_INITIAL_BATCH_SIZE, items.size)
                     _stateDisplayLimits.value = emptyMap()
                     exhaustedStateQueries.clear()
-
-                    sessionManager.updateConnectionStatus(ConnectionStatus.Connected(normalizedOrg))
-                    _workItemsOrg.value = normalizedOrg
-                    _selectedProject.value = targetProject
-
-                    serverSyncedItems.clear()
-                    items.forEach { serverSyncedItems[it.id] = it }
-                    _allWorkItems.value = items
-                    _proposedDisplayLimit.value = maxOf(PROPOSED_INITIAL_BATCH_SIZE, items.size)
                     _hasMoreServerItems.value = repository.hasUnloadedServerItems(normalizedOrg)
-                    _isLoading.value = false
 
                     repository.saveCachedOrganizationSnapshot(normalizedOrg, items)
 
-                    if (!targetProject.isNullOrBlank() && !targetProject.equals(preResolvedProj, ignoreCase = true)) {
+                    val fromItemsProjs = items.mapNotNull { it.teamProject?.trim() }.filter { it.isNotBlank() }
+                    val orgProjects = (fetchedProjs + fromItemsProjs + knownCachedProjs)
+                        .distinctBy { it.lowercase() }
+                        .sorted()
+
+                    if (orgProjects.isNotEmpty()) {
+                        repository.saveCachedProjectsForOrg(normalizedOrg, orgProjects)
+                        sessionManager.putProjectsForOrg(normalizedOrg, orgProjects)
+                    }
+
+                    val chosenProj = sessionManager.resolveAndPersistDefaultProjectForOrg(normalizedOrg, orgProjects)
+                        ?: orgProjects.firstOrNull()
+
+                    userManuallySelectedProject = false
+                    userManuallySelectedType = false
+                    filterDelegate.resetFilters()
+                    hierarchyDelegate.setSelectedWorkItem(null)
+                    sessionManager.updateConnectionStatus(ConnectionStatus.Connected(normalizedOrg))
+                    filterDelegate.setProject(chosenProj)
+
+                    if (chosenProj != null) {
                         launch {
-                            fetchAndStoreProjectMetadata(normalizedOrg, targetProject, cleanPat)
+                            processDelegate.fetchAndStoreProjectMetadata(normalizedOrg, chosenProj, cleanPat)
                         }
                     }
 
-                    val otherProjects = mergedProjects.filterNot {
-                        it.equals(targetProject, ignoreCase = true) || it.equals(preResolvedProj, ignoreCase = true)
-                    }
-                    if (otherProjects.isNotEmpty()) {
+                    val otherProjs = orgProjects.filterNot { it.equals(chosenProj, ignoreCase = true) }
+                    if (otherProjs.isNotEmpty()) {
                         launch {
-                            otherProjects.map { proj ->
+                            otherProjs.map { proj ->
                                 async {
-                                    fetchAndStoreProjectMetadata(normalizedOrg, proj, cleanPat)
+                                    processDelegate.fetchAndStoreProjectMetadata(normalizedOrg, proj, cleanPat)
                                 }
                             }.awaitAll()
                         }
                     }
 
+                    streamDelegate.setLoading(false)
                     if (repository.hasUnloadedServerItems(normalizedOrg)) {
                         startIterativeBackgroundStream(normalizedOrg, cleanPat)
                     } else {
-                        _isBackgroundSyncing.value = false
-                        _syncProgress.value = null
-                        _syncStatusText.value = null
+                        streamDelegate.setBackgroundSyncing(false)
+                        streamDelegate.setSyncProgress(null)
+                        streamDelegate.setSyncStatusText(null)
                     }
                     sessionManager.onSyncNotificationsRequested?.invoke(true)
                 },
                 onFailure = { error ->
-                    val message = error.message ?: "Failed to connect to Azure DevOps."
-                    _isLoading.value = false
-                    _isBackgroundSyncing.value = false
-                    _syncProgress.value = null
-                    _syncStatusText.value = null
-                    sessionManager.updateErrorMessage(message)
-                    if (sessionManager.organizations.value.isEmpty()) {
-                        sessionManager.updateConnectionStatus(ConnectionStatus.Error(message))
-                    }
+                    streamDelegate.setLoading(false)
+                    streamDelegate.setBackgroundSyncing(false)
+                    streamDelegate.setSyncProgress(null)
+                    streamDelegate.setSyncStatusText(null)
+                    sessionManager.updateErrorMessage(error.message ?: "Failed to connect to Azure DevOps.")
+                    sessionManager.updateConnectionStatus(ConnectionStatus.Error(error.message ?: "Connection failed"))
                 }
             )
         }
@@ -1403,20 +1293,21 @@ class WorkItemsViewModel(
         cleanPat: String,
         rememberCredentials: Boolean
     ) {
-        val account = OrganizationAccount(
+        val newAccount = OrganizationAccount(
             organization = normalizedOrg,
             pat = cleanPat,
             isRemembered = rememberCredentials
         )
-        val updatedOrgs = sessionManager.organizations.value.toMutableList()
-        val idx = updatedOrgs.indexOfFirst { it.organization.equals(normalizedOrg, ignoreCase = true) }
-        if (idx >= 0) {
-            updatedOrgs[idx] = account
+        val currentAccounts = sessionManager.organizations.value.toMutableList()
+        val existingIndex = currentAccounts.indexOfFirst { it.organization.equals(normalizedOrg, ignoreCase = true) }
+        if (existingIndex >= 0) {
+            currentAccounts[existingIndex] = newAccount
         } else {
-            updatedOrgs.add(account)
+            currentAccounts.add(newAccount)
         }
+        val updatedOrgs = currentAccounts.distinctBy { it.organization.lowercase() }
         sessionManager.updateOrganizations(updatedOrgs)
-        repository.saveOrganizationAccount(account)
+        repository.saveOrganizationAccount(newAccount)
 
         if (sessionManager.defaultOrganization.value.isNullOrBlank() || updatedOrgs.size == 1) {
             sessionManager.updateDefaultOrganization(normalizedOrg)
@@ -1434,19 +1325,14 @@ class WorkItemsViewModel(
 
         backgroundStreamJob?.cancel()
         activeConnectJob?.cancel()
-        _isBackgroundSyncing.value = false
-        _syncProgress.value = null
-        _syncStatusText.value = null
+        streamDelegate.setBackgroundSyncing(false)
+        streamDelegate.setSyncProgress(null)
+        streamDelegate.setSyncStatusText(null)
 
         userManuallySelectedProject = false
         userManuallySelectedType = false
-        _searchQuery.value = ""
-        _typeFilter.value = null
-        _stateFilter.value = null
-        _assigneeFilter.value = null
-        _areaFilter.value = null
-        _iterationFilter.value = null
-        _selectedWorkItem.value = null
+        filterDelegate.resetFilters()
+        hierarchyDelegate.setSelectedWorkItem(null)
         _workItemsOrg.value = account.organization
         _allWorkItems.value = emptyList()
 
@@ -1457,24 +1343,24 @@ class WorkItemsViewModel(
             .sorted()
 
         sessionManager.updateConnectionStatus(ConnectionStatus.Connected(account.organization))
-        _selectedProject.value = sessionManager.resolveAndPersistDefaultProjectForOrg(
-            account.organization,
-            knownProjectsForOrg
-        ) ?: knownProjectsForOrg.firstOrNull()
+        filterDelegate.setProject(
+            sessionManager.resolveAndPersistDefaultProjectForOrg(
+                account.organization,
+                knownProjectsForOrg
+            ) ?: knownProjectsForOrg.firstOrNull()
+        )
 
         val restored = restoreOrganizationFromLocalCache(account.organization)
-        _isLoading.value = restored == null || restored.workItems.isEmpty()
+        streamDelegate.setLoading(restored == null || restored.workItems.isEmpty())
 
         viewModelScope.launch {
-            updateJobs.values.forEach { it.cancel() }
-            updateJobs.clear()
-            val dirtyList = pendingDirtyItems.values.toList()
+            val dirtyList = crudDelegate.getPendingDirtyItems().values.toList()
+            crudDelegate.clearAll()
             coroutineScope {
                 dirtyList.map { dirtyItem ->
                     async { syncWorkItemToServer(dirtyItem) }
                 }.awaitAll()
             }
-            pendingDirtyItems.clear()
 
             connect(account.organization, account.pat, rememberCredentials = account.isRemembered)
         }
@@ -1561,22 +1447,17 @@ class WorkItemsViewModel(
 
                     userManuallySelectedProject = false
                     userManuallySelectedType = false
-                    _searchQuery.value = ""
-                    _typeFilter.value = null
-                    _stateFilter.value = null
-                    _assigneeFilter.value = null
-                    _areaFilter.value = null
-                    _iterationFilter.value = null
-                    _selectedWorkItem.value = null
+                    filterDelegate.resetFilters()
+                    hierarchyDelegate.setSelectedWorkItem(null)
                     _stateDisplayLimits.value = emptyMap()
                     exhaustedStateQueries.clear()
 
                     sessionManager.updateConnectionStatus(ConnectionStatus.Connected(normalizedOrg))
                     _workItemsOrg.value = normalizedOrg
-                    _selectedProject.value = chosenProj
+                    filterDelegate.setProject(chosenProj)
 
-                    serverSyncedItems.clear()
-                    items.forEach { serverSyncedItems[it.id] = it }
+                    crudDelegate.clearAll()
+                    crudDelegate.recordServerSyncedItems(items)
                     _allWorkItems.value = items
                     _proposedDisplayLimit.value = maxOf(PROPOSED_INITIAL_BATCH_SIZE, items.size)
                     _hasMoreServerItems.value = repository.hasUnloadedServerItems(normalizedOrg)
@@ -1585,7 +1466,7 @@ class WorkItemsViewModel(
 
                     if (chosenProj != null) {
                         launch {
-                            fetchAndStoreProjectMetadata(normalizedOrg, chosenProj, cleanPat)
+                            processDelegate.fetchAndStoreProjectMetadata(normalizedOrg, chosenProj, cleanPat)
                         }
                     }
 
@@ -1594,7 +1475,7 @@ class WorkItemsViewModel(
                         launch {
                             otherProjs.map { proj ->
                                 async {
-                                    fetchAndStoreProjectMetadata(normalizedOrg, proj, cleanPat)
+                                    processDelegate.fetchAndStoreProjectMetadata(normalizedOrg, proj, cleanPat)
                                 }
                             }.awaitAll()
                         }
@@ -1603,9 +1484,9 @@ class WorkItemsViewModel(
                     if (repository.hasUnloadedServerItems(normalizedOrg)) {
                         startIterativeBackgroundStream(normalizedOrg, cleanPat)
                     } else {
-                        _isBackgroundSyncing.value = false
-                        _syncProgress.value = null
-                        _syncStatusText.value = null
+                        streamDelegate.setBackgroundSyncing(false)
+                        streamDelegate.setSyncProgress(null)
+                        streamDelegate.setSyncStatusText(null)
                     }
                     sessionManager.onSyncNotificationsRequested?.invoke(true)
 
@@ -1624,7 +1505,7 @@ class WorkItemsViewModel(
         val pat = acc?.pat ?: repository.getConfiguredPat()
         if (org.isBlank() || pat.isBlank()) return
 
-        val baseline = serverSyncedItems[itemToSync.id]
+        val baseline = crudDelegate.getPreviousSyncedItem(itemToSync.id)
         val result = repository.updateWorkItemOnServer(
             organization = org,
             pat = pat,
@@ -1633,8 +1514,8 @@ class WorkItemsViewModel(
             resolvedAssigneeIdentity = itemToSync.assignedToEmail
         )
         if (result.isSuccess) {
-            serverSyncedItems[itemToSync.id] = itemToSync
-            pendingDirtyItems.remove(itemToSync.id, itemToSync)
+            crudDelegate.recordServerSyncedItem(itemToSync)
+            crudDelegate.clearPendingDirty(itemToSync.id)
             repository.saveCachedOrganizationSnapshot(org, _allWorkItems.value)
         }
     }
@@ -1652,19 +1533,18 @@ class WorkItemsViewModel(
         activeConnectJob = viewModelScope.launch {
             val itemsBelongToTargetOrg = _workItemsOrg.value.equals(normalizedOrg, ignoreCase = true)
             val hasExisting = itemsBelongToTargetOrg && _allWorkItems.value.isNotEmpty()
-            _isPullRefreshing.value = true
+            streamDelegate.setPullRefreshing(true)
             if (!hasExisting) {
-                _isLoading.value = true
+                streamDelegate.setLoading(true)
             } else {
-                _isBackgroundSyncing.value = true
-                _syncProgress.value = null
-                _syncStatusText.value = "Refreshing..."
+                streamDelegate.setBackgroundSyncing(true)
+                streamDelegate.setSyncProgress(null)
+                streamDelegate.setSyncStatusText("Refreshing...")
             }
             sessionManager.updateErrorMessage(null)
 
-            updateJobs.values.forEach { it.cancel() }
-            updateJobs.clear()
-            val dirtyList = pendingDirtyItems.values.toList()
+            val dirtyList = crudDelegate.getPendingDirtyItems().values.toList()
+            crudDelegate.clearAll()
             coroutineScope {
                 dirtyList.map { dirtyItem ->
                     async { syncWorkItemToServer(dirtyItem) }
@@ -1686,7 +1566,7 @@ class WorkItemsViewModel(
                 deltaRes.fold(
                     onSuccess = { delta ->
                         if (delta.deletedItemIds.isNotEmpty()) {
-                            delta.deletedItemIds.forEach { serverSyncedItems.remove(it) }
+                            delta.deletedItemIds.forEach { crudDelegate.clearPendingDirty(it) }
                             _allWorkItems.value = _allWorkItems.value.filterNot { it.id in delta.deletedItemIds }
                         }
                         if (delta.updatedOrNewItems.isNotEmpty()) {
@@ -1711,43 +1591,43 @@ class WorkItemsViewModel(
                             normalizedOrg,
                             mergedProjects
                         )
-                        val validSelectedProj = _selectedProject.value?.takeIf { current ->
+                        val validSelectedProj = selectedProject.value?.takeIf { current ->
                             mergedProjects.isEmpty() || mergedProjects.any { it.equals(current, ignoreCase = true) }
                         } ?: resolvedDefProj ?: mergedProjects.firstOrNull()
 
-                        if (validSelectedProj != null && !_selectedProject.value.equals(validSelectedProj, ignoreCase = true)) {
+                        if (validSelectedProj != null && !selectedProject.value.equals(validSelectedProj, ignoreCase = true)) {
                             userManuallySelectedProject = false
                             userManuallySelectedType = false
-                            _typeFilter.value = null
-                            _stateFilter.value = null
-                            _selectedProject.value = validSelectedProj
+                            filterDelegate.setTypeFilter(null)
+                            filterDelegate.setStateFilter(null)
+                            filterDelegate.setProject(validSelectedProj)
                         }
 
-                        val targetProj = _selectedProject.value ?: validSelectedProj
+                        val targetProj = selectedProject.value ?: validSelectedProj
                         if (!targetProj.isNullOrBlank()) {
                             launch {
-                                fetchAndStoreProjectMetadata(normalizedOrg, targetProj, pat)
+                                processDelegate.fetchAndStoreProjectMetadata(normalizedOrg, targetProj, pat)
                             }
                         }
-                        _isLoading.value = false
-                        _isPullRefreshing.value = false
+                        streamDelegate.setLoading(false)
+                        streamDelegate.setPullRefreshing(false)
                         sessionManager.updateConnectionStatus(ConnectionStatus.Connected(normalizedOrg))
 
                         if (repository.hasUnloadedServerItems(normalizedOrg)) {
                             startIterativeBackgroundStream(normalizedOrg, pat)
                         } else {
-                            _isBackgroundSyncing.value = false
-                            _syncProgress.value = null
-                            _syncStatusText.value = null
+                            streamDelegate.setBackgroundSyncing(false)
+                            streamDelegate.setSyncProgress(null)
+                            streamDelegate.setSyncStatusText(null)
                         }
                         sessionManager.onSyncNotificationsRequested?.invoke(true)
                     },
                     onFailure = { error ->
-                        _isLoading.value = false
-                        _isPullRefreshing.value = false
-                        _isBackgroundSyncing.value = false
-                        _syncProgress.value = null
-                        _syncStatusText.value = null
+                        streamDelegate.setLoading(false)
+                        streamDelegate.setPullRefreshing(false)
+                        streamDelegate.setBackgroundSyncing(false)
+                        streamDelegate.setSyncProgress(null)
+                        streamDelegate.setSyncStatusText(null)
                         sessionManager.updateErrorMessage(error.message ?: "Failed to refresh work items.")
                     }
                 )
@@ -1762,135 +1642,101 @@ class WorkItemsViewModel(
 
             result.fold(
                 onSuccess = { items ->
-                    val resolvedItems = items.map { fetched ->
-                        pendingDirtyItems[fetched.id] ?: fetched
-                    }
-                    resolvedItems.forEach { item ->
-                        if (!pendingDirtyItems.containsKey(item.id)) {
-                            serverSyncedItems[item.id] = item
-                        }
-                    }
-
-                    val fromItemsProjects = resolvedItems.mapNotNull { it.teamProject?.trim() }.filter { it.isNotBlank() }
-                    val cachedForOrg = repository.getCachedProjectsForOrg(normalizedOrg)
-                    val mergedProjects = (fetchedProjs + fromItemsProjects + cachedForOrg)
-                        .distinctBy { it.lowercase() }
-                        .sorted()
-                    if (mergedProjects.isNotEmpty()) {
-                        repository.saveCachedProjectsForOrg(normalizedOrg, mergedProjects)
-                        sessionManager.putProjectsForOrg(normalizedOrg, mergedProjects)
-                    }
-
-                    val resolvedDefProj = sessionManager.resolveAndPersistDefaultProjectForOrg(
-                        normalizedOrg,
-                        mergedProjects
-                    )
-                    val validSelectedProj = _selectedProject.value?.takeIf { current ->
-                        mergedProjects.isEmpty() || mergedProjects.any { it.equals(current, ignoreCase = true) }
-                    } ?: resolvedDefProj ?: mergedProjects.firstOrNull()
-
-                    sessionManager.updateConnectionStatus(ConnectionStatus.Connected(normalizedOrg))
+                    crudDelegate.clearAll()
+                    crudDelegate.recordServerSyncedItems(items)
+                    _allWorkItems.value = items
                     _workItemsOrg.value = normalizedOrg
-                    if (validSelectedProj != null && !_selectedProject.value.equals(validSelectedProj, ignoreCase = true)) {
-                        userManuallySelectedProject = false
-                        userManuallySelectedType = false
-                        _typeFilter.value = null
-                        _stateFilter.value = null
-                        _selectedProject.value = validSelectedProj
-                    }
-
-                    _allWorkItems.value = resolvedItems
-                    _proposedDisplayLimit.value = maxOf(PROPOSED_INITIAL_BATCH_SIZE, resolvedItems.size)
+                    _proposedDisplayLimit.value = maxOf(PROPOSED_INITIAL_BATCH_SIZE, items.size)
                     _stateDisplayLimits.value = emptyMap()
                     exhaustedStateQueries.clear()
                     _hasMoreServerItems.value = repository.hasUnloadedServerItems(normalizedOrg)
-                    repository.saveCachedOrganizationSnapshot(normalizedOrg, resolvedItems)
 
-                    _selectedWorkItem.value?.let { currentSelected ->
-                        _selectedWorkItem.value = resolvedItems.firstOrNull { it.id == currentSelected.id }
+                    repository.saveCachedOrganizationSnapshot(normalizedOrg, items)
+
+                    val fromItemsProjs = items.mapNotNull { it.teamProject?.trim() }.filter { it.isNotBlank() }
+                    val cachedForOrg = repository.getCachedProjectsForOrg(normalizedOrg)
+                    val orgProjects = (fetchedProjs + fromItemsProjs + cachedForOrg)
+                        .distinctBy { it.lowercase() }
+                        .sorted()
+
+                    if (orgProjects.isNotEmpty()) {
+                        repository.saveCachedProjectsForOrg(normalizedOrg, orgProjects)
+                        sessionManager.putProjectsForOrg(normalizedOrg, orgProjects)
                     }
-                    val targetProj = _selectedProject.value ?: validSelectedProj
-                    if (!targetProj.isNullOrBlank()) {
+
+                    val chosenProj = sessionManager.resolveAndPersistDefaultProjectForOrg(normalizedOrg, orgProjects)
+                        ?: orgProjects.firstOrNull()
+
+                    userManuallySelectedProject = false
+                    userManuallySelectedType = false
+                    filterDelegate.resetFilters()
+                    hierarchyDelegate.setSelectedWorkItem(null)
+                    sessionManager.updateConnectionStatus(ConnectionStatus.Connected(normalizedOrg))
+                    filterDelegate.setProject(chosenProj)
+
+                    if (chosenProj != null) {
                         launch {
-                            fetchAndStoreProjectMetadata(normalizedOrg, targetProj, pat)
+                            processDelegate.fetchAndStoreProjectMetadata(normalizedOrg, chosenProj, pat)
                         }
                     }
-                    _isLoading.value = false
-                    _isPullRefreshing.value = false
 
+                    val otherProjs = orgProjects.filterNot { it.equals(chosenProj, ignoreCase = true) }
+                    if (otherProjs.isNotEmpty()) {
+                        launch {
+                            otherProjs.map { proj ->
+                                async {
+                                    processDelegate.fetchAndStoreProjectMetadata(normalizedOrg, proj, pat)
+                                }
+                            }.awaitAll()
+                        }
+                    }
+
+                    streamDelegate.setLoading(false)
+                    streamDelegate.setPullRefreshing(false)
                     if (repository.hasUnloadedServerItems(normalizedOrg)) {
                         startIterativeBackgroundStream(normalizedOrg, pat)
                     } else {
-                        _isBackgroundSyncing.value = false
-                        _syncProgress.value = null
-                        _syncStatusText.value = null
+                        streamDelegate.setBackgroundSyncing(false)
+                        streamDelegate.setSyncProgress(null)
+                        streamDelegate.setSyncStatusText(null)
                     }
                     sessionManager.onSyncNotificationsRequested?.invoke(true)
                 },
                 onFailure = { error ->
-                    _isLoading.value = false
-                    _isPullRefreshing.value = false
-                    _isBackgroundSyncing.value = false
-                    _syncProgress.value = null
-                    _syncStatusText.value = null
+                    streamDelegate.setLoading(false)
+                    streamDelegate.setPullRefreshing(false)
+                    streamDelegate.setBackgroundSyncing(false)
+                    streamDelegate.setSyncProgress(null)
+                    streamDelegate.setSyncStatusText(null)
                     sessionManager.updateErrorMessage(error.message ?: "Failed to refresh work items.")
                 }
             )
         }
     }
 
-    suspend fun mergeHydratedWorkItemsSuspend(newItems: List<WorkItem>) {
+    private suspend fun mergeHydratedWorkItemsSuspend(newItems: List<WorkItem>) {
         if (newItems.isEmpty()) return
-        val mergedList = withContext(Dispatchers.Default) {
-            val resolvedNew = newItems.map { fetched ->
-                pendingDirtyItems[fetched.id] ?: fetched
-            }
-            resolvedNew.forEach { item ->
-                if (!pendingDirtyItems.containsKey(item.id)) {
-                    serverSyncedItems[item.id] = item
-                }
-            }
-
-            val combinedMap = LinkedHashMap<Int, WorkItem>()
-            for (existing in _allWorkItems.value) {
-                combinedMap[existing.id] = existing
-            }
-            for (incoming in resolvedNew) {
-                combinedMap[incoming.id] = incoming
-            }
-
-            val parentToChildren = mutableMapOf<Int, MutableSet<Int>>()
-            val childToParent = mutableMapOf<Int, Int>()
-            for (item in combinedMap.values) {
-                if (item.parentId != null) {
-                    childToParent[item.id] = item.parentId
-                    parentToChildren.getOrPut(item.parentId) { mutableSetOf() }.add(item.id)
-                }
-                for (cId in item.childIds) {
-                    parentToChildren.getOrPut(item.id) { mutableSetOf() }.add(cId)
-                    if (!childToParent.containsKey(cId)) {
-                        childToParent[cId] = item.id
-                    }
-                }
-            }
-
-            combinedMap.values.map { item ->
-                item.copy(
-                    parentId = item.parentId ?: childToParent[item.id],
-                    childIds = parentToChildren[item.id]?.toList() ?: item.childIds
-                )
+        val current = _allWorkItems.value
+        val pendingDirty = crudDelegate.getPendingDirtyItems()
+        val map = current.associateBy { it.id }.toMutableMap()
+        for (item in newItems) {
+            crudDelegate.recordServerSyncedItem(item)
+            if (!pendingDirty.containsKey(item.id)) {
+                map[item.id] = item
             }
         }
-        _allWorkItems.value = mergedList
-        _selectedWorkItem.value?.let { currentSelected ->
-            _selectedWorkItem.value = mergedList.firstOrNull { it.id == currentSelected.id }
+        _allWorkItems.value = map.values.toList()
+        selectedWorkItem.value?.let { currentSelected ->
+            if (map.containsKey(currentSelected.id) && !pendingDirty.containsKey(currentSelected.id)) {
+                hierarchyDelegate.setSelectedWorkItem(map[currentSelected.id])
+            }
         }
     }
 
     fun loadMoreWorkItems() {
-        val currentState = _stateFilter.value
-        val currentProject = _selectedProject.value
-        val currentType = _typeFilter.value
+        val currentState = stateFilter.value
+        val currentProject = selectedProject.value
+        val currentType = typeFilter.value
 
         if (currentState == null || currentState.equals("All", ignoreCase = true)) {
             _proposedDisplayLimit.value = _proposedDisplayLimit.value + PROPOSED_PAGE_STEP
@@ -1902,7 +1748,7 @@ class WorkItemsViewModel(
             _stateDisplayLimits.value = updated
         }
 
-        if (_isLoadingMore.value) return
+        if (isLoadingMore.value) return
         val acc = sessionManager.getActiveAccount()
         val org = acc?.organization ?: repository.getConfiguredUrl()
         val pat = acc?.pat ?: repository.getConfiguredPat()
@@ -1919,7 +1765,7 @@ class WorkItemsViewModel(
         if (!shouldQueryServer) return
 
         viewModelScope.launch {
-            _isLoadingMore.value = true
+            streamDelegate.setLoadingMore(true)
             val existingIds = _allWorkItems.value.map { it.id }.toSet()
             val batchResult = repository.fetchNextWorkItemBatch(
                 organization = org,
@@ -1939,56 +1785,38 @@ class WorkItemsViewModel(
                 }
                 _hasMoreServerItems.value = repository.hasUnloadedServerItems(org)
             }
-            _isLoadingMore.value = false
+            streamDelegate.setLoadingMore(false)
         }
     }
 
     fun disconnect() {
         backgroundStreamJob?.cancel()
         activeConnectJob?.cancel()
-        _isBackgroundSyncing.value = false
-        _syncProgress.value = null
-        _syncStatusText.value = null
+        streamDelegate.reset()
         repository.clearCredentials()
         sessionManager.updateOrganizations(emptyList())
         sessionManager.updateDefaultOrganization(null)
         _workItemsOrg.value = null
-        serverSyncedItems.clear()
-        pendingDirtyItems.clear()
-        updateJobs.values.forEach { it.cancel() }
-        updateJobs.clear()
+        crudDelegate.clearAll()
         _allWorkItems.value = emptyList()
-        _selectedProject.value = null
-        _searchQuery.value = ""
-        _typeFilter.value = null
-        _stateFilter.value = null
-        _assigneeFilter.value = null
-        _areaFilter.value = null
-        _iterationFilter.value = null
-        _selectedWorkItem.value = null
+        filterDelegate.clearAll()
+        hierarchyDelegate.reset()
         activeCommentsJob?.cancel()
         commentsByWorkItemId.clear()
-        _selectedWorkItemComments.value = emptyList()
-        _isLoadingComments.value = false
         sessionManager.updateErrorMessage(null)
         sessionManager.updateConnectionStatus(ConnectionStatus.Disconnected)
     }
 
     fun setSearchQuery(query: String) {
-        _searchQuery.value = query
+        filterDelegate.setSearchQuery(query)
     }
 
     fun setProject(project: String?) {
         val trimmed = project?.trim()
         if (trimmed.isNullOrBlank()) return
-        val isDifferentProject = !_selectedProject.value.equals(trimmed, ignoreCase = true)
         userManuallySelectedProject = true
         userManuallySelectedType = false
-        if (isDifferentProject) {
-            _areaFilter.value = null
-            _iterationFilter.value = null
-        }
-        _selectedProject.value = trimmed
+        filterDelegate.setProject(trimmed)
         ensureProjectProcessLoaded(trimmed)
     }
 
@@ -1998,7 +1826,7 @@ class WorkItemsViewModel(
         val pat = acc?.pat ?: repository.getConfiguredPat()
         if (org.isNotBlank() && pat.isNotBlank()) {
             viewModelScope.launch {
-                fetchAndStoreProjectMetadata(org, project, pat)
+                processDelegate.fetchAndStoreProjectMetadata(org, project, pat)
             }
         }
     }
@@ -2006,18 +1834,18 @@ class WorkItemsViewModel(
     fun setTypeFilter(type: String?) {
         if (type.isNullOrBlank()) return
         userManuallySelectedType = true
-        _typeFilter.value = type
+        filterDelegate.setTypeFilter(type)
         _proposedDisplayLimit.value = maxOf(PROPOSED_INITIAL_BATCH_SIZE, _allWorkItems.value.size)
     }
 
     fun setStateFilter(state: String?) {
         if (state.isNullOrBlank()) return
         val trimmedState = state.trim()
-        _stateFilter.value = trimmedState
+        filterDelegate.setStateFilter(trimmedState)
 
         if (!trimmedState.equals("All", ignoreCase = true)) {
-            val currentProject = _selectedProject.value
-            val currentType = _typeFilter.value
+            val currentProject = selectedProject.value
+            val currentType = typeFilter.value
             val stateKey = "${currentProject.orEmpty().lowercase()}|${currentType.orEmpty().lowercase()}|${trimmedState.lowercase()}"
             if (!_stateDisplayLimits.value.containsKey(stateKey)) {
                 val updated = _stateDisplayLimits.value.toMutableMap()
@@ -2033,13 +1861,13 @@ class WorkItemsViewModel(
                         item.state.equals(trimmedState, ignoreCase = true)
                 }
                 val targetLimit = _stateDisplayLimits.value[stateKey] ?: STATE_INITIAL_BATCH_SIZE
-                if (inMemoryForState < targetLimit && !_isLoadingMore.value) {
+                if (inMemoryForState < targetLimit && !isLoadingMore.value) {
                     val acc = sessionManager.getActiveAccount()
                     val org = acc?.organization ?: repository.getConfiguredUrl()
                     val pat = acc?.pat ?: repository.getConfiguredPat()
                     if (org.isNotBlank() && pat.isNotBlank()) {
                         viewModelScope.launch {
-                            _isLoadingMore.value = true
+                            streamDelegate.setLoadingMore(true)
                             val existingIds = _allWorkItems.value.map { it.id }.toSet()
                             val batchResult = repository.fetchNextWorkItemBatch(
                                 organization = org,
@@ -2059,7 +1887,7 @@ class WorkItemsViewModel(
                                 }
                                 _hasMoreServerItems.value = repository.hasUnloadedServerItems(org)
                             }
-                            _isLoadingMore.value = false
+                            streamDelegate.setLoadingMore(false)
                         }
                     }
                 }
@@ -2068,27 +1896,25 @@ class WorkItemsViewModel(
     }
 
     fun setAssigneeFilter(assignee: String?) {
-        _assigneeFilter.value = if (assignee.isNullOrBlank() || assignee.equals("All", ignoreCase = true)) {
-            null
-        } else {
-            assignee
-        }
+        filterDelegate.setAssigneeFilter(assignee)
     }
 
     fun setAreaFilter(areaPath: String?) {
-        _areaFilter.value = if (areaPath.isNullOrBlank() || areaPath.equals("All", ignoreCase = true)) {
+        val norm = if (areaPath.isNullOrBlank() || areaPath.equals("All", ignoreCase = true)) {
             null
         } else {
             normalizeClassificationPath(areaPath).ifBlank { null }
         }
+        filterDelegate.setAreaFilter(norm)
     }
 
     fun setIterationFilter(iterationPath: String?) {
-        _iterationFilter.value = if (iterationPath.isNullOrBlank() || iterationPath.equals("All", ignoreCase = true)) {
+        val norm = if (iterationPath.isNullOrBlank() || iterationPath.equals("All", ignoreCase = true)) {
             null
         } else {
             normalizeClassificationPath(iterationPath).ifBlank { null }
         }
+        filterDelegate.setIterationFilter(norm)
     }
 
     fun getAreasForProject(project: String?): List<String> {
@@ -2097,14 +1923,14 @@ class WorkItemsViewModel(
             val cached = projectAreas.value
             if (cached.isNotEmpty()) return cached
         }
-        val resolvedProj = resolveEffectiveProject(project ?: _selectedProject.value, _allWorkItems.value)
+        val resolvedProj = resolveEffectiveProject(project ?: selectedProject.value, _allWorkItems.value)
             ?: project
-            ?: _selectedProject.value
+            ?: selectedProject.value
             ?: ""
         if (resolvedProj.isBlank()) return emptyList()
         val resolvedProjLower = resolvedProj.trim().lowercase()
         val activeOrg = sessionManager.getActiveOrganization()
-        val fromApi = findProjectAreas(activeOrg, resolvedProj, _projectAreasMap.value).orEmpty()
+        val fromApi = findProjectAreas(activeOrg, resolvedProj, processDelegate.projectAreasMap.value).orEmpty()
         val fromItems = _allWorkItems.value
             .filter { it.normTeamProjectLower == resolvedProjLower }
             .mapNotNull { it.normAreaPath.takeIf { p -> p.isNotEmpty() } }
@@ -2117,14 +1943,14 @@ class WorkItemsViewModel(
             val cached = projectIterations.value
             if (cached.isNotEmpty()) return cached
         }
-        val resolvedProj = resolveEffectiveProject(project ?: _selectedProject.value, _allWorkItems.value)
+        val resolvedProj = resolveEffectiveProject(project ?: selectedProject.value, _allWorkItems.value)
             ?: project
-            ?: _selectedProject.value
+            ?: selectedProject.value
             ?: ""
         if (resolvedProj.isBlank()) return emptyList()
         val resolvedProjLower = resolvedProj.trim().lowercase()
         val activeOrg = sessionManager.getActiveOrganization()
-        val fromApi = findProjectIterations(activeOrg, resolvedProj, _projectIterationsMap.value).orEmpty()
+        val fromApi = findProjectIterations(activeOrg, resolvedProj, processDelegate.projectIterationsMap.value).orEmpty()
         val fromItems = _allWorkItems.value
             .filter { it.normTeamProjectLower == resolvedProjLower }
             .mapNotNull { it.normIterationPath.takeIf { p -> p.isNotEmpty() } }
@@ -2132,25 +1958,23 @@ class WorkItemsViewModel(
     }
 
     fun selectWorkItem(item: WorkItem?) {
-        if (item != null && _searchQuery.value.isNotEmpty()) {
-            _searchQuery.value = ""
+        if (item != null && searchQuery.value.isNotEmpty()) {
+            filterDelegate.setSearchQuery("")
         }
-        _selectedWorkItem.value = item
+        hierarchyDelegate.setSelectedWorkItem(item)
         activeCommentsJob?.cancel()
 
         if (item == null) {
-            _selectedWorkItemComments.value = emptyList()
-            _isLoadingComments.value = false
             return
         }
 
         val cachedComments = commentsByWorkItemId[item.id].orEmpty()
-        _selectedWorkItemComments.value = cachedComments
+        hierarchyDelegate.setSelectedWorkItemComments(cachedComments)
 
         val acc = sessionManager.getActiveAccount()
         val org = acc?.organization ?: repository.getConfiguredUrl()
         val pat = acc?.pat ?: repository.getConfiguredPat()
-        val project = item.teamProject ?: _selectedProject.value ?: ""
+        val project = item.teamProject ?: selectedProject.value ?: ""
 
         if (org.isNotBlank()) {
             viewModelScope.launch {
@@ -2160,13 +1984,13 @@ class WorkItemsViewModel(
         }
 
         if (org.isBlank() || pat.isBlank() || project.isBlank()) {
-            _isLoadingComments.value = false
+            hierarchyDelegate.setLoadingComments(false)
             return
         }
 
         activeCommentsJob = viewModelScope.launch {
             if (cachedComments.isEmpty()) {
-                _isLoadingComments.value = true
+                hierarchyDelegate.setLoadingComments(true)
             }
             val result = repository.fetchWorkItemComments(
                 organization = org,
@@ -2180,13 +2004,13 @@ class WorkItemsViewModel(
                     .filter { it.id < 0 && serverComments.none { s -> s.text == it.text } }
                 val merged = (pendingLocal + serverComments)
                     .distinctBy { if (it.id > 0) "id_${it.id}" else "local_${it.id}_${it.text}" }
-                    .sortedWith(
-                        compareByDescending<WorkItemComment> { it.createdDate }
-                            .thenByDescending { if (it.id < 0) Int.MAX_VALUE else it.id }
-                    )
-                commentsByWorkItemId[item.id] = merged
-                if (_selectedWorkItem.value?.id == item.id) {
-                    _selectedWorkItemComments.value = merged
+                val sorted = merged.sortedWith(
+                    compareByDescending<WorkItemComment> { it.createdDate }
+                        .thenByDescending { if (it.id < 0) Int.MAX_VALUE else it.id }
+                )
+                commentsByWorkItemId[item.id] = sorted
+                if (selectedWorkItem.value?.id == item.id) {
+                    hierarchyDelegate.setSelectedWorkItemComments(sorted)
                 }
 
                 val mentionOutcome = repository.evaluateWorkItemCommentsForMentions(
@@ -2205,8 +2029,8 @@ class WorkItemsViewModel(
                     sessionManager.updateNotificationsState(markedReadState)
                 }
             }
-            if (_selectedWorkItem.value?.id == item.id) {
-                _isLoadingComments.value = false
+            if (selectedWorkItem.value?.id == item.id) {
+                hierarchyDelegate.setLoadingComments(false)
             }
         }
     }
@@ -2240,14 +2064,14 @@ class WorkItemsViewModel(
         val currentList = commentsByWorkItemId[workItem.id].orEmpty()
         val updatedOptimistic = listOf(optimisticComment) + currentList
         commentsByWorkItemId[workItem.id] = updatedOptimistic
-        if (_selectedWorkItem.value?.id == workItem.id) {
-            _selectedWorkItemComments.value = updatedOptimistic
+        if (selectedWorkItem.value?.id == workItem.id) {
+            hierarchyDelegate.setSelectedWorkItemComments(updatedOptimistic)
         }
 
         val acc = sessionManager.getActiveAccount()
         val org = acc?.organization ?: repository.getConfiguredUrl()
         val pat = acc?.pat ?: repository.getConfiguredPat()
-        val project = workItem.teamProject ?: _selectedProject.value ?: ""
+        val project = workItem.teamProject ?: selectedProject.value ?: ""
 
         if (org.isBlank() || pat.isBlank() || project.isBlank()) {
             onResult(Result.success(optimisticComment))
@@ -2269,8 +2093,8 @@ class WorkItemsViewModel(
                         if (c.id == tempId) serverComment else c
                     }.distinctBy { if (it.id > 0) "id_${it.id}" else "local_${it.id}" }
                     commentsByWorkItemId[workItem.id] = replaced
-                    if (_selectedWorkItem.value?.id == workItem.id) {
-                        _selectedWorkItemComments.value = replaced
+                    if (selectedWorkItem.value?.id == workItem.id) {
+                        hierarchyDelegate.setSelectedWorkItemComments(replaced)
                     }
 
                     val mentionOutcome = repository.evaluateWorkItemCommentsForMentions(
@@ -2317,11 +2141,11 @@ class WorkItemsViewModel(
         _allWorkItems.value = _allWorkItems.value.map {
             if (it.id == normalizedUpdated.id) normalizedUpdated else it
         }
-        if (_selectedWorkItem.value?.id == normalizedUpdated.id) {
-            _selectedWorkItem.value = normalizedUpdated
+        if (selectedWorkItem.value?.id == normalizedUpdated.id) {
+            hierarchyDelegate.setSelectedWorkItem(normalizedUpdated)
         }
 
-        pendingDirtyItems[normalizedUpdated.id] = normalizedUpdated
+        crudDelegate.recordPendingDirty(normalizedUpdated)
         persistCurrentItemsInBackground()
 
         val currentNotifState = sessionManager.notificationsState.value
@@ -2358,13 +2182,13 @@ class WorkItemsViewModel(
             (currentInMemory.description != normalizedUpdated.description ||
                 currentInMemory.title != normalizedUpdated.title)
 
-        updateJobs[normalizedUpdated.id]?.cancel()
-        updateJobs[normalizedUpdated.id] = viewModelScope.launch {
+        val job = viewModelScope.launch {
             if (onlyTextChanged) {
                 delay(400L)
             }
             syncWorkItemToServer(normalizedUpdated)
         }
+        crudDelegate.recordUpdateJob(normalizedUpdated.id, job)
     }
 
     fun getStatesForWorkItem(item: WorkItem): List<String> {
@@ -2372,25 +2196,15 @@ class WorkItemsViewModel(
     }
 
     fun getStatesForType(project: String?, workItemType: String, currentState: String? = null): List<String> {
-        val resolvedProj = project ?: _selectedProject.value ?: ""
-        val activeOrg = sessionManager.getActiveOrganization()
-        val processMapForProj = findProcessHierarchy(activeOrg, resolvedProj, _projectProcessMap.value)
-        val fromProcess = processMapForProj?.entries
-            ?.firstOrNull { it.key.equals(workItemType, ignoreCase = true) }?.value
-        val baseStates = if (!fromProcess.isNullOrEmpty()) {
-            fromProcess
-        } else {
-            val fromItems = _allWorkItems.value.filter {
-                it.teamProject?.equals(resolvedProj, ignoreCase = true) == true &&
-                    it.workItemType.equals(workItemType, ignoreCase = true)
-            }.map { it.state }.distinct()
-            if (fromItems.isNotEmpty()) fromItems else repository.getStandardProcessStates(workItemType)
-        }
-        return if (!currentState.isNullOrBlank()) {
-            (baseStates + currentState).distinctBy { it.lowercase() }
-        } else {
-            baseStates.distinctBy { it.lowercase() }
-        }
+        return hierarchyDelegate.getStatesForType(
+            project = project ?: selectedProject.value,
+            workItemType = workItemType,
+            currentState = currentState,
+            activeOrg = sessionManager.getActiveOrganization(),
+            allItems = _allWorkItems.value,
+            projectProcessMap = processDelegate.projectProcessMap.value,
+            repository = repository
+        )
     }
 
     fun getAllowedChildTypesForWorkItem(item: WorkItem): List<String> {
@@ -2398,53 +2212,16 @@ class WorkItemsViewModel(
     }
 
     fun getAllowedChildTypesForType(project: String?, workItemType: String): List<String> {
-        val cleanType = workItemType.trim()
-        if (cleanType.isBlank()) return emptyList()
-
-        val resolvedProject = resolveEffectiveProject(project ?: _selectedProject.value, _allWorkItems.value)
-            ?: project
-            ?: _selectedProject.value
-            ?: ""
-        val activeOrg = sessionManager.getActiveOrganization()
-        val processMapForProj = findProcessHierarchy(activeOrg, resolvedProject, _projectProcessMap.value)
-        val activeTypesFromProcess = processMapForProj?.keys
-            ?.filterNot { AzureDevOpsRepository.isExcludedNonWorkItemType(it) }
-            ?.toList()
-            .orEmpty()
-
-        val projectItems = _allWorkItems.value.filter {
-            resolvedProject.isBlank() || it.teamProject?.equals(resolvedProject, ignoreCase = true) == true
-        }
-        val activeTypesFromItems = projectItems.map { it.workItemType }
-            .filterNot { AzureDevOpsRepository.isExcludedNonWorkItemType(it) }
-            .distinct()
-
-        val activeTypes = when {
-            activeTypesFromProcess.isNotEmpty() -> activeTypesFromProcess
-            activeTypesFromItems.isNotEmpty() -> activeTypesFromItems
-            availableTypes.value.isNotEmpty() -> availableTypes.value
-            else -> repository.getKnownProjectProcessHierarchy(resolvedProject).keys.toList()
-        }
-
-        val catMap = findCategoryMap(activeOrg, resolvedProject, _projectCategoryMap.value).orEmpty()
-        val explicitBacklogLevels = findBacklogLevels(activeOrg, resolvedProject, _projectBacklogLevelsMap.value).orEmpty()
-
-        val backlogLevels = repository.resolveOrderedBacklogLevels(
-            activeTypes = activeTypes,
-            categoryMap = catMap,
-            explicitBacklogLevels = explicitBacklogLevels,
-            projectWorkItems = projectItems
+        return hierarchyDelegate.getAllowedChildTypesForType(
+            project = resolveEffectiveProject(project ?: selectedProject.value, _allWorkItems.value),
+            workItemType = workItemType,
+            activeOrg = sessionManager.getActiveOrganization(),
+            allItems = _allWorkItems.value,
+            projectProcessMap = processDelegate.projectProcessMap.value,
+            projectCategoryMap = processDelegate.projectCategoryMap.value,
+            projectBacklogLevelsMap = processDelegate.projectBacklogLevelsMap.value,
+            repository = repository
         )
-        if (backlogLevels.size <= 1) return emptyList()
-
-        val levelIdx = backlogLevels.indexOfFirst { levelTypes ->
-            levelTypes.any { it.equals(cleanType, ignoreCase = true) }
-        }
-        if (levelIdx < 0 || levelIdx >= backlogLevels.lastIndex) {
-            return emptyList()
-        }
-
-        return backlogLevels[levelIdx + 1]
     }
 
     fun createWorkItem(
@@ -2465,7 +2242,7 @@ class WorkItemsViewModel(
             return
         }
         val resolvedProject = project?.takeIf { it.isNotBlank() }
-            ?: _selectedProject.value?.takeIf { it.isNotBlank() }
+            ?: selectedProject.value?.takeIf { it.isNotBlank() }
             ?: availableProjects.value.firstOrNull()
             ?: ""
         val resolvedType = workItemType.trim().ifBlank {
@@ -2520,16 +2297,16 @@ class WorkItemsViewModel(
                 boardOrder = nextBoardOrder,
                 tags = cleanTags
             )
-            serverSyncedItems[localCreated.id] = localCreated
+            crudDelegate.recordServerSyncedItem(localCreated)
             _allWorkItems.value = _allWorkItems.value + localCreated
             persistCurrentItemsInBackground(org)
             userManuallySelectedType = true
-            _typeFilter.value = localCreated.workItemType
-            if (_stateFilter.value != null &&
-                !_stateFilter.value.equals("All", ignoreCase = true) &&
-                !_stateFilter.value.equals(localCreated.state, ignoreCase = true)
+            filterDelegate.setTypeFilter(localCreated.workItemType)
+            if (stateFilter.value != null &&
+                !stateFilter.value.equals("All", ignoreCase = true) &&
+                !stateFilter.value.equals(localCreated.state, ignoreCase = true)
             ) {
-                _stateFilter.value = "All"
+                filterDelegate.setStateFilter("All")
             }
             onResult(Result.success(localCreated))
             return
@@ -2557,16 +2334,16 @@ class WorkItemsViewModel(
                         iterationPath = serverCreated.iterationPath ?: resolvedIteration,
                         boardOrder = serverCreated.boardOrder ?: nextBoardOrder
                     )
-                    serverSyncedItems[finalCreated.id] = finalCreated
+                    crudDelegate.recordServerSyncedItem(finalCreated)
                     _allWorkItems.value = (_allWorkItems.value.filterNot { it.id == finalCreated.id } + finalCreated)
                     persistCurrentItemsInBackground(org)
                     userManuallySelectedType = true
-                    _typeFilter.value = finalCreated.workItemType
-                    if (_stateFilter.value != null &&
-                        !_stateFilter.value.equals("All", ignoreCase = true) &&
-                        !_stateFilter.value.equals(finalCreated.state, ignoreCase = true)
+                    filterDelegate.setTypeFilter(finalCreated.workItemType)
+                    if (stateFilter.value != null &&
+                        !stateFilter.value.equals("All", ignoreCase = true) &&
+                        !stateFilter.value.equals(finalCreated.state, ignoreCase = true)
                     ) {
-                        _stateFilter.value = "All"
+                        filterDelegate.setStateFilter("All")
                     }
                     onResult(Result.success(finalCreated))
                 },
@@ -2589,7 +2366,7 @@ class WorkItemsViewModel(
         val allowedChildTypes = getAllowedChildTypesForWorkItem(parent)
         if (allowedChildTypes.isEmpty()) return
 
-        val project = parent.teamProject ?: _selectedProject.value ?: ""
+        val project = parent.teamProject ?: selectedProject.value ?: ""
         val resolvedType = childType.takeIf { candidate ->
             candidate.isNotBlank() && allowedChildTypes.any { it.equals(candidate, ignoreCase = true) }
         } ?: allowedChildTypes.first()
@@ -2627,8 +2404,8 @@ class WorkItemsViewModel(
         } + optimisticChild)
         persistCurrentItemsInBackground()
 
-        if (_selectedWorkItem.value?.id == parent.id) {
-            _selectedWorkItem.value = updatedParent
+        if (selectedWorkItem.value?.id == parent.id) {
+            hierarchyDelegate.setSelectedWorkItem(updatedParent)
         }
 
         val acc = sessionManager.getActiveAccount()
@@ -2651,8 +2428,8 @@ class WorkItemsViewModel(
                     boardOrder = createdServerChild.boardOrder ?: nextBoardOrder,
                     parentId = parent.id
                 )
-                serverSyncedItems.remove(tempId)
-                serverSyncedItems[finalChild.id] = finalChild
+                crudDelegate.clearPendingDirty(tempId)
+                crudDelegate.recordServerSyncedItem(finalChild)
 
                 _allWorkItems.value = _allWorkItems.value.map { item ->
                     when (item.id) {
@@ -2661,15 +2438,15 @@ class WorkItemsViewModel(
                             val newParent = item.copy(
                                 childIds = (item.childIds.filterNot { it == tempId } + finalChild.id).distinct()
                             )
-                            serverSyncedItems[newParent.id] = newParent
+                            crudDelegate.recordServerSyncedItem(newParent)
                             newParent
                         }
                         else -> item
                     }
                 }
                 persistCurrentItemsInBackground(org)
-                if (_selectedWorkItem.value?.id == parent.id) {
-                    _selectedWorkItem.value = _allWorkItems.value.firstOrNull { it.id == parent.id }
+                if (selectedWorkItem.value?.id == parent.id) {
+                    hierarchyDelegate.setSelectedWorkItem(_allWorkItems.value.firstOrNull { it.id == parent.id })
                 }
             }
         }
@@ -2739,8 +2516,8 @@ class WorkItemsViewModel(
                     else -> item
                 }
             }
-            if (_selectedWorkItem.value?.id == parent.id) {
-                _selectedWorkItem.value = _allWorkItems.value.firstOrNull { it.id == parent.id }
+            if (selectedWorkItem.value?.id == parent.id) {
+                hierarchyDelegate.setSelectedWorkItem(_allWorkItems.value.firstOrNull { it.id == parent.id })
             }
             persistCurrentItemsInBackground(org)
 
@@ -2763,7 +2540,7 @@ class WorkItemsViewModel(
             result.fold(
                 onSuccess = { serverLinkedChild ->
                     val finalChild = serverLinkedChild.copy(parentId = parent.id)
-                    serverSyncedItems[finalChild.id] = finalChild
+                    crudDelegate.recordServerSyncedItem(finalChild)
 
                     val currentItems = _allWorkItems.value
                     val hadChildInList = currentItems.any { it.id == finalChild.id }
@@ -2773,7 +2550,7 @@ class WorkItemsViewModel(
                                 item.id == finalChild.id -> finalChild
                                 item.id == parent.id -> {
                                     val newParent = item.copy(childIds = (item.childIds + finalChild.id).distinct())
-                                    serverSyncedItems[newParent.id] = newParent
+                                    crudDelegate.recordServerSyncedItem(newParent)
                                     newParent
                                 }
                                 item.id != parent.id && finalChild.id in item.childIds -> {
@@ -2786,7 +2563,7 @@ class WorkItemsViewModel(
                         currentItems.map { item ->
                             if (item.id == parent.id) {
                                 val newParent = item.copy(childIds = (item.childIds + finalChild.id).distinct())
-                                serverSyncedItems[newParent.id] = newParent
+                                crudDelegate.recordServerSyncedItem(newParent)
                                 newParent
                             } else {
                                 item
@@ -2795,8 +2572,8 @@ class WorkItemsViewModel(
                     }
 
                     _allWorkItems.value = updatedList
-                    if (_selectedWorkItem.value?.id == parent.id) {
-                        _selectedWorkItem.value = _allWorkItems.value.firstOrNull { it.id == parent.id }
+                    if (selectedWorkItem.value?.id == parent.id) {
+                        hierarchyDelegate.setSelectedWorkItem(_allWorkItems.value.firstOrNull { it.id == parent.id })
                     }
                     persistCurrentItemsInBackground(org)
                     onResult(Result.success(finalChild))
@@ -2824,20 +2601,20 @@ class WorkItemsViewModel(
             when {
                 item.id == parent.id -> {
                     val updatedParent = item.copy(childIds = item.childIds.filterNot { it == childId })
-                    serverSyncedItems[updatedParent.id] = updatedParent
+                    crudDelegate.recordServerSyncedItem(updatedParent)
                     updatedParent
                 }
                 item.id == childId && item.parentId == parent.id -> {
                     val updatedChild = item.copy(parentId = null)
-                    serverSyncedItems[updatedChild.id] = updatedChild
+                    crudDelegate.recordServerSyncedItem(updatedChild)
                     updatedChild
                 }
                 else -> item
             }
         }
 
-        if (_selectedWorkItem.value?.id == parent.id) {
-            _selectedWorkItem.value = _allWorkItems.value.firstOrNull { it.id == parent.id }
+        if (selectedWorkItem.value?.id == parent.id) {
+            hierarchyDelegate.setSelectedWorkItem(_allWorkItems.value.firstOrNull { it.id == parent.id })
         }
         persistCurrentItemsInBackground(org)
 
