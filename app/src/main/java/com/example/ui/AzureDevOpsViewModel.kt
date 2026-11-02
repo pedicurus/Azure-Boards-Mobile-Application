@@ -458,6 +458,15 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
         .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
+    val isIdentityConfirmed: StateFlow<Boolean> = _notificationsState
+        .map { state ->
+            state.isIdentityConfirmed
+        }
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+
     val totalWorkItemsCount: StateFlow<Int> = _allWorkItems
         .map { it.size }
         .distinctUntilChanged()
@@ -2624,6 +2633,12 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                     workItem = item,
                     comments = serverComments
                 )
+                if (mentionOutcome.newlyTriggeredNotifications.isNotEmpty()) {
+                    val appContext = getApplication<Application>().applicationContext
+                    mentionOutcome.newlyTriggeredNotifications.forEach { notif ->
+                        NotificationHelper.postSystemNotification(appContext, notif)
+                    }
+                }
                 if (mentionOutcome.state.organization.isNotBlank()) {
                     val markedReadState = repository.markNotificationsReadForWorkItem(org, item.id)
                     _notificationsState.value = markedReadState
@@ -2690,13 +2705,44 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
     fun setManualIdentityOverride(overrideName: String?) {
         val acc = getActiveAccount()
         val org = acc?.organization ?: _defaultOrganization.value ?: repository.getConfiguredUrl()
+        val pat = acc?.pat ?: repository.getConfiguredPat()
         if (org.isBlank()) return
         viewModelScope.launch {
-            val updated = repository.setManualIdentityOverride(org, overrideName)
+            val updated = repository.setManualIdentityOverride(org, overrideName, pat)
             _notificationsState.value = updated
             syncNotificationsForActiveOrganization(postDeviceNotifications = false)
         }
     }
+
+    /**
+     * Confirms the detected identity for the active organization and PAT credentials.
+     */
+    fun confirmUserIdentity(confirmed: Boolean) {
+        val acc = getActiveAccount()
+        val org = acc?.organization ?: _defaultOrganization.value ?: repository.getConfiguredUrl()
+        val pat = acc?.pat ?: repository.getConfiguredPat()
+        if (org.isBlank()) return
+        viewModelScope.launch {
+            val updated = repository.confirmUserIdentity(org, pat, confirmed)
+            _notificationsState.value = updated
+        }
+    }
+
+    /**
+     * Saves a user-corrected identity for notifications and triggers re-sync.
+     */
+    fun saveCorrectedIdentity(correctedName: String) {
+        val acc = getActiveAccount()
+        val org = acc?.organization ?: _defaultOrganization.value ?: repository.getConfiguredUrl()
+        val pat = acc?.pat ?: repository.getConfiguredPat()
+        if (org.isBlank()) return
+        viewModelScope.launch {
+            val updated = repository.saveCorrectedIdentity(org, pat, correctedName)
+            _notificationsState.value = updated
+            syncNotificationsForActiveOrganization(postDeviceNotifications = false)
+        }
+    }
+
 
     /**
      * Marks all notifications (or all notifications in [category]) as read for the active organization.
@@ -2882,6 +2928,24 @@ class AzureDevOpsViewModel(application: Application) : AndroidViewModel(applicat
                     if (_selectedWorkItem.value?.id == workItem.id) {
                         _selectedWorkItemComments.value = replaced
                     }
+
+                    // Check if the newly posted comment mentions the user (including testing self-mentions)
+                    val mentionOutcome = repository.evaluateWorkItemCommentsForMentions(
+                        organization = org,
+                        workItem = workItem,
+                        comments = listOf(serverComment),
+                        allowSystemNotification = true
+                    )
+                    if (mentionOutcome.newlyTriggeredNotifications.isNotEmpty()) {
+                        val appContext = getApplication<Application>().applicationContext
+                        mentionOutcome.newlyTriggeredNotifications.forEach { notif ->
+                            NotificationHelper.postSystemNotification(appContext, notif)
+                        }
+                    }
+                    if (mentionOutcome.state.organization.isNotBlank()) {
+                        _notificationsState.value = mentionOutcome.state
+                    }
+
                     onResult(Result.success(serverComment))
                 },
                 onFailure = { err ->

@@ -233,11 +233,15 @@ fun WorkItemsScreen(
     isSyncingNotifications: Boolean = false,
     detectedUserIdentity: String? = null,
     manualIdentityOverride: String? = null,
+    isIdentityConfirmed: Boolean = true,
+    onConfirmIdentity: (Boolean) -> Unit = {},
+    onSaveCorrectedIdentity: (String) -> Unit = {},
     onManualIdentityOverrideChange: (String?) -> Unit = {},
     onRefreshNotifications: () -> Unit = {},
     onNotificationClick: (AppNotificationItem) -> Unit = {},
     onMarkAllNotificationsRead: (String?) -> Unit = {},
     modifier: Modifier = Modifier
+
 ) {
     var showCreateSheet by remember { mutableStateOf(false) }
     var showNotificationsPage by remember { mutableStateOf(false) }
@@ -1172,6 +1176,9 @@ fun WorkItemsScreen(
                 assignedNotifications = assignedNotifications,
                 mentionedNotifications = mentionedNotifications,
                 isSyncingNotifications = isSyncingNotifications,
+                isIdentityConfirmed = isIdentityConfirmed,
+                onConfirmIdentity = onConfirmIdentity,
+                onSaveCorrectedIdentity = onSaveCorrectedIdentity,
                 onRefreshNotifications = onRefreshNotifications,
                 onNotificationClick = { notifItem ->
                     onNotificationClick(notifItem)
@@ -1180,6 +1187,7 @@ fun WorkItemsScreen(
                 onOpenIdentitySettings = { showSettingsDialog = true },
                 onClose = { showNotificationsPage = false }
             )
+
         }
 
         // Settings / Account Options Dialog

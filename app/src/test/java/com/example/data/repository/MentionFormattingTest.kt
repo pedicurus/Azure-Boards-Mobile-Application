@@ -19,7 +19,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [36])
 class MentionFormattingTest {
 
     private lateinit var context: Context
@@ -178,4 +178,55 @@ class MentionFormattingTest {
             )
         )
     }
+
+    @Test
+    fun evaluateWorkItemCommentsForMentions_triggersNotificationForSelfMention() = kotlinx.coroutines.test.runTest {
+        val org = "ContosoOrg"
+        val displayName = "Alice Johnson"
+        val email = "alice@contoso.com"
+        val userId = "f0e1d2c3-b4a5-6789-0123-456789abcdef"
+
+        repository.setManualIdentityOverride(org, displayName)
+        AzureDevOpsRepository.registerKnownIdentity(
+            id = userId,
+            displayName = displayName,
+            email = email
+        )
+
+        val workItem = com.example.data.model.WorkItem(
+            id = 101,
+            title = "Test Work Item",
+            workItemType = "Task",
+            state = "Active",
+            teamProject = "ProjectA"
+        )
+
+        val nowIso = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }.format(java.util.Date())
+
+        val selfComment = com.example.data.model.WorkItemComment(
+            id = 202,
+            workItemId = 101,
+            text = "Testing mention for @<Alice Johnson> please check",
+            authorName = "Alice Johnson",
+            authorEmail = email,
+            createdDate = nowIso,
+            formattedDate = "Just now"
+        )
+
+        val outcome = repository.evaluateWorkItemCommentsForMentions(
+            organization = org,
+            workItem = workItem,
+            comments = listOf(selfComment),
+            allowSystemNotification = true
+        )
+
+        assertEquals(1, outcome.newlyTriggeredNotifications.size)
+        val triggered = outcome.newlyTriggeredNotifications.first()
+        assertEquals(com.example.data.model.NotificationCategory.MENTIONED, triggered.category)
+        assertEquals(101, triggered.workItemId)
+        assertEquals(202, triggered.commentId)
+    }
 }
+

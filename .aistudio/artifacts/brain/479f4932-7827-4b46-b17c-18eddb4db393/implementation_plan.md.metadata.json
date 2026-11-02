@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan to refactor work item discussion mentions to use Azure DevOps Markdown format (@<member>), preserve and resolve Azure identity GUIDs when posting comments, and render clean @Display Name pill badges in discussion threads and notifications.",
-  "updatedAt":  "2026-11-02T09:25:58.563946780Z",
-  "requestFeedback":  true,
-  "userFacing":  true
+  "summary": "Plan to resolve push notification delivery for discussion @mentions, enabling self-mention push alerts for testing, fixing WIQL syntax for comment discovery, posting push notifications when comments are submitted in the app, and ensuring identity GUID resolution.",
+  "updatedAt": "2026-11-02T15:33:42.042687403Z",
+  "requestFeedback": true,
+  "userFacing": true
 }

@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.NotificationsNone
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -47,9 +48,11 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -124,7 +127,10 @@ fun NotificationsScreen(
     onMarkAllRead: (String?) -> Unit,
     onOpenIdentitySettings: () -> Unit,
     onClose: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isIdentityConfirmed: Boolean = true,
+    onConfirmIdentity: (Boolean) -> Unit = {},
+    onSaveCorrectedIdentity: (String) -> Unit = {}
 ) {
     BackHandler {
         onClose()
@@ -134,6 +140,8 @@ fun NotificationsScreen(
     var hasDevicePermission by remember {
         mutableStateOf(NotificationHelper.hasNotificationPermission(context))
     }
+    var showCorrectionDialog by remember { mutableStateOf(false) }
+
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -282,26 +290,21 @@ fun NotificationsScreen(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 if (totalUnreadCount > 0) {
-                    TextButton(
+                    IconButton(
                         onClick = { onMarkAllRead(null) },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                        modifier = Modifier.testTag("notifications_mark_all_read_button")
+                        modifier = Modifier
+                            .size(40.dp)
+                            .testTag("notifications_mark_all_read_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.DoneAll,
-                            contentDescription = null,
+                            contentDescription = stringResource(R.string.notifications_mark_all_read),
                             tint = NotifAccentBlue,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = stringResource(R.string.notifications_mark_all_read),
-                            color = NotifAccentBlue,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }
+
 
                 IconButton(
                     onClick = onRefreshNotifications,
@@ -400,6 +403,101 @@ fun NotificationsScreen(
             }
         }
 
+        // Identity Confirmation Card if identified but not yet confirmed for this Org & PAT
+        val identifiedName = effectiveUserIdentity?.trim()?.takeIf { it.isNotEmpty() }
+        val showIdentityConfirmationPrompt = !isIdentityConfirmed && !identifiedName.isNullOrBlank()
+
+        AnimatedVisibility(visible = showIdentityConfirmationPrompt) {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = Color.White,
+                border = BorderStroke(1.5.dp, NotifAccentBlue.copy(alpha = 0.5f)),
+                shadowElevation = 2.dp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 6.dp)
+                    .testTag("notifications_identity_confirm_card")
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(NotifAccentBlue.copy(alpha = 0.12f))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Person,
+                                contentDescription = null,
+                                tint = NotifAccentBlue,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Are you \"$identifiedName\"?",
+                                color = NotifTextDark,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Confirm your identity so notifications and mentions are accurate.",
+                                color = NotifTextMuted,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        OutlinedButton(
+                            onClick = { showCorrectionDialog = true },
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("notifications_identity_confirm_no")
+                        ) {
+                            Text(
+                                text = "No",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = { onConfirmIdentity(true) },
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = NotifAccentBlue,
+                                contentColor = Color.White
+                            ),
+                            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("notifications_identity_confirm_yes")
+                        ) {
+                            Text(
+                                text = "Yes",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // Switchable Tabs: Assigned vs Mentioned
         Surface(
             color = Color.White,
@@ -439,51 +537,67 @@ fun NotificationsScreen(
             }
         }
 
-        // Identity & Current Month Scope Bar
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 22.dp, vertical = 4.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Person,
-                    contentDescription = null,
-                    tint = NotifTextMuted,
-                    modifier = Modifier.size(14.dp)
-                )
-                Text(
-                    text = if (!effectiveUserIdentity.isNullOrBlank()) {
-                        "Tracking for: $effectiveUserIdentity"
-                    } else {
-                        "Detecting your Azure DevOps profile..."
-                    },
-                    color = NotifTextMuted,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
 
-            Text(
-                text = "Change Identity",
-                color = NotifAccentBlue,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable { onOpenIdentitySettings() }
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                    .testTag("notifications_change_identity_button")
+        if (showCorrectionDialog) {
+            var correctedInput by remember(identifiedName) { mutableStateOf(identifiedName.orEmpty()) }
+            AlertDialog(
+                onDismissRequest = { showCorrectionDialog = false },
+                title = {
+                    Text(
+                        text = "Correct Your Identity",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 17.sp,
+                        color = NotifTextDark
+                    )
+                },
+                text = {
+                    Column {
+                        Text(
+                            text = "Enter your display name or email address as used in Azure DevOps:",
+                            color = NotifTextMuted,
+                            fontSize = 13.sp
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = correctedInput,
+                            onValueChange = { correctedInput = it },
+                            singleLine = true,
+                            placeholder = { Text("e.g. Jane Doe or user@company.com") },
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("notifications_correct_identity_input")
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            val trimmed = correctedInput.trim()
+                            if (trimmed.isNotEmpty()) {
+                                onSaveCorrectedIdentity(trimmed)
+                                showCorrectionDialog = false
+                            }
+                        },
+                        enabled = correctedInput.isNotBlank(),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = NotifAccentBlue),
+                        modifier = Modifier.testTag("notifications_correct_identity_save_button")
+                    ) {
+                        Text("Save", fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { showCorrectionDialog = false },
+                        modifier = Modifier.testTag("notifications_correct_identity_cancel_button")
+                    ) {
+                        Text("Cancel")
+                    }
+                }
             )
         }
+
 
         // Notifications List or Empty State
         if (activeThisMonthItems.isEmpty() && (!isShowingOlder || activeOlderItems.isEmpty())) {
@@ -530,16 +644,10 @@ fun NotificationsScreen(
                     Text(
                         text = if (isSyncingNotifications) {
                             "Checking Azure Boards for notifications..."
-                        } else if (activeOlderItems.isNotEmpty()) {
-                            if (selectedTabIndex == 0) {
-                                "No assigned items in this month ($currentMonthName)"
-                            } else {
-                                "No @mentions in this month ($currentMonthName)"
-                            }
                         } else if (selectedTabIndex == 0) {
-                            stringResource(R.string.notifications_empty_assigned_title)
+                            "Nothing Assigned This Month."
                         } else {
-                            stringResource(R.string.notifications_empty_mentioned_title)
+                            "No Mentions This Month"
                         },
                         color = NotifTextDark,
                         fontSize = 16.sp,
@@ -547,24 +655,22 @@ fun NotificationsScreen(
                         textAlign = TextAlign.Center
                     )
 
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    Text(
-                        text = if (activeOlderItems.isNotEmpty()) {
-                            "Only items from this month are shown by default to keep your notifications fresh. You have ${activeOlderItems.size} older item${if (activeOlderItems.size == 1) "" else "s"} from previous months."
-                        } else if (selectedTabIndex == 0) {
-                            stringResource(R.string.notifications_empty_assigned_subtitle)
-                        } else {
-                            stringResource(R.string.notifications_empty_mentioned_subtitle)
-                        },
-                        color = NotifTextMuted,
-                        fontSize = 13.sp,
-                        textAlign = TextAlign.Center
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
+                    if (activeOlderItems.isEmpty()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = if (selectedTabIndex == 0) {
+                                stringResource(R.string.notifications_empty_assigned_subtitle)
+                            } else {
+                                stringResource(R.string.notifications_empty_mentioned_subtitle)
+                            },
+                            color = NotifTextMuted,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    }
 
                     if (activeOlderItems.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(16.dp))
                         Button(
                             onClick = { onToggleShowOlder(true) },
                             shape = RoundedCornerShape(12.dp),
@@ -581,7 +687,7 @@ fun NotificationsScreen(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "See More Items (${activeOlderItems.size})",
+                                text = "See More Items",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -589,6 +695,7 @@ fun NotificationsScreen(
 
                         Spacer(modifier = Modifier.height(10.dp))
                     }
+
 
                     OutlinedButton(
                         onClick = onRefreshNotifications,
@@ -625,11 +732,11 @@ fun NotificationsScreen(
                     .fillMaxWidth()
                     .testTag("notifications_list_${activeCategory.lowercase()}")
             ) {
-                // "In This Month" Section Header
+                // "This Month" Section Header
                 item(key = "header_this_month") {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.Start,
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 4.dp, horizontal = 2.dp)
@@ -645,23 +752,10 @@ fun NotificationsScreen(
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
-                                text = "In This Month ($currentMonthName)",
+                                text = "This Month",
                                 color = NotifTextDark,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        Surface(
-                            color = NotifAccentBlue.copy(alpha = 0.12f),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text(
-                                text = "${activeThisMonthItems.size}",
-                                color = NotifAccentBlue,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                             )
                         }
                     }
@@ -677,9 +771,9 @@ fun NotificationsScreen(
                         ) {
                             Text(
                                 text = if (selectedTabIndex == 0) {
-                                    "No work items assigned in $currentMonthName."
+                                    "Nothing Assigned This Month."
                                 } else {
-                                    "No @mentions in $currentMonthName."
+                                    "No Mentions This Month"
                                 },
                                 color = NotifTextMuted,
                                 fontSize = 12.sp,
@@ -732,7 +826,7 @@ fun NotificationsScreen(
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = "See More Items (${activeOlderItems.size})",
+                                        text = "See More Items",
                                         color = NotifAccentBlue,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold
@@ -767,7 +861,7 @@ fun NotificationsScreen(
                                             modifier = Modifier.size(16.dp)
                                         )
                                         Text(
-                                            text = "Earlier (${activeOlderItems.size})",
+                                            text = "Past Months",
                                             color = NotifTextDark,
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.Bold
@@ -775,7 +869,7 @@ fun NotificationsScreen(
                                     }
 
                                     Text(
-                                        text = "Show Only This Month",
+                                        text = "Show Less Items",
                                         color = NotifAccentBlue,
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.SemiBold,
@@ -825,7 +919,7 @@ fun NotificationsScreen(
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = "Show Only This Month",
+                                        text = "Show Less Items",
                                         color = NotifTextDark,
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.SemiBold
@@ -835,6 +929,7 @@ fun NotificationsScreen(
                         }
                     }
                 }
+
             }
         }
     }
@@ -922,6 +1017,14 @@ private fun NotificationItemCard(
     val isTitleRtl = isAlmostPersian(item.workItemTitle)
     val isSnippetRtl = isAlmostPersian(item.messageSnippet.orEmpty())
 
+    val formattedDateTime = remember(item.epochMs, item.formattedDate) {
+        if (item.epochMs > 0L) {
+            SimpleDateFormat("yyyy-MM-dd · HH:mm", Locale.US).format(Date(item.epochMs))
+        } else {
+            item.formattedDate
+        }
+    }
+
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(16.dp),
@@ -940,7 +1043,7 @@ private fun NotificationItemCard(
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 14.dp)
         ) {
-            // Top Meta Row: Unread indicator + Category pill + Work Item ID + Timestamp
+            // Top Row: Unread indicator + Type Icon + Work Item ID + Project + Date + Time
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -949,7 +1052,7 @@ private fun NotificationItemCard(
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f, fill = false)
                 ) {
                     if (!item.isRead) {
                         Box(
@@ -960,48 +1063,21 @@ private fun NotificationItemCard(
                         )
                     }
 
-                    Surface(
-                        color = if (isMention) Color(0xFF7C3AED).copy(alpha = 0.12f) else NotifAccentBlue.copy(alpha = 0.12f),
-                        shape = RoundedCornerShape(6.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (isMention) Icons.Default.AlternateEmail else Icons.Default.AssignmentInd,
-                                contentDescription = null,
-                                tint = if (isMention) Color(0xFF7C3AED) else NotifAccentBlue,
-                                modifier = Modifier.size(12.dp)
-                            )
-                            Text(
-                                text = if (isMention) "Mentioned" else "Assigned to you",
-                                color = if (isMention) Color(0xFF7C3AED) else NotifAccentBlue,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
+                    // Work Item Type Icon (icon only, no label)
+                    Icon(
+                        imageVector = typeIcon,
+                        contentDescription = item.workItemType,
+                        tint = typeColor,
+                        modifier = Modifier.size(16.dp)
+                    )
 
-                    // Work Item Type + ID badge
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            imageVector = typeIcon,
-                            contentDescription = item.workItemType,
-                            tint = typeColor,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = "#${item.workItemId}",
-                            color = NotifTextDark,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                    // Work Item ID
+                    Text(
+                        text = "#${item.workItemId}",
+                        color = NotifTextDark,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
 
                     if (!item.teamProject.isNullOrBlank()) {
                         Text(
@@ -1014,9 +1090,10 @@ private fun NotificationItemCard(
                     }
                 }
 
-                if (item.formattedDate.isNotBlank()) {
+                // Date + Time
+                if (formattedDateTime.isNotBlank()) {
                     Text(
-                        text = item.formattedDate,
+                        text = formattedDateTime,
                         color = NotifTextMuted,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium
@@ -1085,25 +1162,12 @@ private fun NotificationItemCard(
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
-            // Bottom Row: Work Item Type Pill + State Pill
+            // Bottom Row: State Pill
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Surface(
-                    color = typeColor.copy(alpha = 0.12f),
-                    shape = RoundedCornerShape(6.dp)
-                ) {
-                    Text(
-                        text = item.workItemType,
-                        color = typeColor,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
-                }
-
                 Surface(
                     color = stateColor.copy(alpha = 0.14f),
                     shape = RoundedCornerShape(6.dp)
@@ -1131,6 +1195,7 @@ private fun NotificationItemCard(
         }
     }
 }
+
 
 internal fun highlightMentionsInNotificationText(text: String) = buildAnnotatedString {
     val mentionRegex = Regex("@<([^>\\r\\n]+)>|@[\\p{L}\\p{N}._-]+(?:\\s+[\\p{L}\\p{N}._-]+)?")

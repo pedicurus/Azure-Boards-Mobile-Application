@@ -1,53 +1,43 @@
-# Implementation Plan: Azure DevOps Markdown `@<member>` Mentions Refactoring
+# Implementation Plan: Fix Push Notifications for Discussion @Mentions
 
-## Background & Root Cause
-Currently, mentioning someone in a work item discussion does not trigger an actual mention in Azure DevOps because:
-1. **Autocomplete Format**: Selecting a candidate in the discussion composer inserts plain `@Display Name` instead of the Azure DevOps bracketed syntax `@<Display Name>`.
-2. **HTML Escaping & Missing Format Parameter**: `AzureDevOpsRepository.addWorkItemCommentOnServer` escapes `<` and `>` into `&lt;` and `&gt;`, replaces newlines with `<br/>`, and posts to the comments endpoint without `format=markdown`.
-3. **Missing Identity Resolution**: Azure DevOps Markdown comments (`?format=markdown&api-version=7.1-preview.4`) require `@<USER_GUID>` (or `@<Display Name>` / `@<email>` when matched against known project identities) to register a real mention and send notifications, and raw Markdown comments fetched back from Azure DevOps contain `@<USER_GUID>` unless resolved via `renderedText` or the member directory.
+## Problem Summary & Root Causes
+While assignment notifications worked as expected, mention push notifications failed to deliver due to three specific issues:
+1. **Self-Mention Suppression**: In `AzureDevOpsRepository`, `isJustMentionedForPush` and `shouldMarkUnread` explicitly required `!isAuthorSelf`. When you test by mentioning yourself (or commenting as "You" / your own account), the app recognized the author as yourself and intentionally suppressed push notifications.
+2. **Missing In-App Push Trigger on Comment Post/Evaluation**: In `AzureDevOpsViewModel`, when a comment is posted or loaded, `evaluateWorkItemCommentsForMentions` detected the mention in-memory, but never invoked `NotificationHelper.postSystemNotification()`, and immediately marked the notification as read. Subsequent background syncs then ignored it because it was already stored.
+3. **WIQL Syntax Error in Server Mention Discovery**: In `AzureDevOpsRepository.syncOrganizationNotifications`, the background query attempted `WHERE [System.History] CONTAINS '$token'`. In Azure DevOps WIQL, `[System.History]` requires `CONTAINS WORDS` (using `CONTAINS` triggers an HTTP 400 Bad Request error). Furthermore, work items that had new discussion comments were not being discovered if they weren't already assigned to you or pre-cached in memory.
+4. **Missing Identity GUID Retrieval**: If `detectedDisplayName` was cached from an earlier session, `getConnectionData` was skipped, leaving `detectedUserId` null. Mentions formatted by Azure as `@<USER_GUID>` would then fail to match your identity.
 
 ---
 
 ## Proposed Changes
 
-### 1. Capture & Index Azure DevOps User Identity GUIDs (`WorkItemModels.kt` & `AzureDevOpsRepository.kt`)
-- **Models (`WorkItemModels.kt`)**:
-  - Add `val assignedToId: String? = null` to `WorkItem`.
-  - Add `val authorId: String? = null` to `WorkItemComment`.
-  - Add `@param:Json(name = "renderedText") val renderedText: String? = null` and `@param:Json(name = "format") val format: String? = null` to `RawWorkItemComment`.
-  - Add `@param:Json(name = "mentions") val mentions: List<RawCommentMention>? = null` to `RawWorkItemComment` for server-returned mention metadata.
-- **Identity Directory (`AzureDevOpsRepository.kt`)**:
-  - Extract and index identity records (`id`, `displayName`, `uniqueName`, `imageUrl`) from `System.AssignedTo`, `System.CreatedBy`, `System.ChangedBy`, and discussion comment `createdBy` across loaded work items and comments.
-  - Populate `assignedToId` on `WorkItem` and `authorId` on `WorkItemComment`.
+### 1. Enable Push Notifications for Self-Mentions & Testing (`AzureDevOpsRepository.kt`)
+- In `evaluateWorkItemCommentsForMentions` and `syncOrganizationNotifications`:
+  - Update `isJustMentionedForPush` so mentions of your account trigger push notifications even if you authored the comment.
+  - Allow self-mentions to be flagged as unread and added to `newlyTriggeredNotifications`.
+  - Maintain detection of both `@<DisplayName>`, `@<email>`, and `@<USER_GUID>` tokens.
 
-### 2. Refactor Comment Submission & Fetching for Markdown (`AzureDevOpsApi.kt` & `AzureDevOpsRepository.kt`)
-- **API Endpoints (`AzureDevOpsApi.kt`)**:
-  - Update `addWorkItemComment` to pass `@Query("format") format: String = "markdown"` and `@Query("api-version") apiVersion: String = "7.1-preview.4"`.
-  - Update `getWorkItemComments` to pass `@Query("\$expand") expand: String = "renderedText"` and `@Query("api-version") apiVersion: String = "7.1-preview.4"` so Azure DevOps returns both raw Markdown text and resolved `renderedText`.
-- **Markdown Payload Serialization (`AzureDevOpsRepository.kt`)**:
-  - In `addWorkItemCommentOnServer`:
-    - Preserve raw Markdown formatting (do **not** escape `<` and `>` into `&lt;` / `&gt;` or convert `\n` to `<br/>`).
-    - Parse all `@<member>` tokens (matching display name or email/uniqueName in the known identity directory) and resolve them to `@<USER_GUID>` when the user's Azure DevOps GUID is known, or preserve `@<member>` so Azure Boards Markdown processing handles it natively.
-- **Markdown Mention Decoding (`AzureDevOpsRepository.kt`)**:
-  - In `mapRawCommentToDomain`:
-    - Resolve any `@<GUID>` tokens in `raw.text` back to `@<Display Name>` using `raw.renderedText` (`data-vss-mention` display text) and the indexed identity directory, so the app never displays raw GUIDs and mention detection in notifications continues to match the current user accurately.
+### 2. Fix WIQL Server Query & Expand Recently Active Items (`AzureDevOpsRepository.kt`)
+- Update the WIQL query syntax from `CONTAINS` to `CONTAINS WORDS` for `[System.History]`.
+- Add a query for recently changed items:
+  `SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= @Today - 14 AND [System.State] <> 'Removed' ORDER BY [System.ChangedDate] DESC`
+  to guarantee that any work item with recent discussion comments is scanned for mentions, even if it is not assigned to you.
+- Always fetch and update `detectedUserId` from `getConnectionData` if `detectedUserId` is missing.
 
-### 3. Update Discussion Composer & Mention Badge Rendering (`WorkItemComponents.kt` & `NotificationsScreen.kt`)
-- **Composer Autocomplete (`WorkItemComponents.kt`)**:
-  - Support triggering the `@` autocomplete menu when the user types either `@query` or `@<query`.
-  - When a member is selected from the autocomplete popup, insert `@<Display Name> ` into the comment input box.
-  - Keep `@<Display Name>` visible while editing in the input field.
-- **Clean `@Display Name` Pill Rendering (`WorkItemComponents.kt` & `NotificationsScreen.kt`)**:
-  - Update `formatCommentWithMentions` and `highlightMentionsInNotificationText` so that posted comments and notification previews strip the surrounding `<` and `>` brackets (as well as any resolved `@<GUID>` tokens) and render a clean `@Display Name` highlighted pill badge.
+### 3. Trigger Device Push Notification on Comment Addition & Evaluation (`AzureDevOpsViewModel.kt`)
+- In `evaluateWorkItemCommentsForMentions` within `AzureDevOpsViewModel.kt`:
+  - When new mentions are found in `evaluateWorkItemCommentsForMentions`, invoke `NotificationHelper.postSystemNotification(appContext, notif)` for each item in `newlyTriggeredNotifications` if push notifications are enabled.
+- In `addCommentToWorkItem`:
+  - When the comment you posted contains a mention of yourself (e.g. `@<My Name>` or `@<Email>`), evaluate and immediately post the system push notification so you see instant device feedback.
 
 ---
 
 ## Verification Plan
-- **Unit Tests**:
-  - Add unit tests in `MentionFormattingTest.kt` verifying:
-    1. Autocomplete token extraction for both `@` and `@<` prefixes and insertion of `@<Display Name> `.
-    2. Outgoing comment serialization from `@<Display Name>` to `@<USER_GUID>` in Markdown mode without HTML-escaping angle brackets.
-    3. Incoming comment normalization from `@<USER_GUID>` + `renderedText` to human-readable display names and clean `@Display Name` badge rendering.
-    4. Notification mention detection (`commentMentionsIdentity`) when comments contain `@<Display Name>` or `@<USER_GUID>`.
-- **Build Check**:
-  - Run `gradle :app:testDebugUnitTest` and `compile_applet` to confirm zero build or test regressions.
+1. **Unit Tests**:
+   - Add unit tests in `MentionFormattingTest.kt` verifying:
+     - `commentMentionsIdentity` accurately flags self-mentions.
+     - Self-mentions are included in `newlyTriggeredNotifications` when evaluated in `evaluateWorkItemCommentsForMentions`.
+     - WIQL token formation uses valid `CONTAINS WORDS` syntax.
+2. **Build & Automated Execution**:
+   - Run `gradle :app:testDebugUnitTest` to ensure all tests pass.
+   - Run `compile_applet` to confirm a clean build.

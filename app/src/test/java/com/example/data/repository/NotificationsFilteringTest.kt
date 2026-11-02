@@ -177,7 +177,7 @@ class NotificationsFilteringTest {
         composeTestRule.onNodeWithText("This Month Feature Task", useUnmergedTree = true).assertExists()
         composeTestRule.onNodeWithText("Ancient Task From 3 Years Ago", useUnmergedTree = true).assertDoesNotExist()
 
-        // Scroll to and click "See More Items (1)" button
+        // Scroll to and click "See More Items" button
         composeTestRule.onNodeWithTag("notifications_list_assigned")
             .performScrollToNode(androidx.compose.ui.test.hasTestTag("notifications_see_more_button"))
         composeTestRule.onNodeWithTag("notifications_see_more_button").assertExists()
@@ -189,4 +189,82 @@ class NotificationsFilteringTest {
             .performScrollToNode(androidx.compose.ui.test.hasTestTag("notification_card_assigned_contoso_99"))
         composeTestRule.onNodeWithText("Ancient Task From 3 Years Ago", useUnmergedTree = true).assertExists()
     }
+
+    @Test
+    fun notificationsScreen_unconfirmedIdentity_showsAreYouPromptAndConfirm() {
+        var confirmed = false
+        composeTestRule.setContent {
+            NotificationsScreen(
+                organization = "contoso",
+                effectiveUserIdentity = "Farhad",
+                assignedNotifications = emptyList(),
+                mentionedNotifications = emptyList(),
+                isSyncingNotifications = false,
+                isIdentityConfirmed = false,
+                onConfirmIdentity = { confirmed = it },
+                onSaveCorrectedIdentity = {},
+                onRefreshNotifications = {},
+                onNotificationClick = {},
+                onMarkAllRead = {},
+                onOpenIdentitySettings = {},
+                onClose = {}
+            )
+        }
+
+        // Verify the prompt appears
+        composeTestRule.onNodeWithTag("notifications_identity_confirm_card").assertExists()
+        composeTestRule.onNodeWithText("Are you \"Farhad\"?", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("notifications_identity_confirm_yes").assertExists()
+        composeTestRule.onNodeWithTag("notifications_identity_confirm_no").assertExists()
+
+        // Click Yes
+        composeTestRule.onNodeWithTag("notifications_identity_confirm_yes").performClick()
+        assertTrue("onConfirmIdentity should be invoked with true", confirmed)
+    }
+
+    @Test
+    fun notificationsScreen_newUIRefinements_headerAndCardLabels() {
+        val startOfMonth = computeStartOfCurrentMonthEpochMs()
+        val item = AppNotificationItem(
+            id = "assigned_contoso_201",
+            organization = "contoso",
+            workItemId = 201,
+            workItemTitle = "Clean Up Refactor",
+            workItemType = "Task",
+            workItemState = "Active",
+            category = NotificationCategory.ASSIGNED,
+            formattedDate = "2026-11-02 · 14:30",
+            epochMs = startOfMonth + 3600000L,
+            isRead = false
+        )
+
+        composeTestRule.setContent {
+            NotificationsScreen(
+                organization = "contoso",
+                effectiveUserIdentity = "Farhad",
+                assignedNotifications = listOf(item),
+                mentionedNotifications = emptyList(),
+                isSyncingNotifications = false,
+                isIdentityConfirmed = true,
+                onConfirmIdentity = {},
+                onSaveCorrectedIdentity = {},
+                onRefreshNotifications = {},
+                onNotificationClick = {},
+                onMarkAllRead = {},
+                onOpenIdentitySettings = {},
+                onClose = {}
+            )
+        }
+
+        // "This Month" header must exist without month/year or unread counts
+        composeTestRule.onNodeWithText("This Month", useUnmergedTree = true).assertExists()
+
+        // Card should NOT have "Assigned to you" text label
+        composeTestRule.onNodeWithText("Assigned to you", useUnmergedTree = true).assertDoesNotExist()
+
+        // Work Item ID and title exist
+        composeTestRule.onNodeWithText("#201", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithText("Clean Up Refactor", useUnmergedTree = true).assertExists()
+    }
 }
+

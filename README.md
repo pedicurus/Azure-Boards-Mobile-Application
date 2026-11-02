@@ -126,6 +126,20 @@ app/src/main/java/com/example/
 
 ---
 
+## 📥 Releases & APK Download
+
+You can find pre-built, ready-to-install APK packages directly in the [`releases/`](releases/) directory:
+
+- **Latest APK**: [`releases/azure-boards-v3.0.apk`](releases/azure-boards-v3.0.apk)
+
+### Publishing on GitHub Releases:
+1. In your GitHub repository, click on **Releases** > **Draft a new release**.
+2. Tag your version (e.g., `v3.0`).
+3. Attach `releases/azure-boards-v3.0.apk` as a binary asset.
+4. Click **Publish release**.
+
+---
+
 ## 🔒 Security & Privacy
 
 - **Direct Connections**: Network requests communicate directly with official Azure DevOps APIs (`https://dev.azure.com/{organization}/_apis/...`).

@@ -111,6 +111,8 @@ fun AzureBoardsApp(
     val isSyncingNotifications by viewModel.isSyncingNotifications.collectAsStateWithLifecycle()
     val detectedUserIdentity by viewModel.detectedUserIdentity.collectAsStateWithLifecycle()
     val manualIdentityOverride by viewModel.manualIdentityOverride.collectAsStateWithLifecycle()
+    val isIdentityConfirmed by viewModel.isIdentityConfirmed.collectAsStateWithLifecycle()
+
 
     val isConnected = connectionStatus is ConnectionStatus.Connected || organizations.isNotEmpty()
     val activeOrganization = (connectionStatus as? ConnectionStatus.Connected)?.organization
@@ -169,7 +171,11 @@ fun AzureBoardsApp(
                 isSyncingNotifications = isSyncingNotifications,
                 detectedUserIdentity = detectedUserIdentity,
                 manualIdentityOverride = manualIdentityOverride,
+                isIdentityConfirmed = isIdentityConfirmed,
+                onConfirmIdentity = viewModel::confirmUserIdentity,
+                onSaveCorrectedIdentity = viewModel::saveCorrectedIdentity,
                 onManualIdentityOverrideChange = viewModel::setManualIdentityOverride,
+
                 onRefreshNotifications = { viewModel.syncNotificationsForActiveOrganization(postDeviceNotifications = true) },
                 onNotificationClick = viewModel::onNotificationClicked,
                 onMarkAllNotificationsRead = viewModel::markAllNotificationsRead,

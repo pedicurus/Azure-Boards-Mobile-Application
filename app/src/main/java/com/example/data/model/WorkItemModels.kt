@@ -494,6 +494,8 @@ data class CachedNotificationsState(
     val detectedEmail: String? = null,
     val detectedUserId: String? = null,
     val manualIdentityOverride: String? = null,
+    val isIdentityConfirmed: Boolean = false,
+    val confirmedForPatHash: String? = null,
     val notifications: List<AppNotificationItem> = emptyList(),
     val notifiedNotificationIds: List<String> = emptyList(),
     val baselineAssignedInitialized: Boolean = false,
@@ -501,3 +503,4 @@ data class CachedNotificationsState(
     val knownAssignedItemStates: Map<String, String> = emptyMap(),
     val lastCheckedChangedDateIso: String? = null
 )
+

@@ -3585,28 +3585,76 @@ class AzureDevOpsRepository(context: Context) {
             getCachedNotificationsStateSync(organization)
         }
 
+    fun computePatCredentialHash(organization: String, pat: String): String {
+        val cleanOrg = extractOrganization(organization).lowercase().trim()
+        val cleanPat = pat.trim()
+        val combined = "$cleanOrg:$cleanPat"
+        return try {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            val bytes = digest.digest(combined.toByteArray(Charsets.UTF_8))
+            bytes.take(16).joinToString("") { "%02x".format(it) }
+        } catch (_: Exception) {
+            cleanPat.hashCode().toString()
+        }
+    }
+
     suspend fun setManualIdentityOverride(
         organization: String,
-        identityOverride: String?
+        identityOverride: String?,
+        pat: String? = null
     ): com.example.data.model.CachedNotificationsState = withContext(Dispatchers.IO) {
         val normOrg = extractOrganization(organization)
         val current = getCachedNotificationsStateSync(normOrg)
         val cleanOverride = identityOverride?.trim()?.takeIf { it.isNotEmpty() }
+        val resolvedPat = pat?.trim()?.takeIf { it.isNotEmpty() } ?: getConfiguredPat()
+        val patHash = if (resolvedPat.isNotEmpty()) computePatCredentialHash(normOrg, resolvedPat) else current.confirmedForPatHash
         // Reset baselines when the user switches identity override so their Assigned & Mentioned tabs rebuild for that identity
         val identityChanged = !current.manualIdentityOverride.equals(cleanOverride, ignoreCase = true)
         val updated = if (identityChanged) {
             current.copy(
                 manualIdentityOverride = cleanOverride,
+                isIdentityConfirmed = true,
+                confirmedForPatHash = patHash,
                 baselineAssignedInitialized = false,
                 baselineMentionsInitialized = false,
                 knownAssignedItemStates = emptyMap()
             )
         } else {
-            current.copy(manualIdentityOverride = cleanOverride)
+            current.copy(
+                manualIdentityOverride = cleanOverride,
+                isIdentityConfirmed = true,
+                confirmedForPatHash = patHash
+            )
         }
         localStore.saveNotificationsState(updated)
         updated
     }
+
+    suspend fun confirmUserIdentity(
+        organization: String,
+        pat: String,
+        confirmed: Boolean
+    ): com.example.data.model.CachedNotificationsState = withContext(Dispatchers.IO) {
+        val normOrg = extractOrganization(organization)
+        val current = getCachedNotificationsStateSync(normOrg)
+        val cleanPat = pat.trim().ifEmpty { getConfiguredPat() }
+        val patHash = computePatCredentialHash(normOrg, cleanPat)
+        val updated = current.copy(
+            isIdentityConfirmed = confirmed,
+            confirmedForPatHash = if (confirmed) patHash else null
+        )
+        localStore.saveNotificationsState(updated)
+        updated
+    }
+
+    suspend fun saveCorrectedIdentity(
+        organization: String,
+        pat: String,
+        correctedName: String
+    ): com.example.data.model.CachedNotificationsState = withContext(Dispatchers.IO) {
+        setManualIdentityOverride(organization, correctedName, pat)
+    }
+
 
     suspend fun markNotificationRead(
         organization: String,
@@ -3857,7 +3905,7 @@ class AzureDevOpsRepository(context: Context) {
                         ?: System.currentTimeMillis()
                     val isThisMonth = epoch >= startOfMonthMs
                     val isJustMentioned = epoch >= recentPushCutoffMs && isThisMonth
-                    val shouldMarkUnread = allowSystemNotification && !isAuthorSelf && isThisMonth
+                    val shouldMarkUnread = allowSystemNotification && isThisMonth
                     val notifItem = com.example.data.model.AppNotificationItem(
                         id = notifId,
                         organization = normOrg,
@@ -3923,6 +3971,16 @@ class AzureDevOpsRepository(context: Context) {
         }
 
         var currentState = getCachedNotificationsStateSync(normOrg)
+        val currentPatHash = computePatCredentialHash(normOrg, cleanPat)
+        if (currentState.confirmedForPatHash != null && currentState.confirmedForPatHash != currentPatHash) {
+            currentState = currentState.copy(
+                isIdentityConfirmed = false,
+                confirmedForPatHash = null,
+                detectedDisplayName = null,
+                detectedEmail = null,
+                detectedUserId = null
+            )
+        }
         val service = AzureDevOpsClient.createService(cleanPat)
 
         // 1. Resolve Authenticated User Identity from _apis/connectionData if not yet detected
@@ -3930,7 +3988,8 @@ class AzureDevOpsRepository(context: Context) {
         var detectedEmail = currentState.detectedEmail
         var detectedUserId = currentState.detectedUserId
 
-        if (detectedName.isNullOrBlank()) {
+
+        if (detectedName.isNullOrBlank() || detectedUserId.isNullOrBlank()) {
             runCatching {
                 val connResp = service.getConnectionData(organization = normOrg)
                 if (connResp.isSuccessful) {
@@ -4020,7 +4079,8 @@ class AzureDevOpsRepository(context: Context) {
 
             for (token in mentionQueryTokens.distinct().take(4)) {
                 runCatching {
-                    val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.History] CONTAINS '$token' ORDER BY [System.ChangedDate] DESC"
+                    val cleanToken = token.replace("'", "''")
+                    val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.History] CONTAINS WORDS '$cleanToken' ORDER BY [System.ChangedDate] DESC"
                     val resp = service.queryWorkItems(
                         organization = normOrg,
                         request = WiqlQueryRequest(query = wiql)
@@ -4028,6 +4088,16 @@ class AzureDevOpsRepository(context: Context) {
                     resp.body()?.workItems.orEmpty().map { it.id }.forEach { mentionServerIds.add(it) }
                 }
                 if (mentionServerIds.size >= 40) break
+            }
+
+            // Also query recently changed work items so any active item with new comments is checked for mentions
+            runCatching {
+                val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= @Today - 14 AND [System.State] <> 'Removed' ORDER BY [System.ChangedDate] DESC"
+                val resp = service.queryWorkItems(
+                    organization = normOrg,
+                    request = WiqlQueryRequest(query = wiql)
+                )
+                resp.body()?.workItems.orEmpty().map { it.id }.take(50).forEach { mentionServerIds.add(it) }
             }
         }
 
@@ -4232,8 +4302,8 @@ class AzureDevOpsRepository(context: Context) {
                             if (existingMention == null) {
                                 val epoch = parseIsoToEpochMs(comment.createdDate).takeIf { it > 0L } ?: 0L
                                 val isRecentMention = epoch >= startOfCurrentMonthMs
-                                val isJustMentionedForPush = !isInitialMentionsBaseline && !isAuthorSelf && epoch >= recentPushCutoffMs
-                                val shouldMarkUnread = !isInitialMentionsBaseline && !isAuthorSelf && isRecentMention
+                                val isJustMentionedForPush = (!isInitialMentionsBaseline || epoch >= System.currentTimeMillis() - 15 * 60 * 1000L) && epoch >= recentPushCutoffMs
+                                val shouldMarkUnread = (!isInitialMentionsBaseline || epoch >= System.currentTimeMillis() - 15 * 60 * 1000L) && isRecentMention
                                 val notifItem = com.example.data.model.AppNotificationItem(
                                     id = notifId,
                                     organization = normOrg,
