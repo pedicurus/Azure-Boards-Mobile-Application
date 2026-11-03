@@ -51,76 +51,10 @@ class AzureNotificationsRepository(
             getCachedNotificationsStateSync(organization)
         }
 
-    fun computePatCredentialHash(organization: String, pat: String): String {
-        val cleanOrg = AzureAccountRepository.extractOrganization(organization).lowercase().trim()
-        val cleanPat = pat.trim()
-        val combined = "$cleanOrg:$cleanPat"
-        return try {
-            val digest = MessageDigest.getInstance("SHA-256")
-            val bytes = digest.digest(combined.toByteArray(Charsets.UTF_8))
-            bytes.take(16).joinToString("") { "%02x".format(it) }
-        } catch (_: Exception) {
-            cleanPat.hashCode().toString()
-        }
-    }
 
-    suspend fun setManualIdentityOverride(
-        organization: String,
-        identityOverride: String?,
-        pat: String? = null,
-        configuredPatProvider: (() -> String)? = null
-    ): CachedNotificationsState = withContext(Dispatchers.IO) {
-        val normOrg = AzureAccountRepository.extractOrganization(organization)
-        val current = getCachedNotificationsStateSync(normOrg)
-        val cleanOverride = identityOverride?.trim()?.takeIf { it.isNotEmpty() }
-        val resolvedPat = pat?.trim()?.takeIf { it.isNotEmpty() } ?: configuredPatProvider?.invoke().orEmpty()
-        val patHash = if (resolvedPat.isNotEmpty()) computePatCredentialHash(normOrg, resolvedPat) else current.confirmedForPatHash
-        val identityChanged = !current.manualIdentityOverride.equals(cleanOverride, ignoreCase = true)
-        val updated = if (identityChanged) {
-            current.copy(
-                manualIdentityOverride = cleanOverride,
-                isIdentityConfirmed = true,
-                confirmedForPatHash = patHash,
-                baselineAssignedInitialized = false,
-                baselineMentionsInitialized = false,
-                knownAssignedItemStates = emptyMap()
-            )
-        } else {
-            current.copy(
-                manualIdentityOverride = cleanOverride,
-                isIdentityConfirmed = true,
-                confirmedForPatHash = patHash
-            )
-        }
-        localStore.saveNotificationsState(updated)
-        updated
-    }
 
-    suspend fun confirmUserIdentity(
-        organization: String,
-        pat: String,
-        confirmed: Boolean,
-        configuredPatProvider: (() -> String)? = null
-    ): CachedNotificationsState = withContext(Dispatchers.IO) {
-        val normOrg = AzureAccountRepository.extractOrganization(organization)
-        val current = getCachedNotificationsStateSync(normOrg)
-        val cleanPat = pat.trim().ifEmpty { configuredPatProvider?.invoke().orEmpty() }
-        val patHash = computePatCredentialHash(normOrg, cleanPat)
-        val updated = current.copy(
-            isIdentityConfirmed = confirmed,
-            confirmedForPatHash = if (confirmed) patHash else null
-        )
-        localStore.saveNotificationsState(updated)
-        updated
-    }
-
-    suspend fun saveCorrectedIdentity(
-        organization: String,
-        pat: String,
-        correctedName: String,
-        configuredPatProvider: (() -> String)? = null
-    ): CachedNotificationsState = withContext(Dispatchers.IO) {
-        setManualIdentityOverride(organization, correctedName, pat, configuredPatProvider)
+    suspend fun saveNotificationsStateForTesting(state: CachedNotificationsState) = withContext(Dispatchers.IO) {
+        localStore.saveNotificationsState(state)
     }
 
     suspend fun markNotificationRead(
@@ -330,8 +264,7 @@ class AzureNotificationsRepository(
     ): NotificationSyncOutcome = withContext(Dispatchers.IO) {
         val normOrg = AzureAccountRepository.extractOrganization(organization)
         val currentState = getCachedNotificationsStateSync(normOrg)
-        val effectiveName = currentState.manualIdentityOverride?.takeIf { it.isNotBlank() }
-            ?: currentState.detectedDisplayName
+        val effectiveName = currentState.detectedDisplayName
         val detectedEmail = currentState.detectedEmail
         val detectedUserId = currentState.detectedUserId
 
@@ -412,16 +345,6 @@ class AzureNotificationsRepository(
         }
 
         var currentState = getCachedNotificationsStateSync(normOrg)
-        val currentPatHash = computePatCredentialHash(normOrg, cleanPat)
-        if (currentState.confirmedForPatHash != null && currentState.confirmedForPatHash != currentPatHash) {
-            currentState = currentState.copy(
-                isIdentityConfirmed = false,
-                confirmedForPatHash = null,
-                detectedDisplayName = null,
-                detectedEmail = null,
-                detectedUserId = null
-            )
-        }
         val service = AzureDevOpsClient.createService(cleanPat)
 
         var detectedName = currentState.detectedDisplayName
@@ -453,49 +376,31 @@ class AzureNotificationsRepository(
             email = detectedEmail
         )
 
-        val manualOverride = currentState.manualIdentityOverride?.trim()?.takeIf { it.isNotEmpty() }
         val newlyHydratedItems = mutableListOf<WorkItem>()
         val itemsById = knownWorkItems.associateBy { it.id }.toMutableMap()
 
         var assignedQuerySucceeded = false
-        val assignedToMeServerIds = if (manualOverride == null) {
-            runCatching {
-                val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] = @Me AND [System.State] <> 'Removed' ORDER BY [System.ChangedDate] DESC"
-                val resp = service.queryWorkItems(
-                    organization = normOrg,
-                    request = WiqlQueryRequest(query = wiql)
-                )
-                if (resp.isSuccessful) {
-                    assignedQuerySucceeded = true
-                    resp.body()?.workItems.orEmpty().map { it.id }.take(100)
-                } else {
-                    emptyList()
-                }
-            }.getOrDefault(emptyList())
-        } else {
-            val escapedOverride = manualOverride.replace("'", "''")
-            runCatching {
-                val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] CONTAINS '$escapedOverride' AND [System.State] <> 'Removed' ORDER BY [System.ChangedDate] DESC"
-                val resp = service.queryWorkItems(
-                    organization = normOrg,
-                    request = WiqlQueryRequest(query = wiql)
-                )
-                if (resp.isSuccessful) {
-                    assignedQuerySucceeded = true
-                    resp.body()?.workItems.orEmpty().map { it.id }.take(100)
-                } else {
-                    emptyList()
-                }
-            }.getOrDefault(emptyList())
-        }
+        val assignedToMeServerIds = runCatching {
+            val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] = @Me AND [System.State] <> 'Removed' ORDER BY [System.ChangedDate] DESC"
+            val resp = service.queryWorkItems(
+                organization = normOrg,
+                request = WiqlQueryRequest(query = wiql)
+            )
+            if (resp.isSuccessful) {
+                assignedQuerySucceeded = true
+                resp.body()?.workItems.orEmpty().map { it.id }.take(100)
+            } else {
+                emptyList()
+            }
+        }.getOrDefault(emptyList())
 
-        val effectiveIdentityName = manualOverride ?: detectedName
+        val effectiveIdentityName = detectedName
 
         val mentionServerIds = mutableSetOf<Int>()
         if (!effectiveIdentityName.isNullOrBlank() || !detectedEmail.isNullOrBlank() || !detectedUserId.isNullOrBlank()) {
             val mentionQueryTokens = mutableListOf<String>()
             val escapedUserId = detectedUserId?.replace("'", "''")?.trim()
-            if (!escapedUserId.isNullOrBlank() && manualOverride == null) {
+            if (!escapedUserId.isNullOrBlank()) {
                 mentionQueryTokens.add(escapedUserId)
             }
             val escapedName = effectiveIdentityName?.replace("'", "''")?.trim()
@@ -551,7 +456,7 @@ class AzureNotificationsRepository(
             }
         }
 
-        if (detectedName.isNullOrBlank() && manualOverride == null && assignedToMeServerIds.isNotEmpty()) {
+        if (detectedName.isNullOrBlank() && assignedToMeServerIds.isNotEmpty()) {
             val firstMeItem = assignedToMeServerIds.mapNotNull { itemsById[it] }
                 .firstOrNull { !it.assignedToName.isNullOrBlank() && !it.isUnassigned }
             if (firstMeItem != null) {
@@ -562,7 +467,7 @@ class AzureNotificationsRepository(
             }
         }
 
-        val resolvedEffectiveName = manualOverride ?: detectedName
+        val resolvedEffectiveName = detectedName
         val assignedServerIdSet = assignedToMeServerIds.toSet()
 
         val allAssignedItems = itemsById.values.filter { item ->
@@ -570,25 +475,17 @@ class AzureNotificationsRepository(
             if (item.isUnassigned) return@filter false
             if (item.normStateLower == "removed") return@filter false
 
-            if (assignedQuerySucceeded && manualOverride == null) {
-                item.id in assignedServerIdSet && (
-                    (resolvedEffectiveName.isNullOrBlank() && detectedEmail.isNullOrBlank()) ||
-                        matchesUserIdentity(
-                            candidateName = item.assignedToName,
-                            candidateEmail = item.assignedToEmail,
-                            effectiveDisplayName = resolvedEffectiveName,
-                            detectedEmail = detectedEmail
-                        )
-                    )
+            if (assignedQuerySucceeded) {
+                item.id in assignedServerIdSet
             } else if (!resolvedEffectiveName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) {
                 matchesUserIdentity(
                     candidateName = item.assignedToName,
                     candidateEmail = item.assignedToEmail,
                     effectiveDisplayName = resolvedEffectiveName,
-                    detectedEmail = if (manualOverride == null) detectedEmail else null
+                    detectedEmail = detectedEmail
                 )
             } else {
-                false
+                item.id in assignedServerIdSet
             }
         }.sortedWith(
             compareByDescending<WorkItem> { parseIsoToEpochMs(it.changedDate ?: it.createdDate) }

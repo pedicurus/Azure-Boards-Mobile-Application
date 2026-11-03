@@ -5,7 +5,6 @@ import com.example.data.model.CachedNotificationsState
 import com.example.data.model.CachedOrganizationMetadata
 import com.example.data.model.CachedOrganizationSnapshot
 import com.squareup.moshi.Moshi
-import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -26,7 +25,6 @@ class WorkItemLocalStore(context: Context) {
     }
 
     private val moshi: Moshi = Moshi.Builder()
-        .addLast(KotlinJsonAdapterFactory())
         .build()
 
     private val snapshotAdapter = moshi.adapter(CachedOrganizationSnapshot::class.java)

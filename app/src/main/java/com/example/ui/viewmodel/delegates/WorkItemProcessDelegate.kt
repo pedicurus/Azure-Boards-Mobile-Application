@@ -78,13 +78,22 @@ class WorkItemProcessDelegate(
             val backlogLevels = backlogMeta.orderedBacklogLevels
 
             if (processHierarchy.isNotEmpty()) {
-                _projectProcessMap.value = _projectProcessMap.value + (scopedKey to processHierarchy)
+                val cleanedMap = _projectProcessMap.value.filterKeys { k ->
+                    !k.equals(scopedKey, ignoreCase = true) && !k.equals(cleanProject, ignoreCase = true)
+                }
+                _projectProcessMap.value = cleanedMap + (scopedKey to processHierarchy)
             }
             if (categoryMap.isNotEmpty()) {
-                _projectCategoryMap.value = _projectCategoryMap.value + (scopedKey to categoryMap)
+                val cleanedCat = _projectCategoryMap.value.filterKeys { k ->
+                    !k.equals(scopedKey, ignoreCase = true) && !k.equals(cleanProject, ignoreCase = true)
+                }
+                _projectCategoryMap.value = cleanedCat + (scopedKey to categoryMap)
             }
             if (backlogLevels.isNotEmpty()) {
-                _projectBacklogLevelsMap.value = _projectBacklogLevelsMap.value + (scopedKey to backlogLevels)
+                val cleanedLevels = _projectBacklogLevelsMap.value.filterKeys { k ->
+                    !k.equals(scopedKey, ignoreCase = true) && !k.equals(cleanProject, ignoreCase = true)
+                }
+                _projectBacklogLevelsMap.value = cleanedLevels + (scopedKey to backlogLevels)
             }
             if (areas.isNotEmpty()) {
                 _projectAreasMap.value = _projectAreasMap.value + (scopedKey to areas)

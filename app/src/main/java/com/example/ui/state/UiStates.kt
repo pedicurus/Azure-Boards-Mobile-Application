@@ -1,5 +1,6 @@
 package com.example.ui.state
 
+import androidx.compose.runtime.Immutable
 import com.example.data.model.AppNotificationItem
 import com.example.data.model.OrganizationAccount
 import com.example.data.model.WorkItem
@@ -9,6 +10,7 @@ import com.example.ui.ConnectionStatus
 /**
  * Consolidated UI state for organization connection, account management, and default project settings.
  */
+@Immutable
 data class ConnectionUiState(
     val connectionStatus: ConnectionStatus = ConnectionStatus.Disconnected,
     val organizations: List<OrganizationAccount> = emptyList(),
@@ -35,6 +37,7 @@ data class ConnectionUiState(
 /**
  * Consolidated UI state for the Work Items board, filters, background sync, and selected item details.
  */
+@Immutable
 data class WorkItemsUiState(
     val organization: String = "",
     val workItems: List<WorkItem> = emptyList(),
@@ -63,20 +66,19 @@ data class WorkItemsUiState(
     val syncStatusText: String? = null,
     val hasMoreItems: Boolean = false,
     val selectedWorkItem: WorkItem? = null,
+    val selectedWorkItemParent: WorkItem? = null,
     val childWorkItems: List<WorkItem> = emptyList(),
     val selectedWorkItemComments: List<WorkItemComment> = emptyList(),
     val isLoadingComments: Boolean = false
 )
 
 /**
- * Consolidated UI state for Assigned & Mentioned notifications and user identity verification.
+ * Consolidated UI state for Assigned & Mentioned notifications.
  */
+@Immutable
 data class NotificationsUiState(
     val assignedNotifications: List<AppNotificationItem> = emptyList(),
     val mentionedNotifications: List<AppNotificationItem> = emptyList(),
     val unreadNotificationsCount: Int = 0,
-    val isSyncingNotifications: Boolean = false,
-    val detectedUserIdentity: String? = null,
-    val manualIdentityOverride: String? = null,
-    val isIdentityConfirmed: Boolean = false
+    val isSyncingNotifications: Boolean = false
 )

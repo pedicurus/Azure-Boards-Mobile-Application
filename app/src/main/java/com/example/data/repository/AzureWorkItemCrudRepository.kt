@@ -657,4 +657,197 @@ class AzureWorkItemCrudRepository {
             Result.failure(e)
         }
     }
+
+    /**
+     * Creates a new parent work item in Azure DevOps and links [childId] to it
+     * using System.LinkTypes.Hierarchy-Forward on the parent or Hierarchy-Reverse on the child.
+     */
+    suspend fun createParentWorkItemOnServer(
+        organization: String,
+        pat: String,
+        project: String,
+        childId: Int,
+        title: String,
+        parentType: String,
+        desiredState: String? = null
+    ): Result<WorkItem> = withContext(Dispatchers.IO) {
+        val normalizedOrg = AzureAccountRepository.extractOrganization(organization)
+        if (normalizedOrg.isBlank() || pat.isBlank() || project.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Missing Azure DevOps credentials."))
+        }
+
+        try {
+            val service = AzureDevOpsClient.createService(pat)
+            val childUrl = "https://dev.azure.com/$normalizedOrg/_apis/wit/workItems/$childId"
+            val createOps = listOf(
+                JsonPatchOperation(
+                    op = "add",
+                    path = "/fields/System.Title",
+                    value = title.trim()
+                ),
+                JsonPatchOperation(
+                    op = "add",
+                    path = "/relations/-",
+                    value = mapOf(
+                        "rel" to "System.LinkTypes.Hierarchy-Forward",
+                        "url" to childUrl
+                    )
+                )
+            )
+
+            val response = service.createWorkItem(
+                organization = normalizedOrg,
+                project = project,
+                type = parentType,
+                patchBody = AzureDevOpsClient.createPatchRequestBody(createOps)
+            )
+
+            if (!response.isSuccessful) {
+                return@withContext Result.failure(
+                    Exception("Failed to create parent work item (${response.code()}): ${response.message()}")
+                )
+            }
+
+            val createdRaw = response.body()
+                ?: return@withContext Result.failure(Exception("Empty response when creating parent work item."))
+
+            val createdId = createdRaw.id
+            var currentRawState = (createdRaw.fields["System.State"] as? String)?.trim()
+                ?: desiredState?.trim()?.takeIf { it.isNotEmpty() }
+                ?: "New"
+
+            if (!desiredState.isNullOrBlank() && !currentRawState.equals(desiredState.trim(), ignoreCase = true)) {
+                val statePatchOps = listOf(
+                    JsonPatchOperation(
+                        op = "add",
+                        path = "/fields/System.State",
+                        value = desiredState.trim()
+                    )
+                )
+                val stateResp = try {
+                    service.updateWorkItem(
+                        organization = normalizedOrg,
+                        id = createdId,
+                        patchBody = AzureDevOpsClient.createPatchRequestBody(statePatchOps)
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+                if (stateResp?.isSuccessful == true) {
+                    currentRawState = desiredState.trim()
+                }
+            }
+
+            val f = createdRaw.fields
+            val boardOrder = (f["Microsoft.VSTS.Common.StackRank"] as? Number)?.toDouble()
+                ?: (f["Microsoft.VSTS.Common.BacklogPriority"] as? Number)?.toDouble()
+
+            Result.success(
+                WorkItem(
+                    id = createdId,
+                    title = (f["System.Title"] as? String)?.trim() ?: title.trim(),
+                    workItemType = (f["System.WorkItemType"] as? String)?.trim() ?: parentType,
+                    state = currentRawState,
+                    teamProject = (f["System.TeamProject"] as? String) ?: project,
+                    createdDate = f["System.CreatedDate"] as? String,
+                    changedDate = f["System.ChangedDate"] as? String,
+                    areaPath = f["System.AreaPath"] as? String,
+                    iterationPath = f["System.IterationPath"] as? String,
+                    boardOrder = boardOrder,
+                    childIds = listOf(childId)
+                )
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Links an existing work item [parentId] in Azure DevOps as the parent of [childId]
+     * using System.LinkTypes.Hierarchy-Reverse on the child.
+     */
+    suspend fun linkExistingParentWorkItemOnServer(
+        organization: String,
+        pat: String,
+        childId: Int,
+        parentId: Int
+    ): Result<WorkItem> = withContext(Dispatchers.IO) {
+        val normalizedOrg = AzureAccountRepository.extractOrganization(organization)
+        if (normalizedOrg.isBlank() || pat.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Missing Azure DevOps credentials."))
+        }
+        if (parentId <= 0) {
+            return@withContext Result.failure(IllegalArgumentException("Please enter a valid parent work item ID."))
+        }
+        if (childId == parentId) {
+            return@withContext Result.failure(IllegalArgumentException("A work item cannot be its own parent."))
+        }
+
+        try {
+            val service = AzureDevOpsClient.createService(pat)
+            val fetchResp = service.getWorkItems(
+                organization = normalizedOrg,
+                ids = parentId.toString(),
+                fields = null,
+                expand = "relations"
+            )
+            val parentRaw = fetchResp.body()?.value?.firstOrNull { it.id == parentId }
+                ?: return@withContext Result.failure(
+                    IllegalArgumentException("Work item #$parentId was not found in Azure DevOps.")
+                )
+
+            val childFetchResp = service.getWorkItems(
+                organization = normalizedOrg,
+                ids = childId.toString(),
+                fields = null,
+                expand = "relations"
+            )
+            val childRaw = childFetchResp.body()?.value?.firstOrNull { it.id == childId }
+            val existingChildRelations = childRaw?.relations.orEmpty()
+            val existingParentRelIndex = existingChildRelations.indexOfFirst {
+                it.rel.equals("System.LinkTypes.Hierarchy-Reverse", ignoreCase = true)
+            }
+
+            val parentUrl = "https://dev.azure.com/$normalizedOrg/_apis/wit/workItems/$parentId"
+            val patchOps = mutableListOf<JsonPatchOperation>()
+            if (existingParentRelIndex >= 0) {
+                patchOps.add(
+                    JsonPatchOperation(
+                        op = "remove",
+                        path = "/relations/$existingParentRelIndex",
+                        value = null
+                    )
+                )
+            }
+            patchOps.add(
+                JsonPatchOperation(
+                    op = "add",
+                    path = "/relations/-",
+                    value = mapOf(
+                        "rel" to "System.LinkTypes.Hierarchy-Reverse",
+                        "url" to parentUrl
+                    )
+                )
+            )
+
+            val patchResp = service.updateWorkItem(
+                organization = normalizedOrg,
+                id = childId,
+                patchBody = AzureDevOpsClient.createPatchRequestBody(patchOps)
+            )
+
+            if (!patchResp.isSuccessful) {
+                return@withContext Result.failure(
+                    Exception("Failed to link work item #$parentId as parent (${patchResp.code()}): ${patchResp.message()}")
+                )
+            }
+
+            val parsedParent = AzureWorkItemParser.parseAndLinkRawWorkItems(listOf(parentRaw)).firstOrNull()
+                ?: return@withContext Result.failure(Exception("Failed to parse work item #$parentId."))
+
+            Result.success(parsedParent.copy(childIds = (parsedParent.childIds + childId).distinct()))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 }

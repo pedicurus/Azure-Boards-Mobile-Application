@@ -52,53 +52,17 @@ class NotificationsViewModel(
         state.notifications.count { !it.isRead }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
-    val detectedUserIdentity: StateFlow<String?> = notificationsState.map { state ->
-        state.detectedDisplayName ?: state.detectedEmail
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
-
-    val manualIdentityOverride: StateFlow<String?> = notificationsState.map { state ->
-        state.manualIdentityOverride
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
-
-    val isIdentityConfirmed: StateFlow<Boolean> = notificationsState.map { state ->
-        val activeAccount = sessionManager.getActiveAccount()
-        val org = state.organization.ifBlank {
-            activeAccount?.organization ?: sessionManager.defaultOrganization.value ?: ""
-        }
-        val pat = activeAccount?.pat ?: ""
-        val currentHash = repository.computePatCredentialHash(org, pat)
-        state.isIdentityConfirmed &&
-            !state.confirmedForPatHash.isNullOrBlank() &&
-            state.confirmedForPatHash == currentHash
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
-
     val uiState: StateFlow<NotificationsUiState> = combine(
         assignedNotifications,
         mentionedNotifications,
         unreadNotificationsCount,
-        isSyncingNotifications,
-        detectedUserIdentity,
-        manualIdentityOverride,
-        isIdentityConfirmed
-    ) { values ->
-        @Suppress("UNCHECKED_CAST")
-        val assigned = values[0] as List<AppNotificationItem>
-        @Suppress("UNCHECKED_CAST")
-        val mentioned = values[1] as List<AppNotificationItem>
-        val unread = values[2] as Int
-        val isSyncing = values[3] as Boolean
-        val detected = values[4] as String?
-        val manual = values[5] as String?
-        val confirmed = values[6] as Boolean
-
+        isSyncingNotifications
+    ) { assigned, mentioned, unread, isSyncing ->
         NotificationsUiState(
             assignedNotifications = assigned,
             mentionedNotifications = mentioned,
             unreadNotificationsCount = unread,
-            isSyncingNotifications = isSyncing,
-            detectedUserIdentity = detected,
-            manualIdentityOverride = manual,
-            isIdentityConfirmed = confirmed
+            isSyncingNotifications = isSyncing
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), NotificationsUiState())
 
@@ -174,50 +138,7 @@ class NotificationsViewModel(
         }
     }
 
-    /**
-     * Sets or clears a manual user identity override for the active organization and re-syncs
-     * notifications immediately so Assigned and Mentioned items reflect the chosen identity.
-     */
-    fun setManualIdentityOverride(overrideName: String?) {
-        val acc = sessionManager.getActiveAccount()
-        val org = acc?.organization ?: sessionManager.defaultOrganization.value ?: repository.getConfiguredUrl()
-        val pat = acc?.pat ?: repository.getConfiguredPat()
-        if (org.isBlank()) return
-        viewModelScope.launch {
-            val updated = repository.setManualIdentityOverride(org, overrideName, pat)
-            sessionManager.updateNotificationsState(updated)
-            syncNotificationsForActiveOrganization(postDeviceNotifications = false)
-        }
-    }
 
-    /**
-     * Confirms the detected identity for the active organization and PAT credentials.
-     */
-    fun confirmUserIdentity(confirmed: Boolean) {
-        val acc = sessionManager.getActiveAccount()
-        val org = acc?.organization ?: sessionManager.defaultOrganization.value ?: repository.getConfiguredUrl()
-        val pat = acc?.pat ?: repository.getConfiguredPat()
-        if (org.isBlank()) return
-        viewModelScope.launch {
-            val updated = repository.confirmUserIdentity(org, pat, confirmed)
-            sessionManager.updateNotificationsState(updated)
-        }
-    }
-
-    /**
-     * Saves a user-corrected identity for notifications and triggers re-sync.
-     */
-    fun saveCorrectedIdentity(correctedName: String) {
-        val acc = sessionManager.getActiveAccount()
-        val org = acc?.organization ?: sessionManager.defaultOrganization.value ?: repository.getConfiguredUrl()
-        val pat = acc?.pat ?: repository.getConfiguredPat()
-        if (org.isBlank()) return
-        viewModelScope.launch {
-            val updated = repository.saveCorrectedIdentity(org, pat, correctedName)
-            sessionManager.updateNotificationsState(updated)
-            syncNotificationsForActiveOrganization(postDeviceNotifications = false)
-        }
-    }
 
     /**
      * Marks all notifications (or all notifications in [category]) as read for the active organization.
@@ -264,7 +185,7 @@ class NotificationsViewModel(
             state = notification.workItemState,
             teamProject = notification.teamProject,
             assignedToName = if (notification.category == NotificationCategory.ASSIGNED) {
-                manualIdentityOverride.value ?: detectedUserIdentity.value
+                notification.actorName
             } else {
                 null
             },

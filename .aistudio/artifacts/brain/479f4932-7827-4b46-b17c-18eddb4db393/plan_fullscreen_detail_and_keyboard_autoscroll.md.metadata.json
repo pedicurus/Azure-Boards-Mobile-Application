@@ -1,0 +1,5 @@
+{
+  "summary": "Unique plan artifact for converting the Detail and Create views into full-screen pages closed only via Back/X buttons and adding keyboard-aware auto-scrolling for Description and Comment fields.",
+  "updatedAt": "2026-11-03T19:47:26.848663632Z",
+  "userFacing": true
+}

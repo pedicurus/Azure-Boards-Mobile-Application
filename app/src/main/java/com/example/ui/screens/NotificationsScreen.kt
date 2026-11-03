@@ -125,12 +125,8 @@ fun NotificationsScreen(
     onRefreshNotifications: () -> Unit,
     onNotificationClick: (AppNotificationItem) -> Unit,
     onMarkAllRead: (String?) -> Unit,
-    onOpenIdentitySettings: () -> Unit,
     onClose: () -> Unit,
-    modifier: Modifier = Modifier,
-    isIdentityConfirmed: Boolean = true,
-    onConfirmIdentity: (Boolean) -> Unit = {},
-    onSaveCorrectedIdentity: (String) -> Unit = {}
+    modifier: Modifier = Modifier
 ) {
     BackHandler {
         onClose()
@@ -140,7 +136,6 @@ fun NotificationsScreen(
     var hasDevicePermission by remember {
         mutableStateOf(NotificationHelper.hasNotificationPermission(context))
     }
-    var showCorrectionDialog by remember { mutableStateOf(false) }
 
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -269,18 +264,11 @@ fun NotificationsScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = buildString {
-                            append(organization.ifBlank { "Azure Boards" })
-                            if (!effectiveUserIdentity.isNullOrBlank()) {
-                                append(" • ")
-                                append(effectiveUserIdentity)
-                            }
-                        },
+                        text = organization.ifBlank { "Azure Boards" },
                         color = NotifTextMuted,
                         fontSize = 12.sp,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.clickable { onOpenIdentitySettings() }
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -313,20 +301,12 @@ fun NotificationsScreen(
                         .size(40.dp)
                         .testTag("notifications_refresh_button")
                 ) {
-                    if (isSyncingNotifications) {
-                        CircularProgressIndicator(
-                            color = NotifAccentBlue,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Refresh notifications",
-                            tint = NotifTextDark,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Refresh notifications",
+                        tint = NotifTextDark,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
             }
         }
@@ -403,100 +383,7 @@ fun NotificationsScreen(
             }
         }
 
-        // Identity Confirmation Card if identified but not yet confirmed for this Org & PAT
-        val identifiedName = effectiveUserIdentity?.trim()?.takeIf { it.isNotEmpty() }
-        val showIdentityConfirmationPrompt = !isIdentityConfirmed && !identifiedName.isNullOrBlank()
 
-        AnimatedVisibility(visible = showIdentityConfirmationPrompt) {
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = Color.White,
-                border = BorderStroke(1.5.dp, NotifAccentBlue.copy(alpha = 0.5f)),
-                shadowElevation = 2.dp,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 6.dp)
-                    .testTag("notifications_identity_confirm_card")
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Box(
-                            contentAlignment = Alignment.Center,
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(CircleShape)
-                                .background(NotifAccentBlue.copy(alpha = 0.12f))
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Person,
-                                contentDescription = null,
-                                tint = NotifAccentBlue,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Are you \"$identifiedName\"?",
-                                color = NotifTextDark,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Confirm your identity so notifications and mentions are accurate.",
-                                color = NotifTextMuted,
-                                fontSize = 12.sp
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Row(
-                        horizontalArrangement = Arrangement.End,
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        OutlinedButton(
-                            onClick = { showCorrectionDialog = true },
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-                            modifier = Modifier.testTag("notifications_identity_confirm_no")
-                        ) {
-                            Text(
-                                text = "No",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Button(
-                            onClick = { onConfirmIdentity(true) },
-                            shape = RoundedCornerShape(8.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = NotifAccentBlue,
-                                contentColor = Color.White
-                            ),
-                            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 6.dp),
-                            modifier = Modifier.testTag("notifications_identity_confirm_yes")
-                        ) {
-                            Text(
-                                text = "Yes",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-            }
-        }
 
         // Switchable Tabs: Assigned vs Mentioned
         Surface(
@@ -538,65 +425,7 @@ fun NotificationsScreen(
         }
 
 
-        if (showCorrectionDialog) {
-            var correctedInput by remember(identifiedName) { mutableStateOf(identifiedName.orEmpty()) }
-            AlertDialog(
-                onDismissRequest = { showCorrectionDialog = false },
-                title = {
-                    Text(
-                        text = "Correct Your Identity",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 17.sp,
-                        color = NotifTextDark
-                    )
-                },
-                text = {
-                    Column {
-                        Text(
-                            text = "Enter your display name or email address as used in Azure DevOps:",
-                            color = NotifTextMuted,
-                            fontSize = 13.sp
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        OutlinedTextField(
-                            value = correctedInput,
-                            onValueChange = { correctedInput = it },
-                            singleLine = true,
-                            placeholder = { Text("e.g. Jane Doe or user@company.com") },
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("notifications_correct_identity_input")
-                        )
-                    }
-                },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            val trimmed = correctedInput.trim()
-                            if (trimmed.isNotEmpty()) {
-                                onSaveCorrectedIdentity(trimmed)
-                                showCorrectionDialog = false
-                            }
-                        },
-                        enabled = correctedInput.isNotBlank(),
-                        shape = RoundedCornerShape(8.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = NotifAccentBlue),
-                        modifier = Modifier.testTag("notifications_correct_identity_save_button")
-                    ) {
-                        Text("Save", fontWeight = FontWeight.Bold)
-                    }
-                },
-                dismissButton = {
-                    TextButton(
-                        onClick = { showCorrectionDialog = false },
-                        modifier = Modifier.testTag("notifications_correct_identity_cancel_button")
-                    ) {
-                        Text("Cancel")
-                    }
-                }
-            )
-        }
+
 
 
         // Notifications List or Empty State

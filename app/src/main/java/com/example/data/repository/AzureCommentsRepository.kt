@@ -170,7 +170,7 @@ class AzureCommentsRepository {
                 }
 
                 if (commentResp?.isSuccessful == true && commentResp.body() != null) {
-                    val mapped = mapRawCommentToDomain(commentResp.body()!, workItemId)
+                    val mapped = mapRawCommentToDomain(commentResp.body()!!, workItemId)
                     if (mapped != null) {
                         return@withContext Result.success(mapped)
                     }

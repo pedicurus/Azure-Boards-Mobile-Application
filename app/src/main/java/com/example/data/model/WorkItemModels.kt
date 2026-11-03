@@ -1,5 +1,6 @@
 package com.example.data.model
 
+import androidx.compose.runtime.Immutable
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
 
@@ -19,6 +20,7 @@ fun normalizeWorkItemClassificationPath(rawPath: String?): String {
  * (on background threads) so filtering, searching, and hierarchy prefix checks run in O(1)
  * with zero per-pass string allocations.
  */
+@Immutable
 @JsonClass(generateAdapter = true)
 data class WorkItem(
     val id: Int,
@@ -121,12 +123,18 @@ data class CachedOrganizationMetadata(
     val stateCategoryMap: Map<String, String> = emptyMap(),
     val typeColors: Map<String, String> = emptyMap(),
     val typeIcons: Map<String, String> = emptyMap(),
-    val stateColors: Map<String, String> = emptyMap()
-)
+    val stateColors: Map<String, String> = emptyMap(),
+    @param:Json(name = "schemaVersion") val schemaVersion: Int = 1
+) {
+    companion object {
+        const val CURRENT_SCHEMA_VERSION = 2
+    }
+}
 
 /**
  * Represents a configured Azure DevOps organization account and its Personal Access Token.
  */
+@Immutable
 @JsonClass(generateAdapter = true)
 data class OrganizationAccount(
     val organization: String,
@@ -216,7 +224,13 @@ data class ProjectWorkItemTypeDefinition(
     @param:Json(name = "color") val color: String? = null,
     @param:Json(name = "icon") val icon: WorkItemTypeIcon? = null,
     @param:Json(name = "isDisabled") val isDisabled: Boolean? = false,
-    @param:Json(name = "states") val states: List<WorkItemStateDefinition>? = emptyList()
+    @param:Json(name = "states") val states: List<WorkItemStateDefinition>? = emptyList(),
+    @param:Json(name = "transitions") val transitions: Map<String, List<WorkItemStateTransition>>? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class WorkItemStateTransition(
+    @param:Json(name = "to") val to: String? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -236,7 +250,8 @@ data class WorkItemStateDefinition(
     @param:Json(name = "name") val name: String? = "",
     @param:Json(name = "color") val color: String? = null,
     @param:Json(name = "category") val category: String? = null,
-    @param:Json(name = "hidden") val hidden: Boolean? = false
+    @param:Json(name = "hidden") val hidden: Boolean? = false,
+    @param:Json(name = "isDisabled") val isDisabled: Boolean? = false
 )
 
 @JsonClass(generateAdapter = true)
@@ -322,6 +337,7 @@ data class ProcessStateDefinition(
     @param:Json(name = "stateCategory") val stateCategory: String? = null,
     @param:Json(name = "order") val order: Int? = null,
     @param:Json(name = "hidden") val hidden: Boolean? = false,
+    @param:Json(name = "isDisabled") val isDisabled: Boolean? = false,
     @param:Json(name = "customizationType") val customizationType: String? = null
 )
 
@@ -370,6 +386,7 @@ data class BacklogConfigurationResponse(
 /**
  * Clean domain model for a Work Item Discussion comment.
  */
+@Immutable
 @JsonClass(generateAdapter = true)
 data class WorkItemComment(
     val id: Int,
@@ -465,6 +482,7 @@ object NotificationCategory {
 /**
  * Domain model representing a single Assigned or Mentioned notification in the app.
  */
+@Immutable
 @JsonClass(generateAdapter = true)
 data class AppNotificationItem(
     val id: String,
@@ -493,9 +511,6 @@ data class CachedNotificationsState(
     val detectedDisplayName: String? = null,
     val detectedEmail: String? = null,
     val detectedUserId: String? = null,
-    val manualIdentityOverride: String? = null,
-    val isIdentityConfirmed: Boolean = false,
-    val confirmedForPatHash: String? = null,
     val notifications: List<AppNotificationItem> = emptyList(),
     val notifiedNotificationIds: List<String> = emptyList(),
     val baselineAssignedInitialized: Boolean = false,

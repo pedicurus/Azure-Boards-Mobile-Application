@@ -38,6 +38,23 @@ class AzureAccountRepository(
             } catch (_: Exception) {
                 encoded
             }
+
+        fun extractOrganization(input: String): String {
+            val trimmed = input.trim()
+            if (trimmed.isEmpty()) return ""
+            val withoutProtocol = trimmed.substringAfter("https://").substringAfter("http://")
+            return when {
+                withoutProtocol.startsWith("dev.azure.com/") -> {
+                    withoutProtocol.removePrefix("dev.azure.com/").substringBefore("/").substringBefore("?")
+                }
+                withoutProtocol.contains(".visualstudio.com") -> {
+                    withoutProtocol.substringBefore(".visualstudio.com")
+                }
+                else -> {
+                    withoutProtocol.substringBefore("/").substringBefore("?")
+                }
+            }.trim()
+        }
     }
 
     private fun persistOrganizationsList(accounts: List<OrganizationAccount>) {
@@ -225,20 +242,5 @@ class AzureAccountRepository(
         setExplicitlyDisconnected(true)
     }
 
-    fun extractOrganization(input: String): String {
-        val trimmed = input.trim()
-        if (trimmed.isEmpty()) return ""
-        val withoutProtocol = trimmed.substringAfter("https://").substringAfter("http://")
-        return when {
-            withoutProtocol.startsWith("dev.azure.com/") -> {
-                withoutProtocol.removePrefix("dev.azure.com/").substringBefore("/").substringBefore("?")
-            }
-            withoutProtocol.contains(".visualstudio.com") -> {
-                withoutProtocol.substringBefore(".visualstudio.com")
-            }
-            else -> {
-                withoutProtocol.substringBefore("/").substringBefore("?")
-            }
-        }.trim()
-    }
+    fun extractOrganization(input: String): String = Companion.extractOrganization(input)
 }

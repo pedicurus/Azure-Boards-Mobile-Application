@@ -47,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -104,6 +105,15 @@ fun ConnectionScreen(
     var rememberCredentials by rememberSaveable { mutableStateOf(true) }
     var patVisible by rememberSaveable { mutableStateOf(false) }
     var showHelp by rememberSaveable { mutableStateOf(false) }
+    var isTouchingSignIn by remember { mutableStateOf(false) }
+
+    androidx.compose.runtime.LaunchedEffect(isLoading, errorMessage) {
+        if (!isLoading || errorMessage != null) {
+            isTouchingSignIn = false
+        }
+    }
+
+    val activeLoading = isLoading || isTouchingSignIn
 
     val focusManager = LocalFocusManager.current
     val context = LocalContext.current
@@ -413,6 +423,7 @@ fun ConnectionScreen(
                         keyboardActions = KeyboardActions(
                             onDone = {
                                 focusManager.clearFocus()
+                                isTouchingSignIn = true
                                 onConnect(orgInput, patInput, rememberCredentials)
                             }
                         ),
@@ -521,13 +532,52 @@ fun ConnectionScreen(
 
                     Spacer(modifier = Modifier.height(18.dp))
 
+                    // Animated Loading Banner when connecting/signing in
+                    AnimatedVisibility(visible = activeLoading) {
+                        Surface(
+                            color = LoginAzureBlue.copy(alpha = 0.08f),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 14.dp)
+                                .border(1.dp, LoginAzureBlue.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                                .testTag("signin_loading_banner")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(12.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    color = LoginAzureBlue,
+                                    strokeWidth = 2.5.dp,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        text = "Signing in to Azure Boards...",
+                                        color = LoginAzureBlue,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp
+                                    )
+                                    Text(
+                                        text = "Connecting & verifying organization credentials...",
+                                        color = LoginTextMuted,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     // Sign In / Connect Button
                     Button(
                         onClick = {
                             focusManager.clearFocus()
+                            isTouchingSignIn = true
                             onConnect(orgInput, patInput, rememberCredentials)
                         },
-                        enabled = !isLoading,
+                        enabled = !activeLoading,
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = LoginAzureBlue,
@@ -538,7 +588,7 @@ fun ConnectionScreen(
                             .height(50.dp)
                             .testTag("connect_button")
                     ) {
-                        if (isLoading) {
+                        if (activeLoading) {
                             CircularProgressIndicator(
                                 color = Color.White,
                                 strokeWidth = 2.5.dp,

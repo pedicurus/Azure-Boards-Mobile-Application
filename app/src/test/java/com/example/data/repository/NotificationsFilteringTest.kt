@@ -168,7 +168,6 @@ class NotificationsFilteringTest {
                 onRefreshNotifications = {},
                 onNotificationClick = {},
                 onMarkAllRead = {},
-                onOpenIdentitySettings = {},
                 onClose = {}
             )
         }
@@ -188,38 +187,6 @@ class NotificationsFilteringTest {
         composeTestRule.onNodeWithTag("notifications_list_assigned")
             .performScrollToNode(androidx.compose.ui.test.hasTestTag("notification_card_assigned_contoso_99"))
         composeTestRule.onNodeWithText("Ancient Task From 3 Years Ago", useUnmergedTree = true).assertExists()
-    }
-
-    @Test
-    fun notificationsScreen_unconfirmedIdentity_showsAreYouPromptAndConfirm() {
-        var confirmed = false
-        composeTestRule.setContent {
-            NotificationsScreen(
-                organization = "contoso",
-                effectiveUserIdentity = "Farhad",
-                assignedNotifications = emptyList(),
-                mentionedNotifications = emptyList(),
-                isSyncingNotifications = false,
-                isIdentityConfirmed = false,
-                onConfirmIdentity = { confirmed = it },
-                onSaveCorrectedIdentity = {},
-                onRefreshNotifications = {},
-                onNotificationClick = {},
-                onMarkAllRead = {},
-                onOpenIdentitySettings = {},
-                onClose = {}
-            )
-        }
-
-        // Verify the prompt appears
-        composeTestRule.onNodeWithTag("notifications_identity_confirm_card").assertExists()
-        composeTestRule.onNodeWithText("Are you \"Farhad\"?", useUnmergedTree = true).assertExists()
-        composeTestRule.onNodeWithTag("notifications_identity_confirm_yes").assertExists()
-        composeTestRule.onNodeWithTag("notifications_identity_confirm_no").assertExists()
-
-        // Click Yes
-        composeTestRule.onNodeWithTag("notifications_identity_confirm_yes").performClick()
-        assertTrue("onConfirmIdentity should be invoked with true", confirmed)
     }
 
     @Test
@@ -245,13 +212,9 @@ class NotificationsFilteringTest {
                 assignedNotifications = listOf(item),
                 mentionedNotifications = emptyList(),
                 isSyncingNotifications = false,
-                isIdentityConfirmed = true,
-                onConfirmIdentity = {},
-                onSaveCorrectedIdentity = {},
                 onRefreshNotifications = {},
                 onNotificationClick = {},
                 onMarkAllRead = {},
-                onOpenIdentitySettings = {},
                 onClose = {}
             )
         }

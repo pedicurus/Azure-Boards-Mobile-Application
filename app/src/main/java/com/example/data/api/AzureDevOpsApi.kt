@@ -9,7 +9,6 @@ import com.example.data.model.WiqlQueryResult
 import com.example.data.model.WorkItemsBatchResponse
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
-import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -190,7 +189,6 @@ interface AzureDevOpsService {
 object AzureDevOpsClient {
 
     private val moshi = Moshi.Builder()
-        .addLast(KotlinJsonAdapterFactory())
         .build()
 
     private val moshiConverterFactory = MoshiConverterFactory.create(moshi)

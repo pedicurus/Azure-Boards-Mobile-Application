@@ -57,7 +57,6 @@ import androidx.compose.material.icons.filled.PersonOutline
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -180,11 +179,14 @@ fun WorkItemsScreen(
     hasMoreItems: Boolean = false,
     onLoadMore: () -> Unit = {},
     selectedWorkItem: WorkItem?,
+    parentWorkItem: WorkItem? = null,
     childWorkItems: List<WorkItem> = emptyList(),
     selectedWorkItemComments: List<WorkItemComment> = emptyList(),
     isLoadingComments: Boolean = false,
     getAllowedChildTypes: (WorkItem) -> List<String> = { emptyList() },
     getAllowedChildTypesForType: (String?, String) -> List<String> = { _, _ -> emptyList() },
+    getAllowedParentTypes: (WorkItem) -> List<String> = { emptyList() },
+    getAllowedParentTypesForType: (String?, String) -> List<String> = { _, _ -> emptyList() },
     getStatesForWorkItem: (WorkItem) -> List<String> = { availableStates },
     getStatesForChildType: (String?, String) -> List<String> = { _, _ -> emptyList() },
     onCreateWorkItem: (
@@ -202,6 +204,9 @@ fun WorkItemsScreen(
     onAddChildWorkItem: (WorkItem, String, String, String) -> Unit = { _, _, _, _ -> },
     onAddExistingChildWorkItem: (WorkItem, Int, (Result<WorkItem>) -> Unit) -> Unit = { _, _, _ -> },
     onRemoveChildWorkItem: (WorkItem, Int) -> Unit = { _, _ -> },
+    onCreateParentWorkItem: (WorkItem, String, String, String) -> Unit = { _, _, _, _ -> },
+    onAddExistingParentWorkItem: (WorkItem, Int, (Result<WorkItem>) -> Unit) -> Unit = { _, _, _ -> },
+    onUnlinkParentWorkItem: (WorkItem, Int) -> Unit = { _, _ -> },
     onAddComment: (WorkItem, String, (Result<WorkItemComment>) -> Unit) -> Unit = { _, _, _ -> },
     onSearchChange: (String) -> Unit,
     onTypeSelect: (String?) -> Unit,
@@ -224,6 +229,8 @@ fun WorkItemsScreen(
     onRemoveOrganization: (String) -> Unit = {},
     onWorkItemClick: (WorkItem) -> Unit,
     onDismissDetail: () -> Unit,
+    onOpenRelatedWorkItem: (WorkItem) -> Unit = onWorkItemClick,
+    onNavigateBackInDetail: () -> Unit = onDismissDetail,
     onRefresh: () -> Unit,
     onDisconnect: () -> Unit,
     onUpdateWorkItem: (WorkItem) -> Unit = {},
@@ -231,12 +238,6 @@ fun WorkItemsScreen(
     mentionedNotifications: List<AppNotificationItem> = emptyList(),
     unreadNotificationsCount: Int = 0,
     isSyncingNotifications: Boolean = false,
-    detectedUserIdentity: String? = null,
-    manualIdentityOverride: String? = null,
-    isIdentityConfirmed: Boolean = true,
-    onConfirmIdentity: (Boolean) -> Unit = {},
-    onSaveCorrectedIdentity: (String) -> Unit = {},
-    onManualIdentityOverrideChange: (String?) -> Unit = {},
     onRefreshNotifications: () -> Unit = {},
     onNotificationClick: (AppNotificationItem) -> Unit = {},
     onMarkAllNotificationsRead: (String?) -> Unit = {},
@@ -246,9 +247,9 @@ fun WorkItemsScreen(
     var showCreateSheet by remember { mutableStateOf(false) }
     var showNotificationsPage by remember { mutableStateOf(false) }
 
-    // Handle hardware/gesture back to dismiss detail or create sheet when open
+    // Handle hardware/gesture back to step back in detail history or dismiss detail/create sheet when open
     BackHandler(enabled = selectedWorkItem != null) {
-        onDismissDetail()
+        onNavigateBackInDetail()
     }
     BackHandler(enabled = showCreateSheet) {
         showCreateSheet = false
@@ -328,49 +329,11 @@ fun WorkItemsScreen(
                     modifier = Modifier.weight(1f)
                 )
 
-                // Compact circular sync indicator (circle + sync symbol, no numbers) beside Settings button
+                // Action buttons beside header
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    if (isBackgroundSyncing || isLoading) {
-                        Surface(
-                            color = AccentPurple.copy(alpha = 0.08f),
-                            shape = CircleShape,
-                            modifier = Modifier
-                                .size(32.dp)
-                                .testTag("background_sync_indicator")
-                        ) {
-                            Box(
-                                contentAlignment = Alignment.Center,
-                                modifier = Modifier.fillMaxSize()
-                            ) {
-                                if (syncProgress != null) {
-                                    CircularProgressIndicator(
-                                        progress = { syncProgress },
-                                        color = AccentPurple,
-                                        trackColor = AccentPurple.copy(alpha = 0.2f),
-                                        strokeWidth = 2.dp,
-                                        modifier = Modifier.size(26.dp)
-                                    )
-                                } else {
-                                    CircularProgressIndicator(
-                                        color = AccentPurple,
-                                        trackColor = AccentPurple.copy(alpha = 0.16f),
-                                        strokeWidth = 2.dp,
-                                        modifier = Modifier.size(26.dp)
-                                    )
-                                }
-                                Icon(
-                                    imageVector = Icons.Default.Sync,
-                                    contentDescription = "Syncing work items",
-                                    tint = AccentPurple,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                            }
-                        }
-                    }
-
                     // Bell symbol next to the Settings icon
                     IconButton(
                         onClick = {
@@ -1025,6 +988,12 @@ fun WorkItemsScreen(
                                         isSearchBarOpen = false
                                     }
                                     onWorkItemClick(item)
+                                },
+                                availableStates = getStatesForWorkItem(item).ifEmpty {
+                                    availableStates.filterNot { it.equals("All", ignoreCase = true) }
+                                },
+                                onUpdateState = { newState ->
+                                    onUpdateWorkItem(item.copy(state = newState))
                                 }
                             )
                         }
@@ -1093,53 +1062,29 @@ fun WorkItemsScreen(
             }
         }
 
-        // Detail Bottom Sheet when user clicks a Work Item Card
-        if (selectedWorkItem != null) {
-            val detailAllowedChildTypes = remember(selectedWorkItem, availableTypes, allWorkItems) {
-                getAllowedChildTypes(selectedWorkItem)
-            }
-            val detailAreas = remember(selectedWorkItem.teamProject, availableAreas) {
-                getAreasForProject(selectedWorkItem.teamProject).ifEmpty { availableAreas }
-            }
-            val detailIterations = remember(selectedWorkItem.teamProject, availableIterations) {
-                getIterationsForProject(selectedWorkItem.teamProject).ifEmpty { availableIterations }
-            }
-            WorkItemDetailSheet(
-                workItem = selectedWorkItem,
-                onDismiss = onDismissDetail,
-                availableStates = getStatesForWorkItem(selectedWorkItem).ifEmpty {
-                    availableStates.filterNot { it.equals("All", ignoreCase = true) }
+        // Full-page Notifications View when the Bell icon is touched
+        AnimatedVisibility(
+            visible = showNotificationsPage,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            NotificationsScreen(
+                organization = organization,
+                effectiveUserIdentity = null,
+                assignedNotifications = assignedNotifications,
+                mentionedNotifications = mentionedNotifications,
+                isSyncingNotifications = isSyncingNotifications,
+                onRefreshNotifications = onRefreshNotifications,
+                onNotificationClick = { notifItem ->
+                    onNotificationClick(notifItem)
                 },
-                availableAssignees = availableAssignees,
-                availableTags = availableTags,
-                availableAreas = detailAreas,
-                availableIterations = detailIterations,
-                allWorkItems = allWorkItems,
-                childWorkItems = childWorkItems,
-                allowedChildTypes = detailAllowedChildTypes,
-                getChildStates = getStatesForWorkItem,
-                getStatesForChildType = { childType ->
-                    getStatesForChildType(selectedWorkItem.teamProject, childType)
-                },
-                onAddChildWorkItem = { title, childType, initialState ->
-                    onAddChildWorkItem(selectedWorkItem, title, childType, initialState)
-                },
-                onAddExistingChildWorkItem = { childId, onResult ->
-                    onAddExistingChildWorkItem(selectedWorkItem, childId, onResult)
-                },
-                onRemoveChildWorkItem = { childId ->
-                    onRemoveChildWorkItem(selectedWorkItem, childId)
-                },
-                comments = selectedWorkItemComments,
-                isLoadingComments = isLoadingComments,
-                onAddComment = { commentText, onResult ->
-                    onAddComment(selectedWorkItem, commentText, onResult)
-                },
-                onUpdateWorkItem = onUpdateWorkItem
+                onMarkAllRead = onMarkAllNotificationsRead,
+                onClose = { showNotificationsPage = false }
             )
         }
 
-        // Create New Item Bottom Sheet when user taps "Create New Items"
+        // Full-Screen Create New Item Page when user taps "Create New Items"
         if (showCreateSheet) {
             WorkItemCreateSheet(
                 project = selectedProject ?: availableProjects.firstOrNull(),
@@ -1162,32 +1107,76 @@ fun WorkItemsScreen(
             )
         }
 
-        // Full-page Notifications View when the Bell icon is touched
-        AnimatedVisibility(
-            visible = showNotificationsPage,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            val effectiveIdentity = manualIdentityOverride?.takeIf { it.isNotBlank() } ?: detectedUserIdentity
-            NotificationsScreen(
-                organization = organization,
-                effectiveUserIdentity = effectiveIdentity,
-                assignedNotifications = assignedNotifications,
-                mentionedNotifications = mentionedNotifications,
-                isSyncingNotifications = isSyncingNotifications,
-                isIdentityConfirmed = isIdentityConfirmed,
-                onConfirmIdentity = onConfirmIdentity,
-                onSaveCorrectedIdentity = onSaveCorrectedIdentity,
-                onRefreshNotifications = onRefreshNotifications,
-                onNotificationClick = { notifItem ->
-                    onNotificationClick(notifItem)
+        // Full-Screen Detail Page when user clicks a Work Item Card or Notification
+        if (selectedWorkItem != null) {
+            val detailAllowedChildTypes = remember(selectedWorkItem, availableTypes, allWorkItems) {
+                getAllowedChildTypes(selectedWorkItem)
+            }
+            val detailAllowedParentTypes = remember(selectedWorkItem, availableTypes, allWorkItems) {
+                getAllowedParentTypes(selectedWorkItem)
+            }
+            val detailAreas = remember(selectedWorkItem.teamProject, availableAreas) {
+                getAreasForProject(selectedWorkItem.teamProject).ifEmpty { availableAreas }
+            }
+            val detailIterations = remember(selectedWorkItem.teamProject, availableIterations) {
+                getIterationsForProject(selectedWorkItem.teamProject).ifEmpty { availableIterations }
+            }
+            WorkItemDetailSheet(
+                workItem = selectedWorkItem,
+                onDismiss = onDismissDetail,
+                onBack = onNavigateBackInDetail,
+                availableStates = getStatesForWorkItem(selectedWorkItem).ifEmpty {
+                    availableStates.filterNot { it.equals("All", ignoreCase = true) }
                 },
-                onMarkAllRead = onMarkAllNotificationsRead,
-                onOpenIdentitySettings = { showSettingsDialog = true },
-                onClose = { showNotificationsPage = false }
+                availableAssignees = availableAssignees,
+                availableTags = availableTags,
+                availableAreas = detailAreas,
+                availableIterations = detailIterations,
+                allWorkItems = allWorkItems,
+                parentWorkItem = parentWorkItem,
+                childWorkItems = childWorkItems,
+                allowedChildTypes = detailAllowedChildTypes,
+                allowedParentTypes = detailAllowedParentTypes,
+                canHaveParent = detailAllowedParentTypes.isNotEmpty(),
+                getChildStates = getStatesForWorkItem,
+                getStatesForChildType = { childType ->
+                    getStatesForChildType(selectedWorkItem.teamProject, childType)
+                },
+                getParentStates = getStatesForWorkItem,
+                getStatesForParentType = { parentType ->
+                    getStatesForChildType(selectedWorkItem.teamProject, parentType)
+                },
+                onAddChildWorkItem = { title, childType, initialState ->
+                    onAddChildWorkItem(selectedWorkItem, title, childType, initialState)
+                },
+                onAddExistingChildWorkItem = { childId, onResult ->
+                    onAddExistingChildWorkItem(selectedWorkItem, childId, onResult)
+                },
+                onRemoveChildWorkItem = { childId ->
+                    onRemoveChildWorkItem(selectedWorkItem, childId)
+                },
+                onAddParentWorkItem = { title, parentType, initialState ->
+                    onCreateParentWorkItem(selectedWorkItem, title, parentType, initialState)
+                },
+                onAddExistingParentWorkItem = { parentId, onResult ->
+                    onAddExistingParentWorkItem(selectedWorkItem, parentId, onResult)
+                },
+                onUnlinkParentWorkItem = { parentId ->
+                    onUnlinkParentWorkItem(selectedWorkItem, parentId)
+                },
+                onNavigateToParent = { parent ->
+                    onOpenRelatedWorkItem(parent)
+                },
+                onNavigateToChild = { child ->
+                    onOpenRelatedWorkItem(child)
+                },
+                comments = selectedWorkItemComments,
+                isLoadingComments = isLoadingComments,
+                onAddComment = { commentText, onResult ->
+                    onAddComment(selectedWorkItem, commentText, onResult)
+                },
+                onUpdateWorkItem = onUpdateWorkItem
             )
-
         }
 
         // Settings / Account Options Dialog
@@ -1203,10 +1192,6 @@ fun WorkItemsScreen(
                 defaultProject = defaultProject,
                 selectedProject = selectedProject,
                 totalCount = totalCount,
-                detectedUserIdentity = detectedUserIdentity,
-                manualIdentityOverride = manualIdentityOverride,
-                availableAssignees = availableAssignees,
-                onManualIdentityOverrideChange = onManualIdentityOverrideChange,
                 onDismiss = { showSettingsDialog = false },
                 onSwitchOrganization = { orgName ->
                     onOrganizationSelect(orgName)
@@ -1541,10 +1526,10 @@ private fun HomeAssigneeDropdown(
             val trimmedQuery = searchQuery.trim()
             val isQueryRtl = isAlmostPersian(trimmedQuery)
             val matchingAssignees = remember(realAssignees, trimmedQuery) {
-                if (trimmedQuery.length >= 3) {
-                    realAssignees.filter { it.contains(trimmedQuery, ignoreCase = true) }
+                if (trimmedQuery.isEmpty()) {
+                    realAssignees
                 } else {
-                    emptyList()
+                    realAssignees.filter { it.contains(trimmedQuery, ignoreCase = true) }
                 }
             }
             val staticOptions = remember(selectedAssignee) {
@@ -1577,7 +1562,7 @@ private fun HomeAssigneeDropdown(
                                 onValueChange = { searchQuery = it },
                                 placeholder = {
                                     Text(
-                                        text = "Type at least 3 characters...",
+                                        text = "Search people by name...",
                                         color = TextMuted,
                                         fontSize = 13.sp,
                                         textAlign = if (isQueryRtl) TextAlign.Right else TextAlign.Left,
@@ -1684,17 +1669,7 @@ private fun HomeAssigneeDropdown(
 
                         HorizontalDivider(color = CardBorderColor, thickness = 1.dp)
 
-                        if (trimmedQuery.length < 3) {
-                            Text(
-                                text = "Type at least 3 characters to search people.",
-                                color = TextMuted,
-                                fontSize = 12.sp,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 4.dp)
-                                    .testTag("home_assignee_min_chars_hint")
-                            )
-                        } else if (matchingAssignees.isEmpty()) {
+                        if (matchingAssignees.isEmpty() && trimmedQuery.isNotEmpty()) {
                             Text(
                                 text = "No matching assignees found.",
                                 color = TextMuted,
@@ -1704,7 +1679,13 @@ private fun HomeAssigneeDropdown(
                                     .padding(vertical = 4.dp)
                                     .testTag("home_assignee_no_matches")
                             )
-                        } else {
+                        } else if (matchingAssignees.isNotEmpty()) {
+                            Text(
+                                text = if (trimmedQuery.isEmpty()) "Team members (${matchingAssignees.size})" else "Matching assignees (${matchingAssignees.size})",
+                                color = TextMuted,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
                             Column(
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                                 modifier = Modifier

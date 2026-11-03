@@ -40,8 +40,6 @@ fun AzureBoardsNavHost(
     navController: NavHostController = rememberNavController()
 ) {
     val connectionUiState by connectionViewModel.uiState.collectAsStateWithLifecycle()
-    val workItemsUiState by workItemsViewModel.uiState.collectAsStateWithLifecycle()
-    val notificationsUiState by notificationsViewModel.uiState.collectAsStateWithLifecycle()
 
     val isConnected = connectionUiState.isConnected
     val startDestination: Any = if (isConnected) AzureRoute.WorkItems else AzureRoute.Connection
@@ -74,11 +72,12 @@ fun AzureBoardsNavHost(
         popExitTransition = { fadeOut() }
     ) {
         composable<AzureRoute.Connection> {
+            val isWorkItemsLoading by workItemsViewModel.isLoading.collectAsStateWithLifecycle()
             ConnectionScreen(
                 initialOrg = connectionViewModel.getInitialOrg(),
                 initialPat = connectionViewModel.getInitialPat(),
                 availableAccounts = connectionViewModel.availableAccounts,
-                isLoading = workItemsUiState.isLoading || connectionUiState.isLoading,
+                isLoading = isWorkItemsLoading || connectionUiState.isLoading,
                 errorMessage = connectionUiState.errorMessage,
                 onConnect = { org, pat, remember ->
                     connectionViewModel.connect(org, pat, remember)
@@ -89,6 +88,9 @@ fun AzureBoardsNavHost(
         }
 
         composable<AzureRoute.WorkItems> {
+            val workItemsUiState by workItemsViewModel.uiState.collectAsStateWithLifecycle()
+            val notificationsUiState by notificationsViewModel.uiState.collectAsStateWithLifecycle()
+
             WorkItemsScreen(
                 organization = connectionUiState.activeOrganization.ifBlank { workItemsUiState.organization },
                 organizations = connectionUiState.organizations,
@@ -126,6 +128,7 @@ fun AzureBoardsNavHost(
                 hasMoreItems = workItemsUiState.hasMoreItems,
                 onLoadMore = workItemsViewModel::loadMoreWorkItems,
                 selectedWorkItem = workItemsUiState.selectedWorkItem,
+                parentWorkItem = workItemsUiState.selectedWorkItemParent,
                 childWorkItems = workItemsUiState.childWorkItems,
                 selectedWorkItemComments = workItemsUiState.selectedWorkItemComments,
                 isLoadingComments = workItemsUiState.isLoadingComments,
@@ -133,12 +136,6 @@ fun AzureBoardsNavHost(
                 mentionedNotifications = notificationsUiState.mentionedNotifications,
                 unreadNotificationsCount = notificationsUiState.unreadNotificationsCount,
                 isSyncingNotifications = notificationsUiState.isSyncingNotifications,
-                detectedUserIdentity = notificationsUiState.detectedUserIdentity,
-                manualIdentityOverride = notificationsUiState.manualIdentityOverride,
-                isIdentityConfirmed = notificationsUiState.isIdentityConfirmed,
-                onConfirmIdentity = notificationsViewModel::confirmUserIdentity,
-                onSaveCorrectedIdentity = notificationsViewModel::saveCorrectedIdentity,
-                onManualIdentityOverrideChange = notificationsViewModel::setManualIdentityOverride,
                 onRefreshNotifications = {
                     notificationsViewModel.syncNotificationsForActiveOrganization(postDeviceNotifications = true)
                 },
@@ -146,12 +143,17 @@ fun AzureBoardsNavHost(
                 onMarkAllNotificationsRead = notificationsViewModel::markAllNotificationsRead,
                 getAllowedChildTypes = workItemsViewModel::getAllowedChildTypesForWorkItem,
                 getAllowedChildTypesForType = workItemsViewModel::getAllowedChildTypesForType,
+                getAllowedParentTypes = workItemsViewModel::getAllowedParentTypesForWorkItem,
+                getAllowedParentTypesForType = workItemsViewModel::getAllowedParentTypesForType,
                 getStatesForWorkItem = workItemsViewModel::getStatesForWorkItem,
                 getStatesForChildType = { proj, type -> workItemsViewModel.getStatesForType(proj, type) },
                 onCreateWorkItem = workItemsViewModel::createWorkItem,
                 onAddChildWorkItem = workItemsViewModel::addChildWorkItem,
                 onAddExistingChildWorkItem = workItemsViewModel::addExistingChildWorkItem,
                 onRemoveChildWorkItem = workItemsViewModel::removeChildWorkItem,
+                onCreateParentWorkItem = workItemsViewModel::createParentWorkItem,
+                onAddExistingParentWorkItem = workItemsViewModel::addExistingParentWorkItem,
+                onUnlinkParentWorkItem = workItemsViewModel::unlinkParentWorkItem,
                 onAddComment = workItemsViewModel::addCommentToWorkItem,
                 onSearchChange = workItemsViewModel::setSearchQuery,
                 onTypeSelect = workItemsViewModel::setTypeFilter,
@@ -167,7 +169,9 @@ fun AzureBoardsNavHost(
                 onSaveOrganizationAccount = connectionViewModel::saveOrganizationFromSettings,
                 onRemoveOrganization = connectionViewModel::removeOrganization,
                 onWorkItemClick = workItemsViewModel::selectWorkItem,
-                onDismissDetail = { workItemsViewModel.selectWorkItem(null) },
+                onOpenRelatedWorkItem = workItemsViewModel::openWorkItemInDetailHierarchy,
+                onNavigateBackInDetail = workItemsViewModel::navigateBackInDetail,
+                onDismissDetail = workItemsViewModel::dismissDetail,
                 onRefresh = workItemsViewModel::refreshWorkItems,
                 onDisconnect = connectionViewModel::disconnect,
                 onUpdateWorkItem = workItemsViewModel::updateWorkItem

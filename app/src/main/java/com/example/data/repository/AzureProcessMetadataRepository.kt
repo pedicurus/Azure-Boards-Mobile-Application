@@ -198,7 +198,7 @@ class AzureProcessMetadataRepository(
                 typeIcons = com.example.ui.theme.getRegisteredTypeIcons(),
                 stateColors = com.example.ui.theme.getRegisteredStateColorsHex(),
                 stateCategoryMap = stateCategoryCache.toMap(),
-                savedAtEpochMs = System.currentTimeMillis()
+                schemaVersion = CachedOrganizationMetadata.CURRENT_SCHEMA_VERSION
             )
         )
     }
@@ -986,7 +986,10 @@ class AzureProcessMetadataRepository(
                 val processesResp = processesDeferred.await()
                 val witListResp = witListDeferred.await()
 
-                val processIdFromProject = projectDetailResp?.body()
+                val projectDetail = projectDetailResp?.body()
+                val projectGuid = projectDetail?.id?.trim()?.takeIf { it.isNotBlank() }
+
+                val processIdFromProject = projectDetail
                     ?.capabilities
                     ?.processTemplate
                     ?.templateTypeId
@@ -997,7 +1000,8 @@ class AzureProcessMetadataRepository(
                     .firstOrNull { proc ->
                         proc.projects.orEmpty().any { pRef ->
                             pRef.name?.equals(project, ignoreCase = true) == true ||
-                                pRef.id?.equals(project, ignoreCase = true) == true
+                                pRef.id?.equals(project, ignoreCase = true) == true ||
+                                (!projectGuid.isNullOrBlank() && pRef.id?.equals(projectGuid, ignoreCase = true) == true)
                         }
                     }
                     ?.typeId
@@ -1007,13 +1011,33 @@ class AzureProcessMetadataRepository(
                 val resolvedProcessId = processIdFromProject ?: processIdFromList
 
                 val processWorkItemTypes = if (!resolvedProcessId.isNullOrBlank()) {
-                    runCatching {
+                    val expandedBoth = runCatching {
                         service.getProcessWorkItemTypes(
                             organization = normalizedOrg,
                             processId = resolvedProcessId,
                             expand = "states,behaviors"
                         ).body()?.value.orEmpty()
                     }.getOrDefault(emptyList())
+                    if (expandedBoth.isNotEmpty()) {
+                        expandedBoth
+                    } else {
+                        val expandedStates = runCatching {
+                            service.getProcessWorkItemTypes(
+                                organization = normalizedOrg,
+                                processId = resolvedProcessId,
+                                expand = "states"
+                            ).body()?.value.orEmpty()
+                        }.getOrDefault(emptyList())
+                        expandedStates.ifEmpty {
+                            runCatching {
+                                service.getProcessWorkItemTypes(
+                                    organization = normalizedOrg,
+                                    processId = resolvedProcessId,
+                                    expand = "none"
+                                ).body()?.value.orEmpty()
+                            }.getOrDefault(emptyList())
+                        }
+                    }
                 } else {
                     emptyList()
                 }
@@ -1034,9 +1058,8 @@ class AzureProcessMetadataRepository(
                 } else {
                     projectWorkItemTypes.map {
                         ProcessWorkItemType(
-                            referenceName = it.name,
+                            referenceName = it.referenceName ?: it.name,
                             name = it.name,
-                            description = it.description,
                             color = it.color,
                             icon = it.icon?.id,
                             isDisabled = it.isDisabled
@@ -1053,29 +1076,181 @@ class AzureProcessMetadataRepository(
                 val perTypeResults = candidateTypes.map { candidate ->
                     async {
                         val typeName = candidate.name?.trim().orEmpty()
-                        val typeRef = candidate.referenceName?.trim()?.takeIf { it.isNotEmpty() } ?: typeName
+                        val matchingProjectWit = projectWorkItemTypes.firstOrNull { w ->
+                            w.name?.trim()?.equals(typeName, ignoreCase = true) == true ||
+                                (!candidate.referenceName.isNullOrBlank() &&
+                                    w.referenceName?.trim()?.equals(candidate.referenceName.trim(), ignoreCase = true) == true)
+                        }
+                        val typeRef = candidate.referenceName?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: matchingProjectWit?.referenceName?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: typeName
 
-                        val enabledFromProcess = candidate.states.orEmpty()
-                            .filter { it.hidden != true }
-                            .mapNotNull { it.name?.trim() }
-                            .filter { it.isNotEmpty() }
+                        registerAzureTypeColor(typeName, candidate.color ?: matchingProjectWit?.color)
+                        registerAzureTypeIcon(typeName, candidate.icon ?: matchingProjectWit?.icon?.id)
 
-                        val enabledFromWit = if (enabledFromProcess.isEmpty()) {
-                            runCatching {
-                                service.getWorkItemTypeStates(
-                                    organization = normalizedOrg,
-                                    project = project,
-                                    type = typeRef
-                                ).body()?.value.orEmpty()
-                                    .filter { it.hidden != true }
-                                    .mapNotNull { it.name?.trim() }
-                                    .filter { it.isNotEmpty() }
-                            }.getOrDefault(emptyList())
-                        } else {
-                            emptyList()
+                        val endpointProcessStatesDeferred = async {
+                            if (!resolvedProcessId.isNullOrBlank() && typeRef.isNotBlank()) {
+                                val primary = runCatching {
+                                    service.getProcessWorkItemTypeStates(
+                                        organization = normalizedOrg,
+                                        processId = resolvedProcessId,
+                                        witRefName = typeRef
+                                    ).body()?.value.orEmpty()
+                                }.getOrDefault(emptyList())
+                                if (primary.isNotEmpty()) {
+                                    primary
+                                } else {
+                                    val altRef = matchingProjectWit?.referenceName?.trim().orEmpty()
+                                    if (altRef.isNotBlank() && !altRef.equals(typeRef, ignoreCase = true)) {
+                                        runCatching {
+                                            service.getProcessWorkItemTypeStates(
+                                                organization = normalizedOrg,
+                                                processId = resolvedProcessId,
+                                                witRefName = altRef
+                                            ).body()?.value.orEmpty()
+                                        }.getOrDefault(emptyList())
+                                    } else {
+                                        emptyList()
+                                    }
+                                }
+                            } else {
+                                emptyList()
+                            }
                         }
 
-                        val finalStates = when {
+                        val endpointWitStatesDeferred = async {
+                            runCatching {
+                                service.getProjectWorkItemTypeStates(
+                                    organization = normalizedOrg,
+                                    project = project,
+                                    type = typeName
+                                ).body()?.value.orEmpty()
+                            }.getOrDefault(emptyList())
+                        }
+
+                        val endpointProcessStates = endpointProcessStatesDeferred.await()
+                        val inlineProcessStates = candidate.states.orEmpty()
+                        val endpointWitStates = endpointWitStatesDeferred.await()
+                        val inlineWitStates = matchingProjectWit?.states.orEmpty()
+
+                        val hiddenStateIdsLower = buildSet {
+                            endpointProcessStates.filter { it.hidden == true || it.isDisabled == true }
+                                .mapNotNull { it.id?.trim()?.lowercase() }
+                                .filter { it.isNotEmpty() }
+                                .forEach { add(it) }
+                            inlineProcessStates.filter { it.hidden == true || it.isDisabled == true }
+                                .mapNotNull { it.id?.trim()?.lowercase() }
+                                .filter { it.isNotEmpty() }
+                                .forEach { add(it) }
+                        }
+
+                        val hiddenStateNamesLower = buildSet {
+                            endpointProcessStates.filter {
+                                it.hidden == true ||
+                                    it.isDisabled == true ||
+                                    (it.id?.trim()?.lowercase() in hiddenStateIdsLower)
+                            }.mapNotNull { it.name?.trim()?.lowercase() }
+                                .filter { it.isNotEmpty() }
+                                .forEach { add(it) }
+
+                            inlineProcessStates.filter {
+                                it.hidden == true ||
+                                    it.isDisabled == true ||
+                                    (it.id?.trim()?.lowercase() in hiddenStateIdsLower)
+                            }.mapNotNull { it.name?.trim()?.lowercase() }
+                                .filter { it.isNotEmpty() }
+                                .forEach { add(it) }
+
+                            endpointWitStates.filter { it.hidden == true || it.isDisabled == true }
+                                .mapNotNull { it.name?.trim()?.lowercase() }
+                                .filter { it.isNotEmpty() }
+                                .forEach { add(it) }
+
+                            inlineWitStates.filter { it.hidden == true || it.isDisabled == true }
+                                .mapNotNull { it.name?.trim()?.lowercase() }
+                                .filter { it.isNotEmpty() }
+                                .forEach { add(it) }
+                        }
+
+                        val transitionTargetsLower = matchingProjectWit?.transitions?.values.orEmpty()
+                            .flatten()
+                            .mapNotNull { it.to?.trim()?.lowercase() }
+                            .filter { it.isNotEmpty() }
+                            .toSet()
+
+                        (endpointProcessStates + inlineProcessStates).forEach { s ->
+                            val cleanName = s.name?.trim().orEmpty()
+                            if (cleanName.isNotEmpty() &&
+                                s.hidden != true &&
+                                s.isDisabled != true &&
+                                cleanName.lowercase() !in hiddenStateNamesLower
+                            ) {
+                                registerAzureStateColor(cleanName, s.color)
+                                registerStateCategory(cleanName, s.stateCategory, project, typeName)
+                            }
+                        }
+
+                        (endpointWitStates + inlineWitStates).forEach { s ->
+                            val cleanName = s.name?.trim().orEmpty()
+                            if (cleanName.isNotEmpty() &&
+                                s.hidden != true &&
+                                s.isDisabled != true &&
+                                cleanName.lowercase() !in hiddenStateNamesLower
+                            ) {
+                                registerAzureStateColor(cleanName, s.color)
+                                registerStateCategory(cleanName, s.category, project, typeName)
+                            }
+                        }
+
+                        val enabledFromEndpointProcess = endpointProcessStates
+                            .filter { it.hidden != true && it.isDisabled != true }
+                            .sortedBy { it.order ?: Int.MAX_VALUE }
+                            .mapNotNull { it.name?.trim() }
+                            .filter { it.isNotEmpty() && it.lowercase() !in hiddenStateNamesLower }
+                            .distinctBy { it.lowercase() }
+
+                        val enabledFromInlineProcess = inlineProcessStates
+                            .filter { it.hidden != true && it.isDisabled != true }
+                            .sortedBy { it.order ?: Int.MAX_VALUE }
+                            .mapNotNull { it.name?.trim() }
+                            .filter { it.isNotEmpty() && it.lowercase() !in hiddenStateNamesLower }
+                            .distinctBy { it.lowercase() }
+
+                        val enabledFromProcess = when {
+                            enabledFromEndpointProcess.isNotEmpty() && enabledFromInlineProcess.isNotEmpty() -> {
+                                val inlineLowerSet = enabledFromInlineProcess.map { it.lowercase() }.toSet()
+                                val intersected = enabledFromEndpointProcess.filter { it.lowercase() in inlineLowerSet }
+                                intersected.ifEmpty { enabledFromEndpointProcess }
+                            }
+                            enabledFromEndpointProcess.isNotEmpty() -> enabledFromEndpointProcess
+                            enabledFromInlineProcess.isNotEmpty() -> enabledFromInlineProcess
+                            else -> emptyList()
+                        }
+
+                        val enabledFromEndpointWit = endpointWitStates
+                            .filter { it.hidden != true && it.isDisabled != true }
+                            .mapNotNull { it.name?.trim() }
+                            .filter { it.isNotEmpty() && it.lowercase() !in hiddenStateNamesLower }
+                            .distinctBy { it.lowercase() }
+
+                        val enabledFromInlineWit = inlineWitStates
+                            .filter { it.hidden != true && it.isDisabled != true }
+                            .mapNotNull { it.name?.trim() }
+                            .filter { it.isNotEmpty() && it.lowercase() !in hiddenStateNamesLower }
+                            .distinctBy { it.lowercase() }
+
+                        val enabledFromWit = when {
+                            enabledFromEndpointWit.isNotEmpty() && enabledFromInlineWit.isNotEmpty() -> {
+                                val inlineWitLowerSet = enabledFromInlineWit.map { it.lowercase() }.toSet()
+                                val intersected = enabledFromEndpointWit.filter { it.lowercase() in inlineWitLowerSet }
+                                intersected.ifEmpty { enabledFromEndpointWit }
+                            }
+                            enabledFromEndpointWit.isNotEmpty() -> enabledFromEndpointWit
+                            enabledFromInlineWit.isNotEmpty() -> enabledFromInlineWit
+                            else -> emptyList()
+                        }
+
+                        val baseFinalStates = when {
                             enabledFromProcess.isNotEmpty() && enabledFromWit.isNotEmpty() -> {
                                 val witLowerSet = enabledFromWit.map { it.lowercase() }.toSet()
                                 val intersected = enabledFromProcess.filter { it.lowercase() in witLowerSet }
@@ -1086,13 +1261,22 @@ class AzureProcessMetadataRepository(
                             else -> emptyList()
                         }
 
-                        candidate.name to finalStates
+                        val finalStates = if (transitionTargetsLower.isNotEmpty() && baseFinalStates.isNotEmpty()) {
+                            val transitionFiltered = baseFinalStates.filter {
+                                it.lowercase() in transitionTargetsLower && it.lowercase() !in hiddenStateNamesLower
+                            }
+                            transitionFiltered.ifEmpty { baseFinalStates }
+                        } else {
+                            baseFinalStates
+                        }
+
+                        typeName to finalStates
                     }
                 }.awaitAll()
 
                 val unorderedMap = linkedMapOf<String, List<String>>()
                 for ((typeName, states) in perTypeResults) {
-                    if (states.isNotEmpty()) {
+                    if (typeName.isNotEmpty() && states.isNotEmpty()) {
                         unorderedMap[typeName] = states
                     }
                 }

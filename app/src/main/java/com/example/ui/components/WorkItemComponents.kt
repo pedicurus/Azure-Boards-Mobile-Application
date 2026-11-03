@@ -1,5 +1,10 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,14 +16,20 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,6 +57,7 @@ import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Sell
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
@@ -83,8 +95,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
+import kotlinx.coroutines.delay
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -152,11 +166,43 @@ fun isAlmostPersian(text: String?): Boolean {
     return (rtlLetters.toFloat() / totalLetters.toFloat()) >= 0.4f
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+enum class ChildFilterCategory(val label: String) {
+    ALL("All"),
+    NOT_STARTED("Not Started"),
+    IN_PROGRESS("In Progress"),
+    DONE("Done")
+}
+
+fun matchesChildFilter(state: String?, filter: ChildFilterCategory): Boolean {
+    if (filter == ChildFilterCategory.ALL) return true
+    val clean = state?.trim()?.lowercase() ?: ""
+    val isDone = clean.contains("done") || clean.contains("close") ||
+        clean.contains("resolved") || clean.contains("completed") ||
+        clean.contains("finished") || clean.contains("تکمیل") ||
+        clean.contains("بسته") || clean.contains("پایان") ||
+        clean.contains("remove") || clean.contains("منتفی") ||
+        clean.contains("لغو") || clean.contains("cut")
+
+    val isNotStarted = clean.contains("new") || clean.contains("to do") ||
+        clean.contains("todo") || clean.contains("proposed") ||
+        clean.contains("approved") || clean.contains("open") ||
+        clean.contains("design") || clean.contains("کارها") ||
+        clean.contains("اهداف") || clean.contains("جدید")
+
+    return when (filter) {
+        ChildFilterCategory.ALL -> true
+        ChildFilterCategory.NOT_STARTED -> isNotStarted
+        ChildFilterCategory.DONE -> isDone
+        ChildFilterCategory.IN_PROGRESS -> !isDone && !isNotStarted
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun FigmaItemDetailView(
     workItem: WorkItem,
     onBack: () -> Unit,
+    onClose: () -> Unit = onBack,
     onCreateOrUpdate: () -> Unit = {},
     availableStates: List<String> = emptyList(),
     availableAssignees: List<String> = emptyList(),
@@ -164,13 +210,23 @@ fun FigmaItemDetailView(
     availableAreas: List<String> = emptyList(),
     availableIterations: List<String> = emptyList(),
     allWorkItems: List<WorkItem> = emptyList(),
+    parentWorkItem: WorkItem? = null,
     childWorkItems: List<WorkItem> = emptyList(),
     allowedChildTypes: List<String> = emptyList(),
+    allowedParentTypes: List<String> = emptyList(),
+    canHaveParent: Boolean = false,
     getChildStates: (WorkItem) -> List<String> = { emptyList() },
     getStatesForChildType: (String) -> List<String> = { emptyList() },
+    getParentStates: (WorkItem) -> List<String> = { emptyList() },
+    getStatesForParentType: (String) -> List<String> = { emptyList() },
     onAddChildWorkItem: (title: String, childType: String, initialState: String) -> Unit = { _, _, _ -> },
     onAddExistingChildWorkItem: (childId: Int, onResult: (Result<WorkItem>) -> Unit) -> Unit = { _, _ -> },
     onRemoveChildWorkItem: (childId: Int) -> Unit = {},
+    onAddParentWorkItem: (title: String, parentType: String, initialState: String) -> Unit = { _, _, _ -> },
+    onAddExistingParentWorkItem: (parentId: Int, onResult: (Result<WorkItem>) -> Unit) -> Unit = { _, _ -> },
+    onUnlinkParentWorkItem: (parentId: Int) -> Unit = {},
+    onNavigateToParent: (WorkItem) -> Unit = {},
+    onNavigateToChild: (WorkItem) -> Unit = {},
     comments: List<WorkItemComment> = emptyList(),
     isLoadingComments: Boolean = false,
     onAddComment: (commentText: String, onResult: (Result<WorkItemComment>) -> Unit) -> Unit = { _, _ -> },
@@ -186,6 +242,9 @@ fun FigmaItemDetailView(
     val titleFocusRequester = remember { FocusRequester() }
     var showAllChildren by remember(workItem.id) {
         mutableStateOf(false)
+    }
+    var selectedChildFilter by remember(workItem.id) {
+        mutableStateOf(ChildFilterCategory.ALL)
     }
     var showAllComments by remember(workItem.id) {
         mutableStateOf(false)
@@ -261,6 +320,36 @@ fun FigmaItemDetailView(
         }
     }
 
+    var showAddParentOptionDialog by remember { mutableStateOf(false) }
+    var showAddParentDialog by remember { mutableStateOf(false) }
+    var showAddExistingParentDialog by remember { mutableStateOf(false) }
+    var showReplaceParentConfirmDialog by remember { mutableStateOf(false) }
+    var existingParentIdInput by remember { mutableStateOf("") }
+    var existingParentError by remember { mutableStateOf<String?>(null) }
+    var isLinkingExistingParent by remember { mutableStateOf(false) }
+
+    var newParentTitleInput by remember { mutableStateOf("") }
+    var newParentSelectedType by remember(workItem.id, allowedParentTypes) {
+        mutableStateOf(allowedParentTypes.firstOrNull() ?: "")
+    }
+    val newParentTypeStates = remember(newParentSelectedType, allowedParentTypes) {
+        getStatesForParentType(newParentSelectedType).ifEmpty {
+            listOf("New", "In Progress", "Done")
+        }
+    }
+    var newParentSelectedState by remember(newParentSelectedType, newParentTypeStates) {
+        mutableStateOf(newParentTypeStates.firstOrNull() ?: "New")
+    }
+
+    LaunchedEffect(allowedParentTypes, canHaveParent) {
+        if (!canHaveParent || allowedParentTypes.isEmpty()) {
+            showAddParentOptionDialog = false
+            showAddParentDialog = false
+            showAddExistingParentDialog = false
+            showReplaceParentConfirmDialog = false
+        }
+    }
+
     val stateOptions = remember(availableStates, currentState, workItem.workItemType) {
         val cleanAvailable = availableStates.filterNot { it.equals("All", ignoreCase = true) }
         val defaults = when {
@@ -287,38 +376,125 @@ fun FigmaItemDetailView(
             .distinct()
     }
 
-    Column(
+    val detailScrollState = rememberScrollState()
+    LaunchedEffect(workItem.id) {
+        detailScrollState.scrollTo(0)
+    }
+
+    val descriptionBringIntoViewRequester = remember { BringIntoViewRequester() }
+    val commentBringIntoViewRequester = remember { BringIntoViewRequester() }
+    var isDescriptionFocused by remember(workItem.id) { mutableStateOf(false) }
+    var isCommentFocused by remember(workItem.id) { mutableStateOf(false) }
+    val density = LocalDensity.current
+    val isImeVisible = WindowInsets.ime.getBottom(density) > 0
+
+    // Pre-indexed people directory for O(1)-allocation @mention autocomplete
+    val indexedMentionPeople = remember(availableAssignees, allWorkItems, comments) {
+        buildMentionPeopleIndex(
+            availableAssignees = availableAssignees,
+            allWorkItems = allWorkItems,
+            comments = comments
+        )
+    }
+
+    val activeMentionToken = remember(commentFieldValue.text, commentFieldValue.selection) {
+        extractActiveMentionToken(commentFieldValue)
+    }
+
+    // Trigger people suggestions as soon as '@' is typed with 1+ character filter
+    val matchingMentionPeople = remember(activeMentionToken, indexedMentionPeople) {
+        val token = activeMentionToken ?: return@remember emptyList()
+        val cleanQuery = token.query.trim()
+        if (cleanQuery.isEmpty()) {
+            indexedMentionPeople.take(8)
+        } else {
+            val lowerQuery = cleanQuery.lowercase()
+            indexedMentionPeople.asSequence()
+                .filter { candidate ->
+                    candidate.lowerName.contains(lowerQuery) ||
+                        (candidate.lowerEmail != null && candidate.lowerEmail.contains(lowerQuery))
+                }
+                .take(8)
+                .toList()
+        }
+    }
+
+    val isMentionBarVisible = activeMentionToken != null && matchingMentionPeople.isNotEmpty()
+
+    LaunchedEffect(isDescriptionFocused, isImeVisible, currentDescription.length) {
+        if (isDescriptionFocused) {
+            try {
+                delay(60)
+                descriptionBringIntoViewRequester.bringIntoView()
+            } catch (_: Exception) {}
+        }
+    }
+
+    LaunchedEffect(isCommentFocused, isImeVisible, isMentionBarVisible, commentFieldValue.text.length) {
+        if (isCommentFocused || isMentionBarVisible) {
+            try {
+                delay(60)
+                commentBringIntoViewRequester.bringIntoView()
+            } catch (_: Exception) {}
+        }
+    }
+
+    Box(
         modifier = modifier
-            .fillMaxWidth()
+            .fillMaxSize()
             .background(NeumorphicBg)
     ) {
-        // 1. Top Bar: < Detail
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .imePadding()
+        ) {
+        // 1. Top Bar: < Detail ... [X]
         Row(
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
-            IconButton(
-                onClick = onBack,
-                modifier = Modifier
-                    .size(40.dp)
-                    .testTag("detail_top_back_button")
+            Row(
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                    contentDescription = "Back",
-                    tint = TextPrimary,
-                    modifier = Modifier.size(26.dp)
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .testTag("detail_top_back_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                        contentDescription = "Back",
+                        tint = TextPrimary,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "Detail",
+                    color = TextPrimary,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
                 )
             }
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(
-                text = "Detail",
-                color = TextPrimary,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
+
+            IconButton(
+                onClick = onClose,
+                modifier = Modifier
+                    .size(40.dp)
+                    .testTag("detail_top_close_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close detail sheet",
+                    tint = TextPrimary,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
         }
 
         // Elevated White Container Sheet
@@ -327,13 +503,19 @@ fun FigmaItemDetailView(
             shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
             modifier = Modifier
                 .fillMaxWidth()
+                .weight(1f)
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .fillMaxSize()
+                    .verticalScroll(detailScrollState)
                     .navigationBarsPadding()
-                    .padding(horizontal = 20.dp, vertical = 22.dp)
-                    .verticalScroll(rememberScrollState())
+                    .padding(
+                        start = 20.dp,
+                        top = 22.dp,
+                        end = 20.dp,
+                        bottom = if (isMentionBarVisible) 116.dp else 28.dp
+                    )
             ) {
                 // Title (touch to edit) and Counter/ID
                 val isDetailTitleRtl = isAlmostPersian(currentTitle.ifBlank { workItem.title })
@@ -580,7 +762,7 @@ fun FigmaItemDetailView(
                         }
                     }
 
-                    // (2) Assigned To (Single Selected) — Unassigned + 3-char type-to-search people
+                    // (2) Assigned To (Single Selected) — Unassigned + instant type-to-search people
                     Box {
                         Surface(
                             onClick = { assigneeMenuExpanded = true },
@@ -699,6 +881,10 @@ fun FigmaItemDetailView(
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
+                            .bringIntoViewRequester(descriptionBringIntoViewRequester)
+                            .onFocusChanged { focusState ->
+                                isDescriptionFocused = focusState.isFocused
+                            }
                             .testTag("detail_description_input")
                     )
                 }
@@ -770,7 +956,7 @@ fun FigmaItemDetailView(
                         }
                     }
 
-                    // Plus button for searching/adding tags (3-char autocomplete)
+                    // Plus button for searching/adding tags (instant autocomplete)
                     Box {
                         Box(
                             contentAlignment = Alignment.Center,
@@ -792,6 +978,81 @@ fun FigmaItemDetailView(
                                 modifier = Modifier.size(18.dp)
                             )
                         }
+                    }
+                }
+
+                // 3.5 Parent section (placed right before Children section) — omitted for highest backlog level (e.g. Epic)
+                if (canHaveParent) {
+                    Spacer(modifier = Modifier.height(18.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "Parent",
+                            color = TextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        // Add or replace parent item button
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFEEF2F8))
+                                .border(1.dp, Color(0xFFCBD5E1), CircleShape)
+                                .clickable {
+                                    if (parentWorkItem != null) {
+                                        showReplaceParentConfirmDialog = true
+                                    } else {
+                                        showAddParentOptionDialog = true
+                                    }
+                                }
+                                .testTag("detail_add_parent_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = if (parentWorkItem != null) "Change parent item" else "Add parent item",
+                                tint = Color(0xFF0F172A),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    if (parentWorkItem == null) {
+                        Surface(
+                            color = Color(0xFFF8FAFC),
+                            shape = RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("detail_parent_empty")
+                        ) {
+                            Text(
+                                text = "No parent work item linked",
+                                color = NeumorphicTextSecondary,
+                                fontSize = 13.sp,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                            )
+                        }
+                    } else {
+                        ParentWorkItemStatusRow(
+                            parent = parentWorkItem,
+                            onNavigateToParent = {
+                                onNavigateToParent(parentWorkItem)
+                            },
+                            onChangeParent = {
+                                showReplaceParentConfirmDialog = true
+                            },
+                            onUnlinkParent = {
+                                onUnlinkParentWorkItem(parentWorkItem.id)
+                            }
+                        )
                     }
                 }
 
@@ -854,7 +1115,51 @@ fun FigmaItemDetailView(
                             )
                         }
                     }
+                    if (childWorkItems.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        // Horizontal filter chips without item count badges
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(vertical = 2.dp)
+                                .testTag("detail_children_filter_row")
+                        ) {
+                            ChildFilterCategory.entries.forEach { category ->
+                                val isSelected = selectedChildFilter == category
+                                Surface(
+                                    onClick = { selectedChildFilter = category },
+                                    color = if (isSelected) NeumorphicTeal else Color(0xFFF1F5F9),
+                                    shape = RoundedCornerShape(20.dp),
+                                    border = androidx.compose.foundation.BorderStroke(
+                                        1.dp,
+                                        if (isSelected) NeumorphicTeal else SurfaceBorder
+                                    ),
+                                    shadowElevation = if (isSelected) 2.dp else 0.dp,
+                                    modifier = Modifier.testTag("detail_children_filter_${category.name.lowercase()}")
+                                ) {
+                                    Text(
+                                        text = category.label,
+                                        color = if (isSelected) Color.White else Color(0xFF334155),
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(10.dp))
+
+                    val filteredChildWorkItems = remember(childWorkItems, selectedChildFilter) {
+                        if (selectedChildFilter == ChildFilterCategory.ALL) {
+                            childWorkItems
+                        } else {
+                            childWorkItems.filter { matchesChildFilter(it.state, selectedChildFilter) }
+                        }
+                    }
 
                     if (childWorkItems.isEmpty()) {
                         Surface(
@@ -872,11 +1177,45 @@ fun FigmaItemDetailView(
                                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
                             )
                         }
+                    } else if (filteredChildWorkItems.isEmpty()) {
+                        Surface(
+                            color = Color(0xFFF8FAFC),
+                            shape = RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("detail_children_filter_empty")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                            ) {
+                                Text(
+                                    text = "No ${selectedChildFilter.label.lowercase()} child items",
+                                    color = NeumorphicTextSecondary,
+                                    fontSize = 13.sp
+                                )
+                                TextButton(
+                                    onClick = { selectedChildFilter = ChildFilterCategory.ALL },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                                ) {
+                                    Text(
+                                        text = "Show All",
+                                        color = NeumorphicTeal,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
                     } else {
                         val displayedChildren = if (showAllChildren) {
-                            childWorkItems
+                            filteredChildWorkItems
                         } else {
-                            childWorkItems.take(3)
+                            filteredChildWorkItems.take(3)
                         }
                         Column(
                             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -893,11 +1232,14 @@ fun FigmaItemDetailView(
                                     },
                                     onRemoveChild = {
                                         onRemoveChildWorkItem(child.id)
+                                    },
+                                    onNavigateToChild = {
+                                        onNavigateToChild(child)
                                     }
                                 )
                             }
 
-                            if (!showAllChildren && childWorkItems.size > 3) {
+                            if (!showAllChildren && filteredChildWorkItems.size > 3) {
                                 OutlinedButton(
                                     onClick = { showAllChildren = true },
                                     shape = RoundedCornerShape(12.dp),
@@ -911,7 +1253,7 @@ fun FigmaItemDetailView(
                                         .testTag("detail_more_children_button")
                                 ) {
                                     Text(
-                                        text = "More Children",
+                                        text = "More Children (${filteredChildWorkItems.size - 3})",
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.SemiBold
                                     )
@@ -925,34 +1267,6 @@ fun FigmaItemDetailView(
                 Spacer(modifier = Modifier.height(22.dp))
                 HorizontalDivider(color = SurfaceBorder, thickness = 1.dp)
                 Spacer(modifier = Modifier.height(18.dp))
-
-                // Pre-indexed people directory for O(1)-allocation @mention autocomplete
-                val indexedMentionPeople = remember(availableAssignees, allWorkItems, comments) {
-                    buildMentionPeopleIndex(
-                        availableAssignees = availableAssignees,
-                        allWorkItems = allWorkItems,
-                        comments = comments
-                    )
-                }
-
-                val activeMentionToken = remember(commentFieldValue.text, commentFieldValue.selection) {
-                    extractActiveMentionToken(commentFieldValue)
-                }
-
-                // Trigger people suggestions only when user types '@' followed by >= 3 characters
-                val matchingMentionPeople = remember(activeMentionToken, indexedMentionPeople) {
-                    val token = activeMentionToken ?: return@remember emptyList()
-                    val cleanQuery = token.query.trim()
-                    if (cleanQuery.length < 3) return@remember emptyList()
-                    val lowerQuery = cleanQuery.lowercase()
-                    indexedMentionPeople.asSequence()
-                        .filter { candidate ->
-                            candidate.lowerName.contains(lowerQuery) ||
-                                (candidate.lowerEmail != null && candidate.lowerEmail.contains(lowerQuery))
-                        }
-                        .take(6)
-                        .toList()
-                }
 
                 // Discussion Header Row
                 Row(
@@ -1019,6 +1333,7 @@ fun FigmaItemDetailView(
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
+                        .bringIntoViewRequester(commentBringIntoViewRequester)
                         .testTag("detail_discussion_composer_card")
                 ) {
                     Column(
@@ -1036,7 +1351,7 @@ fun FigmaItemDetailView(
                                 },
                                 placeholder = {
                                     Text(
-                                        text = "Add a comment... Use @ + 3 chars to mention people",
+                                        text = "Add a comment... Type @ to mention people",
                                         color = NeumorphicTextSecondary,
                                         fontSize = 13.sp,
                                         textAlign = if (isCommentInputRtl) TextAlign.Right else TextAlign.Left,
@@ -1065,117 +1380,11 @@ fun FigmaItemDetailView(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .focusRequester(commentFocusRequester)
+                                    .onFocusChanged { focusState ->
+                                        isCommentFocused = focusState.isFocused
+                                    }
                                     .testTag("detail_comment_input")
                             )
-                        }
-
-                        // High-Performance @Mention Autocomplete Dropdown (shown when >= 3 chars after '@')
-                        if (matchingMentionPeople.isNotEmpty() && activeMentionToken != null) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Surface(
-                                color = SurfaceCard,
-                                shape = RoundedCornerShape(12.dp),
-                                shadowElevation = 4.dp,
-                                border = androidx.compose.foundation.BorderStroke(1.dp, NeumorphicTeal.copy(alpha = 0.35f)),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("detail_mention_suggestions_list")
-                            ) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 4.dp)
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 12.dp, vertical = 4.dp)
-                                    ) {
-                                        Text(
-                                            text = "People matching \"@${activeMentionToken.query.trim()}\"",
-                                            color = NeumorphicTeal,
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Text(
-                                            text = "Tap to mention",
-                                            color = NeumorphicTextSecondary,
-                                            fontSize = 10.sp
-                                        )
-                                    }
-                                    HorizontalDivider(color = SurfaceBorder.copy(alpha = 0.6f), thickness = 0.5.dp)
-
-                                    matchingMentionPeople.forEachIndexed { index, candidate ->
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable {
-                                                    val currentText = commentFieldValue.text
-                                                    val safeStart = activeMentionToken.startIndex.coerceIn(0, currentText.length)
-                                                    val safeEnd = activeMentionToken.endIndex.coerceIn(safeStart, currentText.length)
-                                                    val mentionInsertion = "@<${candidate.displayName}> "
-                                                    val newText = buildString(currentText.length + mentionInsertion.length) {
-                                                        append(currentText, 0, safeStart)
-                                                        append(mentionInsertion)
-                                                        append(currentText, safeEnd, currentText.length)
-                                                    }
-                                                    val newCursor = safeStart + mentionInsertion.length
-                                                    commentFieldValue = TextFieldValue(
-                                                        text = newText,
-                                                        selection = TextRange(newCursor)
-                                                    )
-                                                }
-                                                .padding(horizontal = 12.dp, vertical = 8.dp)
-                                                .testTag("detail_mention_option_${candidate.displayName}")
-                                        ) {
-                                            Box(
-                                                contentAlignment = Alignment.Center,
-                                                modifier = Modifier
-                                                    .size(28.dp)
-                                                    .clip(CircleShape)
-                                                    .background(NeumorphicTeal.copy(alpha = 0.14f))
-                                            ) {
-                                                Text(
-                                                    text = candidate.initial,
-                                                    color = NeumorphicTeal,
-                                                    fontSize = 12.sp,
-                                                    fontWeight = FontWeight.Bold
-                                                )
-                                            }
-                                            Spacer(modifier = Modifier.width(10.dp))
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    text = candidate.displayName,
-                                                    color = TextPrimary,
-                                                    fontSize = 13.sp,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                                if (!candidate.email.isNullOrBlank()) {
-                                                    Text(
-                                                        text = candidate.email,
-                                                        color = NeumorphicTextSecondary,
-                                                        fontSize = 11.sp,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
-                                                }
-                                            }
-                                        }
-                                        if (index < matchingMentionPeople.lastIndex) {
-                                            HorizontalDivider(
-                                                color = SurfaceBorder.copy(alpha = 0.5f),
-                                                thickness = 0.5.dp,
-                                                modifier = Modifier.padding(horizontal = 12.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
                         }
 
                         Spacer(modifier = Modifier.height(8.dp))
@@ -1808,6 +2017,514 @@ fun FigmaItemDetailView(
         )
     }
 
+    // Step 0 Dialog: Confirm replacing existing parent
+    if (showReplaceParentConfirmDialog && canHaveParent) {
+        AlertDialog(
+            onDismissRequest = { showReplaceParentConfirmDialog = false },
+            title = {
+                Text(
+                    text = "Replace Parent Link?",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+            },
+            text = {
+                Text(
+                    text = "Work item #${workItem.id} is currently linked to parent #${parentWorkItem?.id}. Do you want to replace it with a new parent?",
+                    color = NeumorphicTextSecondary,
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showReplaceParentConfirmDialog = false
+                        showAddParentOptionDialog = true
+                    },
+                    modifier = Modifier.testTag("confirm_replace_parent_button")
+                ) {
+                    Text("Replace", color = NeumorphicTeal, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showReplaceParentConfirmDialog = false }) {
+                    Text("Cancel", color = NeumorphicTextSecondary)
+                }
+            },
+            containerColor = SurfaceCard,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    // Step 1 Parent Dialog: Choose between "New Item" or "Existing Item"
+    if (showAddParentOptionDialog && canHaveParent) {
+        AlertDialog(
+            onDismissRequest = { showAddParentOptionDialog = false },
+            title = {
+                Text(
+                    text = if (parentWorkItem != null) "Change Parent Item" else "Add Parent Item",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("add_parent_options_dialog")
+                ) {
+                    Surface(
+                        onClick = {
+                            showAddParentOptionDialog = false
+                            newParentTitleInput = ""
+                            newParentSelectedType = allowedParentTypes.firstOrNull() ?: ""
+                            showAddParentDialog = true
+                        },
+                        color = Color(0xFFF8FAFC),
+                        shape = RoundedCornerShape(14.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("add_parent_option_new")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(NeumorphicTeal.copy(alpha = 0.14f))
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = null,
+                                    tint = NeumorphicTeal,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "New Item",
+                                    color = TextPrimary,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Create a new parent work item",
+                                    color = NeumorphicTextSecondary,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+
+                    Surface(
+                        onClick = {
+                            showAddParentOptionDialog = false
+                            existingParentIdInput = ""
+                            existingParentError = null
+                            isLinkingExistingParent = false
+                            showAddExistingParentDialog = true
+                        },
+                        color = Color(0xFFF8FAFC),
+                        shape = RoundedCornerShape(14.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("add_parent_option_existing")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(NeumorphicTeal.copy(alpha = 0.14f))
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Link,
+                                    contentDescription = null,
+                                    tint = NeumorphicTeal,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Existing Item",
+                                    color = TextPrimary,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Add an existing work item by ID",
+                                    color = NeumorphicTextSecondary,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showAddParentOptionDialog = false }) {
+                    Text("Cancel", color = NeumorphicTextSecondary)
+                }
+            },
+            containerColor = SurfaceCard,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    // Step 2B Parent Dialog: Add Existing Parent Item by ID
+    if (showAddExistingParentDialog && canHaveParent) {
+        val parsedParentCandidateId = existingParentIdInput.trim().removePrefix("#").trim().toIntOrNull()
+        val matchedParentCandidate = remember(parsedParentCandidateId, allWorkItems) {
+            if (parsedParentCandidateId == null) null
+            else allWorkItems.firstOrNull { it.id == parsedParentCandidateId }
+        }
+
+        AlertDialog(
+            onDismissRequest = {
+                if (!isLinkingExistingParent) {
+                    showAddExistingParentDialog = false
+                }
+            },
+            title = {
+                Text(
+                    text = "Add Existing Parent",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Enter the Work Item ID to link as parent of #${workItem.id}:",
+                        color = NeumorphicTextSecondary,
+                        fontSize = 12.sp
+                    )
+                    OutlinedTextField(
+                        value = existingParentIdInput,
+                        onValueChange = { updated ->
+                            existingParentIdInput = updated
+                            existingParentError = null
+                        },
+                        placeholder = {
+                            Text(
+                                text = "Work item ID (e.g. 1234)",
+                                color = NeumorphicTextSecondary,
+                                fontSize = 14.sp
+                            )
+                        },
+                        isError = existingParentError != null,
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = NeumorphicTeal,
+                            focusedBorderColor = NeumorphicTeal,
+                            unfocusedBorderColor = SurfaceBorder,
+                            focusedContainerColor = SurfaceCard,
+                            unfocusedContainerColor = SurfaceCard,
+                            focusedPlaceholderColor = NeumorphicTextSecondary,
+                            unfocusedPlaceholderColor = NeumorphicTextSecondary
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("existing_parent_id_input")
+                    )
+
+                    if (matchedParentCandidate != null) {
+                        Surface(
+                            color = Color(0xFFF8FAFC),
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    AzureWorkItemTypeSymbol(
+                                        workItemType = matchedParentCandidate.workItemType,
+                                        iconSize = 15.dp
+                                    )
+                                    Text(
+                                        text = "#${matchedParentCandidate.id}",
+                                        color = NeumorphicTeal,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "· ${matchedParentCandidate.state}",
+                                        color = NeumorphicTextSecondary,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = matchedParentCandidate.title,
+                                    color = TextPrimary,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
+                    if (existingParentError != null) {
+                        Text(
+                            text = existingParentError!!,
+                            color = Color(0xFFDC2626),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.testTag("existing_parent_error_text")
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !isLinkingExistingParent,
+                    onClick = {
+                        val targetId = existingParentIdInput.trim().removePrefix("#").trim().toIntOrNull()
+                        when {
+                            targetId == null || targetId <= 0 -> {
+                                existingParentError = "Please enter a valid numeric work item ID."
+                            }
+                            targetId == workItem.id -> {
+                                existingParentError = "A work item cannot be its own parent."
+                            }
+                            targetId in workItem.childIds -> {
+                                existingParentError = "Work item #$targetId is a child of this item and cannot be its parent."
+                            }
+                            targetId == workItem.parentId -> {
+                                existingParentError = "Work item #$targetId is already the parent of this item."
+                            }
+                            else -> {
+                                isLinkingExistingParent = true
+                                existingParentError = null
+                                onAddExistingParentWorkItem(targetId) { result ->
+                                    isLinkingExistingParent = false
+                                    result.fold(
+                                        onSuccess = {
+                                            showAddExistingParentDialog = false
+                                        },
+                                        onFailure = { err ->
+                                            existingParentError = err.message ?: "Failed to link work item #$targetId."
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("confirm_add_existing_parent_button")
+                ) {
+                    if (isLinkingExistingParent) {
+                        CircularProgressIndicator(
+                            color = NeumorphicTeal,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+                    Text("Set Parent", color = NeumorphicTeal, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !isLinkingExistingParent,
+                    onClick = { showAddExistingParentDialog = false }
+                ) {
+                    Text("Cancel", color = NeumorphicTextSecondary)
+                }
+            },
+            containerColor = SurfaceCard,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    // Step 2A Parent Dialog: Create New Parent Item
+    if (showAddParentDialog && canHaveParent) {
+        val isNewParentTitleRtl = isAlmostPersian(newParentTitleInput.ifBlank { workItem.title })
+        AlertDialog(
+            onDismissRequest = { showAddParentDialog = false },
+            title = {
+                Text(
+                    text = "New Parent (${newParentSelectedType})",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (allowedParentTypes.size > 1) {
+                        Text(
+                            text = "Type",
+                            color = NeumorphicTextSecondary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            allowedParentTypes.forEach { parentTypeOption ->
+                                val isTypeSelected = parentTypeOption == newParentSelectedType
+                                Surface(
+                                    onClick = { newParentSelectedType = parentTypeOption },
+                                    color = if (isTypeSelected) NeumorphicTeal.copy(alpha = 0.14f) else Color(0xFFF8FAFC),
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = androidx.compose.foundation.BorderStroke(
+                                        1.dp,
+                                        if (isTypeSelected) NeumorphicTeal else SurfaceBorder
+                                    )
+                                ) {
+                                    Text(
+                                        text = parentTypeOption,
+                                        color = if (isTypeSelected) NeumorphicTeal else TextPrimary,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isTypeSelected) FontWeight.Bold else FontWeight.Medium,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    CompositionLocalProvider(
+                        LocalLayoutDirection provides if (isNewParentTitleRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+                    ) {
+                        OutlinedTextField(
+                            value = newParentTitleInput,
+                            onValueChange = { newParentTitleInput = it },
+                            placeholder = {
+                                Text(
+                                    text = "Enter parent title...",
+                                    color = NeumorphicTextSecondary,
+                                    fontSize = 14.sp,
+                                    textAlign = if (isNewParentTitleRtl) TextAlign.Right else TextAlign.Left,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            },
+                            textStyle = TextStyle(
+                                color = TextPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                                textAlign = if (isNewParentTitleRtl) TextAlign.Right else TextAlign.Left,
+                                textDirection = if (isNewParentTitleRtl) TextDirection.Rtl else TextDirection.Ltr
+                            ),
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary,
+                                cursorColor = NeumorphicTeal,
+                                focusedBorderColor = NeumorphicTeal,
+                                unfocusedBorderColor = SurfaceBorder,
+                                focusedContainerColor = SurfaceCard,
+                                unfocusedContainerColor = SurfaceCard,
+                                focusedPlaceholderColor = NeumorphicTextSecondary,
+                                unfocusedPlaceholderColor = NeumorphicTextSecondary
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("new_parent_title_input")
+                        )
+                    }
+
+                    if (newParentTypeStates.isNotEmpty()) {
+                        Text(
+                            text = "State",
+                            color = NeumorphicTextSecondary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            newParentTypeStates.forEach { stateOption ->
+                                val isStateSelected = stateOption == newParentSelectedState
+                                val stateColor = getAzureStateColor(stateOption)
+                                val stateBg = getAzureStateBadgeBg(stateOption)
+                                val stateText = getAzureStateBadgeText(stateOption)
+                                Surface(
+                                    onClick = { newParentSelectedState = stateOption },
+                                    color = if (isStateSelected) stateBg else Color(0xFFF8FAFC),
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = androidx.compose.foundation.BorderStroke(
+                                        1.dp,
+                                        if (isStateSelected) stateColor else SurfaceBorder
+                                    )
+                                ) {
+                                    Text(
+                                        text = stateOption,
+                                        color = if (isStateSelected) stateText else TextPrimary,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isStateSelected) FontWeight.Bold else FontWeight.Medium,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val trimmedTitle = newParentTitleInput.trim()
+                        if (trimmedTitle.isNotEmpty()) {
+                            onAddParentWorkItem(trimmedTitle, newParentSelectedType, newParentSelectedState)
+                            showAddParentDialog = false
+                        }
+                    },
+                    modifier = Modifier.testTag("confirm_add_parent_button")
+                ) {
+                    Text("Create Parent", color = NeumorphicTeal, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddParentDialog = false }) {
+                    Text("Cancel", color = NeumorphicTextSecondary)
+                }
+            },
+            containerColor = SurfaceCard,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
     if (assigneeMenuExpanded) {
         AssigneeSearchDialog(
             currentAssignee = currentAssignee,
@@ -1938,12 +2655,147 @@ fun FigmaItemDetailView(
             onDismiss = { showAddTagDialog = false }
         )
     }
+
+    // Floating Mention Suggestions Bar docked directly above the software keyboard (IME)
+    AnimatedVisibility(
+        visible = activeMentionToken != null && matchingMentionPeople.isNotEmpty(),
+        enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+        exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+        modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .imePadding()
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Surface(
+            color = SurfaceCard,
+            shape = RoundedCornerShape(16.dp),
+            shadowElevation = 8.dp,
+            border = androidx.compose.foundation.BorderStroke(1.5.dp, NeumorphicTeal),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("floating_mention_suggestions_bar")
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AlternateEmail,
+                            contentDescription = null,
+                            tint = NeumorphicTeal,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = if (activeMentionToken?.query?.trim().isNullOrEmpty()) "Mention someone" else "Matching \"@${activeMentionToken?.query?.trim()}\"",
+                            color = NeumorphicTeal,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Text(
+                        text = "Tap to insert",
+                        color = NeumorphicTextSecondary,
+                        fontSize = 11.sp
+                    )
+                }
+                HorizontalDivider(
+                    color = SurfaceBorder,
+                    thickness = 0.5.dp,
+                    modifier = Modifier.padding(vertical = 4.dp)
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(vertical = 2.dp)
+                ) {
+                    matchingMentionPeople.forEach { candidate ->
+                        Surface(
+                            onClick = {
+                                val currentText = commentFieldValue.text
+                                val token = activeMentionToken ?: return@Surface
+                                val safeStart = token.startIndex.coerceIn(0, currentText.length)
+                                val safeEnd = token.endIndex.coerceIn(safeStart, currentText.length)
+                                val mentionInsertion = "@<${candidate.displayName}> "
+                                val newText = buildString(currentText.length + mentionInsertion.length) {
+                                    append(currentText, 0, safeStart)
+                                    append(mentionInsertion)
+                                    append(currentText, safeEnd, currentText.length)
+                                }
+                                val newCursor = safeStart + mentionInsertion.length
+                                commentFieldValue = TextFieldValue(
+                                    text = newText,
+                                    selection = TextRange(newCursor)
+                                )
+                            },
+                            color = Color(0xFFF1F5F9),
+                            shape = RoundedCornerShape(20.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, NeumorphicTeal.copy(alpha = 0.35f)),
+                            modifier = Modifier.testTag("floating_mention_chip_${candidate.displayName}")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .clip(CircleShape)
+                                        .background(NeumorphicTeal.copy(alpha = 0.16f))
+                                ) {
+                                    Text(
+                                        text = candidate.initial,
+                                        color = NeumorphicTeal,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Column {
+                                    Text(
+                                        text = candidate.displayName,
+                                        color = TextPrimary,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    if (!candidate.email.isNullOrBlank()) {
+                                        Text(
+                                            text = candidate.email,
+                                            color = NeumorphicTextSecondary,
+                                            fontSize = 10.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 }
 
 @Composable
 fun WorkItemCard(
     workItem: WorkItem,
     onClick: () -> Unit,
+    availableStates: List<String> = emptyList(),
+    onUpdateState: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val assignee = workItem.assignedToName?.trim()?.takeIf { it.isNotBlank() }
@@ -1951,6 +2803,20 @@ fun WorkItemCard(
 
     val description = workItem.description?.takeIf { it.isNotBlank() }
         ?: workItem.title
+
+    var stateMenuExpanded by remember { mutableStateOf(false) }
+
+    val stateOptions = remember(availableStates, workItem.state, workItem.workItemType) {
+        val cleanAvailable = availableStates.filterNot { it.equals("All", ignoreCase = true) }
+        val defaults = when {
+            workItem.workItemType.contains("هدف") -> listOf("اهداف", "در راه", "تکمیل")
+            workItem.workItemType.contains("کار") -> listOf("کارها", "امروز", "تکمیل", "منتفی")
+            else -> listOf("New", "Active", "Resolved", "Closed", "Done")
+        }
+        ((if (cleanAvailable.isNotEmpty()) cleanAvailable else defaults) + workItem.state)
+            .filterNot { it.equals("All", ignoreCase = true) }
+            .distinct()
+    }
 
     Card(
         onClick = onClick,
@@ -2065,22 +2931,227 @@ fun WorkItemCard(
 
                 Spacer(modifier = Modifier.width(8.dp))
 
-                // Right: State Badge Pill with high-contrast text
+                // Right: State Badge Pill with high-contrast text and interactive state selector
                 val stateColor = getAzureStateColor(workItem.state)
                 val badgeBg = getAzureStateBadgeBg(workItem.state)
                 val badgeText = getAzureStateBadgeText(workItem.state)
 
-                Surface(
-                    color = badgeBg,
-                    shape = RoundedCornerShape(14.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, stateColor.copy(alpha = 0.4f))
+                Box {
+                    Surface(
+                        onClick = {
+                            if (onUpdateState != null && stateOptions.size > 1) {
+                                stateMenuExpanded = true
+                            } else {
+                                onClick()
+                            }
+                        },
+                        color = badgeBg,
+                        shape = RoundedCornerShape(14.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, stateColor.copy(alpha = 0.45f)),
+                        modifier = Modifier.testTag("work_item_card_state_badge_${workItem.id}")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.padding(
+                                start = 12.dp,
+                                end = if (onUpdateState != null) 8.dp else 12.dp,
+                                top = 5.dp,
+                                bottom = 5.dp
+                            )
+                        ) {
+                            Text(
+                                text = workItem.state,
+                                color = badgeText,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            if (onUpdateState != null) {
+                                Icon(
+                                    imageVector = Icons.Default.KeyboardArrowDown,
+                                    contentDescription = "Change state for #${workItem.id}",
+                                    tint = badgeText,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    if (onUpdateState != null) {
+                        DropdownMenu(
+                            expanded = stateMenuExpanded,
+                            onDismissRequest = { stateMenuExpanded = false },
+                            modifier = Modifier
+                                .background(SurfaceCard)
+                                .testTag("work_item_state_menu_${workItem.id}")
+                        ) {
+                            stateOptions.forEach { stateOption ->
+                                val isCurrent = stateOption.equals(workItem.state, ignoreCase = true)
+                                val optColor = getAzureStateColor(stateOption)
+                                val optBg = getAzureStateBadgeBg(stateOption)
+                                val optText = getAzureStateBadgeText(stateOption)
+
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Surface(
+                                                color = optBg,
+                                                shape = RoundedCornerShape(8.dp),
+                                                border = androidx.compose.foundation.BorderStroke(1.dp, optColor.copy(alpha = 0.35f))
+                                            ) {
+                                                Text(
+                                                    text = stateOption,
+                                                    color = optText,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                )
+                                            }
+                                            if (isCurrent) {
+                                                Spacer(modifier = Modifier.width(10.dp))
+                                                Icon(
+                                                    imageVector = Icons.Default.Check,
+                                                    contentDescription = null,
+                                                    tint = NeumorphicTeal,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            }
+                                        }
+                                    },
+                                    onClick = {
+                                        stateMenuExpanded = false
+                                        if (!isCurrent) {
+                                            onUpdateState(stateOption)
+                                        }
+                                    },
+                                    modifier = Modifier.testTag("work_item_${workItem.id}_state_option_${stateOption}")
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ParentWorkItemStatusRow(
+    parent: WorkItem,
+    onNavigateToParent: () -> Unit,
+    onChangeParent: () -> Unit,
+    onUnlinkParent: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val stateColor = getAzureStateColor(parent.state)
+    val stateBg = getAzureStateBadgeBg(parent.state)
+    val stateText = getAzureStateBadgeText(parent.state)
+    val isTitleRtl = isAlmostPersian(parent.title)
+
+    Surface(
+        color = Color(0xFFF8FAFC),
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable { onNavigateToParent() }
+            .testTag("parent_work_item_row_${parent.id}")
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp)
+        ) {
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    AzureWorkItemTypeSymbol(
+                        workItemType = parent.workItemType.ifBlank { "Work Item" },
+                        iconSize = 15.dp,
+                        modifier = Modifier.testTag("parent_type_symbol_${parent.id}")
+                    )
+                    Text(
+                        text = "#${parent.id}",
+                        color = NeumorphicTeal,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (parent.state.isNotBlank()) {
+                        Surface(
+                            color = stateBg,
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, stateColor.copy(alpha = 0.35f))
+                        ) {
+                            Text(
+                                text = parent.state,
+                                color = stateText,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                CompositionLocalProvider(
+                    LocalLayoutDirection provides if (isTitleRtl) LayoutDirection.Rtl else LayoutDirection.Ltr
                 ) {
                     Text(
-                        text = workItem.state,
-                        color = badgeText,
-                        fontSize = 12.sp,
+                        text = parent.title,
+                        color = TextPrimary,
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Start,
+                        style = TextStyle(
+                            textDirection = if (isTitleRtl) TextDirection.Rtl else TextDirection.Ltr
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                IconButton(
+                    onClick = onChangeParent,
+                    modifier = Modifier
+                        .size(30.dp)
+                        .testTag("change_parent_button_${parent.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Link,
+                        contentDescription = "Change parent",
+                        tint = NeumorphicTextSecondary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onUnlinkParent,
+                    modifier = Modifier
+                        .size(30.dp)
+                        .testTag("unlink_parent_button_${parent.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Unlink parent",
+                        tint = NeumorphicTextSecondary,
+                        modifier = Modifier.size(16.dp)
                     )
                 }
             }
@@ -2094,6 +3165,7 @@ fun ChildWorkItemStatusRow(
     availableStates: List<String>,
     onStateChange: (String) -> Unit,
     onRemoveChild: (() -> Unit)? = null,
+    onNavigateToChild: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var currentChildState by remember(child.id, child.state) {
@@ -2121,6 +3193,13 @@ fun ChildWorkItemStatusRow(
         border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
         modifier = modifier
             .fillMaxWidth()
+            .then(
+                if (onNavigateToChild != null) {
+                    Modifier.clickable { onNavigateToChild() }
+                } else {
+                    Modifier
+                }
+            )
             .testTag("child_work_item_row_${child.id}")
     ) {
         Row(
@@ -2299,33 +3378,49 @@ fun ChildWorkItemStatusRow(
 fun WorkItemDetailSheet(
     workItem: WorkItem,
     onDismiss: () -> Unit,
+    onBack: () -> Unit = onDismiss,
     availableStates: List<String> = emptyList(),
     availableAssignees: List<String> = emptyList(),
     availableTags: List<String> = emptyList(),
     availableAreas: List<String> = emptyList(),
     availableIterations: List<String> = emptyList(),
     allWorkItems: List<WorkItem> = emptyList(),
+    parentWorkItem: WorkItem? = null,
     childWorkItems: List<WorkItem> = emptyList(),
     allowedChildTypes: List<String> = emptyList(),
+    allowedParentTypes: List<String> = emptyList(),
+    canHaveParent: Boolean = false,
     getChildStates: (WorkItem) -> List<String> = { emptyList() },
     getStatesForChildType: (String) -> List<String> = { emptyList() },
+    getParentStates: (WorkItem) -> List<String> = { emptyList() },
+    getStatesForParentType: (String) -> List<String> = { emptyList() },
     onAddChildWorkItem: (title: String, childType: String, initialState: String) -> Unit = { _, _, _ -> },
     onAddExistingChildWorkItem: (childId: Int, onResult: (Result<WorkItem>) -> Unit) -> Unit = { _, _ -> },
     onRemoveChildWorkItem: (childId: Int) -> Unit = {},
+    onAddParentWorkItem: (title: String, parentType: String, initialState: String) -> Unit = { _, _, _ -> },
+    onAddExistingParentWorkItem: (parentId: Int, onResult: (Result<WorkItem>) -> Unit) -> Unit = { _, _ -> },
+    onUnlinkParentWorkItem: (parentId: Int) -> Unit = {},
+    onNavigateToParent: (WorkItem) -> Unit = {},
+    onNavigateToChild: (WorkItem) -> Unit = {},
     comments: List<WorkItemComment> = emptyList(),
     isLoadingComments: Boolean = false,
     onAddComment: (commentText: String, onResult: (Result<WorkItemComment>) -> Unit) -> Unit = { _, _ -> },
     onUpdateWorkItem: (WorkItem) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    androidx.compose.material3.ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = NeumorphicBg,
+    Surface(
+        color = NeumorphicBg,
         modifier = modifier
+            .fillMaxSize()
+            .testTag("work_item_detail_screen")
     ) {
+        androidx.activity.compose.BackHandler {
+            onBack()
+        }
         FigmaItemDetailView(
             workItem = workItem,
-            onBack = onDismiss,
+            onBack = onBack,
+            onClose = onDismiss,
             onCreateOrUpdate = onDismiss,
             availableStates = availableStates,
             availableAssignees = availableAssignees,
@@ -2333,17 +3428,28 @@ fun WorkItemDetailSheet(
             availableAreas = availableAreas,
             availableIterations = availableIterations,
             allWorkItems = allWorkItems,
+            parentWorkItem = parentWorkItem,
             childWorkItems = childWorkItems,
             allowedChildTypes = allowedChildTypes,
+            allowedParentTypes = allowedParentTypes,
+            canHaveParent = canHaveParent,
             getChildStates = getChildStates,
             getStatesForChildType = getStatesForChildType,
+            getParentStates = getParentStates,
+            getStatesForParentType = getStatesForParentType,
             onAddChildWorkItem = onAddChildWorkItem,
             onAddExistingChildWorkItem = onAddExistingChildWorkItem,
             onRemoveChildWorkItem = onRemoveChildWorkItem,
+            onAddParentWorkItem = onAddParentWorkItem,
+            onAddExistingParentWorkItem = onAddExistingParentWorkItem,
+            onUnlinkParentWorkItem = onUnlinkParentWorkItem,
+            onNavigateToParent = onNavigateToParent,
+            onNavigateToChild = onNavigateToChild,
             comments = comments,
             isLoadingComments = isLoadingComments,
             onAddComment = onAddComment,
-            onUpdateWorkItem = onUpdateWorkItem
+            onUpdateWorkItem = onUpdateWorkItem,
+            modifier = Modifier.fillMaxSize()
         )
     }
 }
@@ -2647,7 +3753,7 @@ private fun DiscussionCommentCard(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun FigmaCreateWorkItemView(
     project: String?,
@@ -2817,10 +3923,25 @@ fun FigmaCreateWorkItemView(
         onUpdateWorkItem(updated)
     }
 
+    val createDescriptionBringIntoViewRequester = remember { BringIntoViewRequester() }
+    var isCreateDescriptionFocused by remember { mutableStateOf(false) }
+    val createDensity = LocalDensity.current
+    val isCreateImeVisible = WindowInsets.ime.getBottom(createDensity) > 0
+
+    LaunchedEffect(isCreateDescriptionFocused, isCreateImeVisible, currentDescription.length) {
+        if (isCreateDescriptionFocused) {
+            try {
+                delay(60)
+                createDescriptionBringIntoViewRequester.bringIntoView()
+            } catch (_: Exception) {}
+        }
+    }
+
     Column(
         modifier = modifier
-            .fillMaxWidth()
+            .fillMaxSize()
             .background(NeumorphicBg)
+            .imePadding()
     ) {
         // Top Bar: < Create New Item   ...   [Create / Done]
         Row(
@@ -2919,14 +4040,16 @@ fun FigmaCreateWorkItemView(
         Surface(
             color = SurfaceCard,
             shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
                     .navigationBarsPadding()
                     .padding(horizontal = 20.dp, vertical = 22.dp)
-                    .verticalScroll(rememberScrollState())
             ) {
                 // 1. First Essential Field: Work Item Type Capsule Selector at top of Create page
                 Row(
@@ -3180,7 +4303,7 @@ fun FigmaCreateWorkItemView(
                         }
                     }
 
-                    // Assignee Selector (Unassigned + 3-char type-to-search people)
+                    // Assignee Selector (Unassigned + instant type-to-search people)
                     Box {
                         Surface(
                             onClick = { assigneeMenuExpanded = true },
@@ -3289,6 +4412,10 @@ fun FigmaCreateWorkItemView(
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
+                            .bringIntoViewRequester(createDescriptionBringIntoViewRequester)
+                            .onFocusChanged { focusState ->
+                                isCreateDescriptionFocused = focusState.isFocused
+                            }
                             .testTag("create_description_input")
                     )
                 }
@@ -3793,10 +4920,10 @@ private fun AssigneeSearchDialog(
     }
 
     val matchingAssignees = remember(realAssignees, trimmedQuery) {
-        if (trimmedQuery.length >= 3) {
-            realAssignees.filter { it.contains(trimmedQuery, ignoreCase = true) }
+        if (trimmedQuery.isEmpty()) {
+            realAssignees
         } else {
-            emptyList()
+            realAssignees.filter { it.contains(trimmedQuery, ignoreCase = true) }
         }
     }
 
@@ -3823,7 +4950,7 @@ private fun AssigneeSearchDialog(
                         onValueChange = { searchQuery = it },
                         placeholder = {
                             Text(
-                                text = "Type at least 3 characters...",
+                                text = "Search people by name...",
                                 color = NeumorphicTextSecondary,
                                 fontSize = 13.sp,
                                 textAlign = if (isQueryRtl) TextAlign.Right else TextAlign.Left,
@@ -3926,17 +5053,7 @@ private fun AssigneeSearchDialog(
 
                 HorizontalDivider(color = SurfaceBorder, thickness = 1.dp)
 
-                if (trimmedQuery.length < 3) {
-                    Text(
-                        text = "Type at least 3 characters to search people.",
-                        color = NeumorphicTextSecondary,
-                        fontSize = 12.sp,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .testTag("${testTagPrefix}_assignee_min_chars_hint")
-                    )
-                } else if (matchingAssignees.isEmpty()) {
+                if (matchingAssignees.isEmpty() && trimmedQuery.isNotEmpty()) {
                     Text(
                         text = "No matching assignees found.",
                         color = NeumorphicTextSecondary,
@@ -3946,7 +5063,13 @@ private fun AssigneeSearchDialog(
                             .padding(vertical = 4.dp)
                             .testTag("${testTagPrefix}_assignee_no_matches")
                     )
-                } else {
+                } else if (matchingAssignees.isNotEmpty()) {
+                    Text(
+                        text = if (trimmedQuery.isEmpty()) "Team members (${matchingAssignees.size})" else "Matching assignees (${matchingAssignees.size})",
+                        color = NeumorphicTextSecondary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
                     Column(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier
@@ -4031,10 +5154,10 @@ private fun TagSearchAndAddDialog(
     val isTagInputRtl = isAlmostPersian(customTagInput.ifBlank { fallbackRtlText })
 
     val matchingTags = remember(projectTagOptions, trimmedQuery) {
-        if (trimmedQuery.length >= 3) {
-            projectTagOptions.filter { it.contains(trimmedQuery, ignoreCase = true) }
+        if (trimmedQuery.isEmpty()) {
+            projectTagOptions
         } else {
-            emptyList()
+            projectTagOptions.filter { it.contains(trimmedQuery, ignoreCase = true) }
         }
     }
 
@@ -4061,7 +5184,7 @@ private fun TagSearchAndAddDialog(
                         onValueChange = onCustomTagInputChange,
                         placeholder = {
                             Text(
-                                text = "Type at least 3 characters...",
+                                text = "Search or create tag...",
                                 color = NeumorphicTextSecondary,
                                 fontSize = 13.sp,
                                 textAlign = if (isTagInputRtl) TextAlign.Right else TextAlign.Left,
@@ -4114,17 +5237,7 @@ private fun TagSearchAndAddDialog(
                     )
                 }
 
-                if (trimmedQuery.length < 3) {
-                    Text(
-                        text = "Type at least 3 characters to see matching tags.",
-                        color = NeumorphicTextSecondary,
-                        fontSize = 12.sp,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 2.dp)
-                            .testTag("${inputTestTag}_min_chars_hint")
-                    )
-                } else if (matchingTags.isEmpty()) {
+                if (matchingTags.isEmpty() && trimmedQuery.isNotEmpty()) {
                     Text(
                         text = "No matching tags found. Tap Add to create \"$trimmedQuery\".",
                         color = NeumorphicTextSecondary,
@@ -4134,9 +5247,19 @@ private fun TagSearchAndAddDialog(
                             .padding(vertical = 2.dp)
                             .testTag("${inputTestTag}_no_matches")
                     )
+                } else if (matchingTags.isEmpty()) {
+                    Text(
+                        text = "Type a name and tap Add to create a new tag.",
+                        color = NeumorphicTextSecondary,
+                        fontSize = 12.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 2.dp)
+                            .testTag("${inputTestTag}_min_chars_hint")
+                    )
                 } else {
                     Text(
-                        text = "Matching tags",
+                        text = if (trimmedQuery.isEmpty()) "Existing tags in project (${matchingTags.size})" else "Matching tags (${matchingTags.size})",
                         color = NeumorphicTextSecondary,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold
@@ -4261,11 +5384,15 @@ fun WorkItemCreateSheet(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    androidx.compose.material3.ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = NeumorphicBg,
+    Surface(
+        color = NeumorphicBg,
         modifier = modifier
+            .fillMaxSize()
+            .testTag("work_item_create_screen")
     ) {
+        androidx.activity.compose.BackHandler {
+            onDismiss()
+        }
         FigmaCreateWorkItemView(
             project = project,
             availableTypes = availableTypes,
@@ -4283,7 +5410,8 @@ fun WorkItemCreateSheet(
             onCreateWorkItem = onCreateWorkItem,
             onAddChildWorkItem = onAddChildWorkItem,
             onUpdateWorkItem = onUpdateWorkItem,
-            onDismiss = onDismiss
+            onDismiss = onDismiss,
+            modifier = Modifier.fillMaxSize()
         )
     }
 }

@@ -90,4 +90,206 @@ class AzureDevOpsRepositoryPerformanceTest {
 
         println("Optimized fetchWorkItems execution time: $timeMillis ms")
     }
+
+    @Test
+    fun testFetchProjectProcessHierarchyExcludesDisabledStates() = runBlocking {
+        val processId = "proc-guid-123"
+        val projectId = "proj-guid-456"
+        val projectName = "TestProject"
+
+        val fakeService = Proxy.newProxyInstance(
+            AzureDevOpsService::class.java.classLoader,
+            arrayOf(AzureDevOpsService::class.java)
+        ) { _, method, args ->
+            when (method.name) {
+                "getProjectDetail" -> {
+                    Response.success(
+                        com.example.data.model.ProjectItem(
+                            id = projectId,
+                            name = projectName,
+                            capabilities = com.example.data.model.ProjectCapabilities(
+                                processTemplate = com.example.data.model.ProcessTemplateCapability(
+                                    templateName = "CustomAgile",
+                                    templateTypeId = processId
+                                )
+                            )
+                        )
+                    )
+                }
+                "getProcesses" -> {
+                    Response.success(
+                        com.example.data.model.ProcessesResponse(
+                            count = 1,
+                            value = listOf(
+                                com.example.data.model.ProcessDefinition(
+                                    typeId = processId,
+                                    name = "CustomAgile",
+                                    isEnabled = true
+                                )
+                            )
+                        )
+                    )
+                }
+                "getProcessWorkItemTypes" -> {
+                    Response.success(
+                        com.example.data.model.ProcessWorkItemTypesResponse(
+                            count = 3,
+                            value = listOf(
+                                com.example.data.model.ProcessWorkItemType(
+                                    referenceName = "Custom.Goal",
+                                    name = "هدف",
+                                    customization = "custom",
+                                    isDisabled = false,
+                                    states = listOf(
+                                        com.example.data.model.ProcessStateDefinition(name = "New", order = 1, hidden = false),
+                                        com.example.data.model.ProcessStateDefinition(name = "Active", order = 2, hidden = false),
+                                        com.example.data.model.ProcessStateDefinition(name = "Closed", order = 3, hidden = false)
+                                    )
+                                ),
+                                com.example.data.model.ProcessWorkItemType(
+                                    referenceName = "Custom.Project",
+                                    name = "پروژه",
+                                    customization = "inherited",
+                                    isDisabled = false,
+                                    // Inline states returns base system state with hidden=false alongside derived hidden=true override
+                                    states = listOf(
+                                        com.example.data.model.ProcessStateDefinition(id = "s1", name = "New", order = 1, hidden = false, customizationType = "system"),
+                                        com.example.data.model.ProcessStateDefinition(id = "s2", name = "Active", order = 2, hidden = false, customizationType = "system"),
+                                        com.example.data.model.ProcessStateDefinition(id = "s3", name = "Resolved", order = 3, hidden = false, customizationType = "system"),
+                                        com.example.data.model.ProcessStateDefinition(id = "s3", name = "Resolved", order = 3, hidden = true, customizationType = "inherited"),
+                                        com.example.data.model.ProcessStateDefinition(id = "s4", name = "Closed", order = 4, hidden = false, customizationType = "system")
+                                    )
+                                ),
+                                com.example.data.model.ProcessWorkItemType(
+                                    referenceName = "Custom.Work",
+                                    name = "کار",
+                                    customization = "inherited",
+                                    isDisabled = false,
+                                    // Inline list endpoint didn't populate hidden=true, but dedicated getProcessWorkItemTypeStates & transitions do
+                                    states = listOf(
+                                        com.example.data.model.ProcessStateDefinition(id = "w1", name = "To Do", order = 1, hidden = false),
+                                        com.example.data.model.ProcessStateDefinition(id = "w2", name = "In Progress", order = 2, hidden = false),
+                                        com.example.data.model.ProcessStateDefinition(id = "w3", name = "Removed", order = 3, hidden = false),
+                                        com.example.data.model.ProcessStateDefinition(id = "w4", name = "Done", order = 4, hidden = false)
+                                    )
+                                )
+                            )
+                        )
+                    )
+                }
+                "getProcessWorkItemTypeStates" -> {
+                    val witRef = args[2] as String
+                    val states = when (witRef) {
+                        "Custom.Project" -> listOf(
+                            com.example.data.model.ProcessStateDefinition(id = "s1", name = "New", order = 1, hidden = false),
+                            com.example.data.model.ProcessStateDefinition(id = "s2", name = "Active", order = 2, hidden = false),
+                            com.example.data.model.ProcessStateDefinition(id = "s3", name = "Resolved", order = 3, hidden = true),
+                            com.example.data.model.ProcessStateDefinition(id = "s4", name = "Closed", order = 4, hidden = false)
+                        )
+                        "Custom.Work" -> listOf(
+                            com.example.data.model.ProcessStateDefinition(id = "w1", name = "To Do", order = 1, hidden = false),
+                            com.example.data.model.ProcessStateDefinition(id = "w2", name = "In Progress", order = 2, hidden = false),
+                            com.example.data.model.ProcessStateDefinition(id = "w3", name = "Removed", order = 3, hidden = true),
+                            com.example.data.model.ProcessStateDefinition(id = "w4", name = "Done", order = 4, hidden = false)
+                        )
+                        else -> listOf(
+                            com.example.data.model.ProcessStateDefinition(name = "New", order = 1, hidden = false),
+                            com.example.data.model.ProcessStateDefinition(name = "Active", order = 2, hidden = false),
+                            com.example.data.model.ProcessStateDefinition(name = "Closed", order = 3, hidden = false)
+                        )
+                    }
+                    Response.success(com.example.data.model.ProcessStatesResponse(count = states.size, value = states))
+                }
+                "getProjectWorkItemTypes" -> {
+                    Response.success(
+                        com.example.data.model.ProjectWorkItemTypesResponse(
+                            count = 3,
+                            value = listOf(
+                                com.example.data.model.ProjectWorkItemTypeDefinition(
+                                    name = "هدف",
+                                    referenceName = "Custom.Goal",
+                                    isDisabled = false
+                                ),
+                                com.example.data.model.ProjectWorkItemTypeDefinition(
+                                    name = "پروژه",
+                                    referenceName = "Custom.Project",
+                                    isDisabled = false,
+                                    states = listOf(
+                                        com.example.data.model.WorkItemStateDefinition(name = "New"),
+                                        com.example.data.model.WorkItemStateDefinition(name = "Active"),
+                                        com.example.data.model.WorkItemStateDefinition(name = "Resolved"),
+                                        com.example.data.model.WorkItemStateDefinition(name = "Closed")
+                                    ),
+                                    transitions = mapOf(
+                                        "" to listOf(com.example.data.model.WorkItemStateTransition(to = "New")),
+                                        "New" to listOf(
+                                            com.example.data.model.WorkItemStateTransition(to = "Active"),
+                                            com.example.data.model.WorkItemStateTransition(to = "Closed")
+                                        ),
+                                        "Active" to listOf(
+                                            com.example.data.model.WorkItemStateTransition(to = "New"),
+                                            com.example.data.model.WorkItemStateTransition(to = "Closed")
+                                        )
+                                    )
+                                ),
+                                com.example.data.model.ProjectWorkItemTypeDefinition(
+                                    name = "کار",
+                                    referenceName = "Custom.Work",
+                                    isDisabled = false,
+                                    states = listOf(
+                                        com.example.data.model.WorkItemStateDefinition(name = "To Do"),
+                                        com.example.data.model.WorkItemStateDefinition(name = "In Progress"),
+                                        com.example.data.model.WorkItemStateDefinition(name = "Removed"),
+                                        com.example.data.model.WorkItemStateDefinition(name = "Done")
+                                    )
+                                )
+                            )
+                        )
+                    )
+                }
+                "getProjectWorkItemTypeStates" -> {
+                    val typeName = args[2] as String
+                    // Simulate WIT endpoint returning all states without hidden=true
+                    val states = when (typeName) {
+                        "پروژه" -> listOf(
+                            com.example.data.model.WorkItemStateDefinition(name = "New"),
+                            com.example.data.model.WorkItemStateDefinition(name = "Active"),
+                            com.example.data.model.WorkItemStateDefinition(name = "Resolved"),
+                            com.example.data.model.WorkItemStateDefinition(name = "Closed")
+                        )
+                        "کار" -> listOf(
+                            com.example.data.model.WorkItemStateDefinition(name = "To Do"),
+                            com.example.data.model.WorkItemStateDefinition(name = "In Progress"),
+                            com.example.data.model.WorkItemStateDefinition(name = "Removed"),
+                            com.example.data.model.WorkItemStateDefinition(name = "Done")
+                        )
+                        else -> listOf(
+                            com.example.data.model.WorkItemStateDefinition(name = "New"),
+                            com.example.data.model.WorkItemStateDefinition(name = "Active"),
+                            com.example.data.model.WorkItemStateDefinition(name = "Closed")
+                        )
+                    }
+                    Response.success(com.example.data.model.WorkItemStatesResponse(count = states.size, value = states))
+                }
+                else -> null
+            }
+        } as AzureDevOpsService
+
+        val pat = "test-pat-states"
+        val serviceCacheField = AzureDevOpsClient::class.java.getDeclaredField("serviceCache")
+        serviceCacheField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val cache = serviceCacheField.get(AzureDevOpsClient) as java.util.concurrent.ConcurrentHashMap<String, AzureDevOpsService>
+        cache[pat] = fakeService
+
+        val repository = AzureDevOpsRepository(context)
+        val hierarchy = repository.fetchProjectProcessHierarchy("test-org", projectName, pat)
+
+        val projectStates = hierarchy["پروژه"].orEmpty()
+        val workStates = hierarchy["کار"].orEmpty()
+        assertTrue("Expected پروژه states to exclude disabled 'Resolved', got: $projectStates", "Resolved" !in projectStates)
+        assertTrue("Expected پروژه states to contain New, Active, Closed", projectStates == listOf("New", "Active", "Closed"))
+        assertTrue("Expected کار states to exclude disabled 'Removed', got: $workStates", "Removed" !in workStates)
+        assertTrue("Expected کار states to contain To Do, In Progress, Done", workStates == listOf("To Do", "In Progress", "Done"))
+    }
 }

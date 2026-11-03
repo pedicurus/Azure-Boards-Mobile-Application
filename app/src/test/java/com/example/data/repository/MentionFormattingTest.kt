@@ -186,7 +186,14 @@ class MentionFormattingTest {
         val email = "alice@contoso.com"
         val userId = "f0e1d2c3-b4a5-6789-0123-456789abcdef"
 
-        repository.setManualIdentityOverride(org, displayName)
+        repository.saveNotificationsStateForTesting(
+            com.example.data.model.CachedNotificationsState(
+                organization = org,
+                detectedDisplayName = displayName,
+                detectedEmail = email,
+                detectedUserId = userId
+            )
+        )
         AzureDevOpsRepository.registerKnownIdentity(
             id = userId,
             displayName = displayName,
