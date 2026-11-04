@@ -9,6 +9,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okio.buffer
+import okio.sink
+import okio.source
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -60,8 +63,9 @@ class WorkItemLocalStore(context: Context) {
         val file = snapshotFile(orgKey)
         if (!file.exists() || file.length() == 0L) return null
         return try {
-            val rawJson = file.readText(Charsets.UTF_8)
-            val parsed = snapshotAdapter.fromJson(rawJson)
+            val parsed = file.source().buffer().use { source ->
+                snapshotAdapter.fromJson(source)
+            }
             if (parsed != null) {
                 inMemorySnapshots[orgKey] = parsed
             }
@@ -89,10 +93,13 @@ class WorkItemLocalStore(context: Context) {
                 if (!cacheDir.exists()) cacheDir.mkdirs()
                 val targetFile = snapshotFile(orgKey)
                 val tempFile = File(cacheDir, "snapshot_${orgKey}.tmp")
-                val json = snapshotAdapter.toJson(snapshot)
-                tempFile.writeText(json, Charsets.UTF_8)
+                tempFile.sink().buffer().use { sink ->
+                    snapshotAdapter.toJson(sink, snapshot)
+                }
                 if (!tempFile.renameTo(targetFile)) {
-                    targetFile.writeText(json, Charsets.UTF_8)
+                    targetFile.sink().buffer().use { sink ->
+                        snapshotAdapter.toJson(sink, snapshot)
+                    }
                     tempFile.delete()
                 }
             } catch (_: Exception) {
@@ -112,8 +119,9 @@ class WorkItemLocalStore(context: Context) {
         val file = metadataFile(orgKey)
         if (!file.exists() || file.length() == 0L) return null
         return try {
-            val rawJson = file.readText(Charsets.UTF_8)
-            val parsed = metadataAdapter.fromJson(rawJson)
+            val parsed = file.source().buffer().use { source ->
+                metadataAdapter.fromJson(source)
+            }
             if (parsed != null) {
                 inMemoryMetadata[orgKey] = parsed
             }
@@ -141,10 +149,13 @@ class WorkItemLocalStore(context: Context) {
                 if (!cacheDir.exists()) cacheDir.mkdirs()
                 val targetFile = metadataFile(orgKey)
                 val tempFile = File(cacheDir, "metadata_${orgKey}.tmp")
-                val json = metadataAdapter.toJson(metadata)
-                tempFile.writeText(json, Charsets.UTF_8)
+                tempFile.sink().buffer().use { sink ->
+                    metadataAdapter.toJson(sink, metadata)
+                }
                 if (!tempFile.renameTo(targetFile)) {
-                    targetFile.writeText(json, Charsets.UTF_8)
+                    targetFile.sink().buffer().use { sink ->
+                        metadataAdapter.toJson(sink, metadata)
+                    }
                     tempFile.delete()
                 }
             } catch (_: Exception) {
@@ -164,8 +175,9 @@ class WorkItemLocalStore(context: Context) {
         val file = notificationsFile(orgKey)
         if (!file.exists() || file.length() == 0L) return null
         return try {
-            val rawJson = file.readText(Charsets.UTF_8)
-            val parsed = notificationsAdapter.fromJson(rawJson)
+            val parsed = file.source().buffer().use { source ->
+                notificationsAdapter.fromJson(source)
+            }
             if (parsed != null) {
                 inMemoryNotifications[orgKey] = parsed
             }
@@ -193,10 +205,13 @@ class WorkItemLocalStore(context: Context) {
                 if (!cacheDir.exists()) cacheDir.mkdirs()
                 val targetFile = notificationsFile(orgKey)
                 val tempFile = File(cacheDir, "notifications_${orgKey}.tmp")
-                val json = notificationsAdapter.toJson(state)
-                tempFile.writeText(json, Charsets.UTF_8)
+                tempFile.sink().buffer().use { sink ->
+                    notificationsAdapter.toJson(sink, state)
+                }
                 if (!tempFile.renameTo(targetFile)) {
-                    targetFile.writeText(json, Charsets.UTF_8)
+                    targetFile.sink().buffer().use { sink ->
+                        notificationsAdapter.toJson(sink, state)
+                    }
                     tempFile.delete()
                 }
             } catch (_: Exception) {

@@ -72,7 +72,7 @@ Most mobile workflows for **Azure Boards** rely on desktop-oriented browser view
 - **Parent & Child Link Management**: Link existing work items by ID or keyword, create new linked Parent/Child items of valid process types, replace an existing parent with confirmation, or unlink relations (`System.LinkTypes.Hierarchy-Reverse` / `Hierarchy-Forward`) with automated cycle and ancestor validation.
 
 ### 🔍 Multi-Dimensional Filtering & Instant Search
-- **Instant Keyword & Numeric ID Search**: Filter work items by title, numeric ID (`#123`), description, tags, or assignee in real time.
+- **Debounced Keyword & Numeric ID Search**: Filter work items by title, numeric ID (`#123`), description, tags, or assignee with adaptive `180ms` search debouncing during rapid typing and instant `0ms` reset when cleared.
 - **Backlog-Ordered Type & State Filters**: Filter by Work Item Type (automatically ordered from highest backlog level to lowest) and State (*Proposed*, *Active/In Progress*, *Resolved*, *Closed/Done*, *Removed*).
 - **Interactive Area & Iteration Tree Pickers**: Navigate deeply nested Area Paths and Iteration Paths (`Project\Team\Sprint`) via expandable tree dialogs.
 - **Assignee Autocomplete**: Filter by team member or specifically isolate **Unassigned** work items.
@@ -88,7 +88,7 @@ Most mobile workflows for **Azure Boards** rely on desktop-oriented browser view
 
 ### 🏢 Multi-Organization Support & Instant Cold Starts
 - **Multi-Organization Switcher**: Connect multiple Azure DevOps organizations with independent PAT credentials, switch active organizations in a single tap, and configure default organization and project startup preferences.
-- **Offline Snapshot Cache**: Atomic file-based JSON snapshots (`LocalStorageManager`) restore your projects, work items, classification trees, and team directories immediately on cold start before network verification completes.
+- **Offline Snapshot Cache**: Atomic file-based JSON snapshots (`WorkItemLocalStore`) use Okio buffered streaming (`BufferedSink` / `BufferedSource`) with Moshi to persist and restore your projects, work items, classification trees, and notifications without intermediate heap string allocations.
 
 ---
 
@@ -117,7 +117,7 @@ flowchart TD
 
     subgraph DOMAIN ["Repository & Local Persistence Layer"]
         Repo["AzureDevOpsRepository"]
-        LocalStore["LocalStorageManager (Atomic JSON Snapshot Cache & Preferences)"]
+        LocalStore["WorkItemLocalStore (Okio Streaming Moshi JSON Cache)"]
     end
 
     subgraph SYNC ["Background Scheduling"]

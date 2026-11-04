@@ -15,6 +15,7 @@ import com.example.ui.viewmodel.WorkItemsFilterAndHierarchyHelper.matchesClassif
 import com.example.ui.viewmodel.WorkItemsFilterAndHierarchyHelper.normalizeClassificationPath
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -54,6 +56,11 @@ class WorkItemFilterDelegate(
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    @OptIn(FlowPreview::class)
+    private val debouncedSearchQuery = _searchQuery
+        .debounce { query -> if (query.isBlank()) 0L else 180L }
+        .distinctUntilChanged()
 
     private val _selectedProject = MutableStateFlow<String?>(null)
     val selectedProject: StateFlow<String?> = _selectedProject.asStateFlow()
@@ -415,7 +422,7 @@ class WorkItemFilterDelegate(
         .stateIn(scope, SharingStarted.WhileSubscribed(5000), false)
 
     val filteredWorkItems: StateFlow<List<WorkItem>> = combine(
-        combine(projectScopedSnapshotFlow, _searchQuery, processDelegate.projectProcessMap) { projSnap, query, processMap ->
+        combine(projectScopedSnapshotFlow, debouncedSearchQuery, processDelegate.projectProcessMap) { projSnap, query, processMap ->
             Triple(projSnap, query, processMap)
         }.distinctUntilChanged(),
         combine(_typeFilter, _stateFilter, _assigneeFilter) { type, state, assignee ->
@@ -584,7 +591,7 @@ class WorkItemFilterDelegate(
         projectScopedSnapshotFlow,
         processDelegate.projectProcessMap,
         filteredWorkItems,
-        _searchQuery,
+        debouncedSearchQuery,
         combine(_typeFilter, _stateFilter, _assigneeFilter, _areaFilter, _iterationFilter) { t, s, a, ar, it ->
             listOf(t, s, a, ar, it)
         }.distinctUntilChanged()
