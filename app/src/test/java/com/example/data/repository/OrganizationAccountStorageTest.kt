@@ -83,6 +83,11 @@ class OrganizationAccountStorageTest {
     fun testMultipleAccountStorageAndRemoval() {
         repository.saveOrganizationAccount(OrganizationAccount("org-1", "pat-1", true))
         repository.saveOrganizationAccount(OrganizationAccount("org-2", "pat-2", true))
+        repository.saveCachedProjectsForOrg("org-1", listOf("ProjA", "ProjB"))
+
+        val service1 = com.example.data.api.AzureDevOpsClient.createService("pat-1")
+        val service2 = com.example.data.api.AzureDevOpsClient.createService("pat-2")
+        org.junit.Assert.assertSame(service1, com.example.data.api.AzureDevOpsClient.createService("pat-1"))
 
         var saved = repository.getSavedOrganizations()
         assertEquals(2, saved.size)
@@ -91,5 +96,43 @@ class OrganizationAccountStorageTest {
         saved = repository.getSavedOrganizations()
         assertEquals(1, saved.size)
         assertEquals("org-2", saved[0].organization)
+        assertTrue(repository.getCachedProjectsForOrg("org-1").isEmpty())
+
+        // Verify pat-1 service was evicted while pat-2 remains cached
+        val newService1 = com.example.data.api.AzureDevOpsClient.createService("pat-1")
+        org.junit.Assert.assertNotSame(service1, newService1)
+        org.junit.Assert.assertSame(service2, com.example.data.api.AzureDevOpsClient.createService("pat-2"))
+    }
+
+    @Test
+    fun testCompleteLogoutCleanupAndFallbackKeyWipe() {
+        repository.saveOrganizationAccount(OrganizationAccount("contoso", "secret-pat-abc", true))
+        repository.saveCachedProjectsForOrg("contoso", listOf("ProjectX"))
+        AzureIdentityRegistry.registerKnownIdentity("id-1", "Alice", "alice@contoso.com")
+        val cachedService = com.example.data.api.AzureDevOpsClient.createService("secret-pat-abc")
+
+        val encryptedToken = tokenStore.encryptToken("secret-pat-abc")!!
+        val fallbackPrefs = context.getSharedPreferences("azure_boards_keystore_fallback_prefs", Context.MODE_PRIVATE)
+        assertTrue(fallbackPrefs.contains("pref_fallback_aes_256_key"))
+
+        repository.clearCredentials()
+
+        assertFalse("Fallback key must be wiped on clearCredentials", fallbackPrefs.contains("pref_fallback_aes_256_key"))
+        // Decrypting after fallback key wipe must not generate a new fallback key
+        val decryptedAfterWipe = tokenStore.decryptToken(encryptedToken)
+        assertEquals("", decryptedAfterWipe)
+        assertFalse("decryptToken must never generate a new fallback key", fallbackPrefs.contains("pref_fallback_aes_256_key"))
+
+        assertEquals(null, AzureIdentityRegistry.resolveIdentityRecord("Alice"))
+        org.junit.Assert.assertNotSame(cachedService, com.example.data.api.AzureDevOpsClient.createService("secret-pat-abc"))
+    }
+
+    @Test
+    fun testSensitiveClipboardMarking() {
+        com.example.ui.components.writeClipboardText(context, "top-secret-pat", isSensitive = true)
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        val clip = clipboard.primaryClip!!
+        val extras = clip.description.extras!!
+        assertTrue(extras.getBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE))
     }
 }

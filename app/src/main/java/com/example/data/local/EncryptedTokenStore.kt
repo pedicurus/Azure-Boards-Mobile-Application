@@ -5,7 +5,9 @@ import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import java.security.KeyStore
+import java.security.KeyStoreException
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -17,7 +19,7 @@ import javax.crypto.spec.SecretKeySpec
  * Encrypts and decrypts Azure DevOps Personal Access Tokens (PATs) at rest using AES-256-GCM.
  *
  * Uses the hardware-backed `AndroidKeyStore` when available on device, with an automatic
- * AES-256-GCM software key fallback for local JVM / Robolectric unit test environments where
+ * AES-256-GCM software key fallback ONLY for local JVM / Robolectric unit test environments where
  * the `AndroidKeyStore` provider is not registered.
  *
  * Also supports transparent migration of legacy plaintext tokens: if a stored value does not
@@ -40,15 +42,16 @@ class EncryptedTokenStore(context: Context) {
 
     /**
      * Encrypts [plainToken] using AES-256-GCM and returns a prefixed Base64 payload:
-     * `enc:v1:<Base64(IV[12] + Ciphertext + AuthTag)>`.
+     * `enc:v1:<Base64(IV[12] + Ciphertext + AuthTag)>`, or `null` if hardware Keystore
+     * key generation or encryption fails on an Android device.
      */
-    fun encryptToken(plainToken: String): String {
+    fun encryptToken(plainToken: String): String? {
         val trimmed = plainToken.trim()
         if (trimmed.isEmpty()) return ""
         if (isEncrypted(trimmed)) return trimmed
 
         return try {
-            val secretKey = getOrCreateSecretKey()
+            val secretKey = getOrCreateSecretKey() ?: return null
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, secretKey)
             val iv = cipher.iv
@@ -61,8 +64,8 @@ class EncryptedTokenStore(context: Context) {
 
             ENCRYPTED_PREFIX + Base64.encodeToString(combined, Base64.NO_WRAP)
         } catch (e: Exception) {
-            // Software key fallback if hardware Keystore cipher initialization fails
-            encryptWithFallbackKey(trimmed)
+            Log.e(TAG, "Failed to encrypt token with SecretKey", e)
+            null
         }
     }
 
@@ -89,11 +92,15 @@ class EncryptedTokenStore(context: Context) {
             val cipherBytes = combined.copyOfRange(1 + ivSize, combined.size)
 
             try {
-                val secretKey = getOrCreateSecretKey()
+                val secretKey = getOrCreateSecretKey(allowCreateFallback = false)
+                    ?: throw IllegalStateException("Secret key unavailable")
                 val cipher = Cipher.getInstance(TRANSFORMATION)
                 cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
                 String(cipher.doFinal(cipherBytes), Charsets.UTF_8)
             } catch (_: Exception) {
+                if (!keyPrefs.contains(KEY_FALLBACK_SECRET)) {
+                    return ""
+                }
                 val fallbackKey = getOrCreateSoftwareFallbackKey()
                 val cipher = Cipher.getInstance(TRANSFORMATION)
                 cipher.init(Cipher.DECRYPT_MODE, fallbackKey, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
@@ -104,31 +111,32 @@ class EncryptedTokenStore(context: Context) {
         }
     }
 
-    private fun encryptWithFallbackKey(plainToken: String): String {
-        val fallbackKey = getOrCreateSoftwareFallbackKey()
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        val iv = ByteArray(GCM_IV_LENGTH_BYTES)
-        SecureRandom().nextBytes(iv)
-        cipher.init(Cipher.ENCRYPT_MODE, fallbackKey, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
-        val cipherBytes = cipher.doFinal(plainToken.toByteArray(Charsets.UTF_8))
-
-        val combined = ByteArray(1 + iv.size + cipherBytes.size)
-        combined[0] = iv.size.toByte()
-        System.arraycopy(iv, 0, combined, 1, iv.size)
-        System.arraycopy(cipherBytes, 0, combined, 1 + iv.size, cipherBytes.size)
-
-        return ENCRYPTED_PREFIX + Base64.encodeToString(combined, Base64.NO_WRAP)
+    @Synchronized
+    fun clearFallbackKey() {
+        cachedSecretKey = null
+        keyPrefs.edit().clear().apply()
     }
 
     @Synchronized
-    private fun getOrCreateSecretKey(): SecretKey {
+    private fun getOrCreateSecretKey(allowCreateFallback: Boolean = true): SecretKey? {
         cachedSecretKey?.let { return it }
 
-        val keystoreKey = runCatching {
-            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE)
+        val keyStore = try {
+            KeyStore.getInstance(ANDROID_KEYSTORE)
+        } catch (_: KeyStoreException) {
+            // AndroidKeyStore provider is not available (e.g., local JVM / Robolectric unit tests)
+            if (!allowCreateFallback && !keyPrefs.contains(KEY_FALLBACK_SECRET)) {
+                return null
+            }
+            val fallback = getOrCreateSoftwareFallbackKey()
+            cachedSecretKey = fallback
+            return fallback
+        }
+
+        return try {
             keyStore.load(null)
             val existingKey = (keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
-            if (existingKey != null) {
+            val resolved = if (existingKey != null) {
                 existingKey
             } else {
                 val keyGenerator = KeyGenerator.getInstance(
@@ -146,11 +154,12 @@ class EncryptedTokenStore(context: Context) {
                 keyGenerator.init(spec)
                 keyGenerator.generateKey()
             }
-        }.getOrNull()
-
-        val resolved = keystoreKey ?: getOrCreateSoftwareFallbackKey()
-        cachedSecretKey = resolved
-        return resolved
+            cachedSecretKey = resolved
+            resolved
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get or create AndroidKeyStore secret key", e)
+            null
+        }
     }
 
     @Synchronized
@@ -170,6 +179,7 @@ class EncryptedTokenStore(context: Context) {
     }
 
     companion object {
+        private const val TAG = "EncryptedTokenStore"
         const val ENCRYPTED_PREFIX = "enc:v1:"
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val KEY_ALIAS = "azure_boards_pat_master_key_v1"

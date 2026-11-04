@@ -3,6 +3,7 @@ package com.example.data.repository
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Base64
+import com.example.data.api.AzureDevOpsClient
 import com.example.data.local.EncryptedTokenStore
 import com.example.data.local.WorkItemLocalStore
 import com.example.data.model.OrganizationAccount
@@ -13,7 +14,7 @@ import java.util.concurrent.ConcurrentHashMap
  * active defaults, and cached project lists per organization.
  */
 class AzureAccountRepository(
-    context: Context,
+    private val context: Context,
     private val tokenStore: EncryptedTokenStore = EncryptedTokenStore(context.applicationContext ?: context),
     private val localStore: WorkItemLocalStore = WorkItemLocalStore(context.applicationContext ?: context)
 ) {
@@ -59,10 +60,14 @@ class AzureAccountRepository(
 
     private fun persistOrganizationsList(accounts: List<OrganizationAccount>) {
         val distinct = accounts.distinctBy { it.organization.lowercase() }
-        val serialized = distinct.joinToString("|") { acc ->
+        val serialized = distinct.mapNotNull { acc ->
             val encryptedPat = tokenStore.encryptToken(acc.pat)
-            "${encodeField(acc.organization)}:${encodeField(encryptedPat)}"
-        }
+            if (encryptedPat.isNullOrBlank()) {
+                null
+            } else {
+                "${encodeField(acc.organization)}:${encodeField(encryptedPat)}"
+            }
+        }.joinToString("|")
         prefs.edit().putString(KEY_SAVED_ORGS, serialized).commit()
     }
 
@@ -139,8 +144,23 @@ class AzureAccountRepository(
     fun removeOrganizationAccount(organization: String) {
         val normOrg = extractOrganization(organization)
         if (normOrg.isBlank()) return
+        val existing = getManuallySavedOrganizations()
+        existing
+            .filter { it.organization.equals(normOrg, ignoreCase = true) }
+            .forEach { acc ->
+                if (acc.pat.isNotBlank()) {
+                    AzureDevOpsClient.evictService(acc.pat)
+                }
+            }
         localStore.clearOrganizationCache(normOrg)
-        val remaining = getManuallySavedOrganizations().filterNot {
+        cachedProjectsByOrgMemory.keys
+            .filter { it.equals(normOrg, ignoreCase = true) }
+            .forEach { cachedProjectsByOrgMemory.remove(it) }
+        prefs.edit()
+            .remove("$KEY_CACHED_PROJECTS_PREFIX$normOrg")
+            .remove("$KEY_CACHED_PROJECTS_PREFIX${normOrg.lowercase()}")
+            .apply()
+        val remaining = existing.filterNot {
             it.organization.equals(normOrg, ignoreCase = true)
         }
         persistOrganizationsList(remaining)
@@ -218,7 +238,9 @@ class AzureAccountRepository(
         val normOrg = extractOrganization(organization)
         if (normOrg.isBlank()) return emptyList()
         cachedProjectsByOrgMemory[normOrg]?.let { return it }
-        val raw = prefs.getString("$KEY_CACHED_PROJECTS_PREFIX$normOrg", null) ?: return emptyList()
+        val raw = prefs.getString("$KEY_CACHED_PROJECTS_PREFIX$normOrg", null)
+            ?: prefs.getString("$KEY_CACHED_PROJECTS_PREFIX${normOrg.lowercase()}", null)
+            ?: return emptyList()
         val list = raw.split("|||").map { it.trim() }.filter { it.isNotEmpty() }.distinct()
         cachedProjectsByOrgMemory[normOrg] = list
         return list
@@ -229,16 +251,21 @@ class AzureAccountRepository(
         if (normOrg.isBlank()) return
         val distinct = projects.map { it.trim() }.filter { it.isNotEmpty() }.distinct().sorted()
         cachedProjectsByOrgMemory[normOrg] = distinct
-        prefs.edit().putString("$KEY_CACHED_PROJECTS_PREFIX$normOrg", distinct.joinToString("|||")).apply()
+        val joined = distinct.joinToString("|||")
+        prefs.edit()
+            .putString("$KEY_CACHED_PROJECTS_PREFIX$normOrg", joined)
+            .putString("$KEY_CACHED_PROJECTS_PREFIX${normOrg.lowercase()}", joined)
+            .apply()
     }
 
     fun clearCredentials() {
-        prefs.edit()
-            .remove(KEY_SAVED_ORGS)
-            .remove(KEY_DEFAULT_ORG)
-            .remove(KEY_DEFAULT_PROJECT)
-            .apply()
+        prefs.edit().clear().apply()
         cachedProjectsByOrgMemory.clear()
+        tokenStore.clearFallbackKey()
+        localStore.clearAllCaches()
+        AzureDevOpsClient.clearServiceCache()
+        AzureIdentityRegistry.clearKnownIdentitiesForTesting()
+        com.example.sync.AzureSyncWorker.cancelPeriodicSync(context)
         setExplicitlyDisconnected(true)
     }
 

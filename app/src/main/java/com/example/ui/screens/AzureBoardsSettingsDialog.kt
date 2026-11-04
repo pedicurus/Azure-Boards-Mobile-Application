@@ -522,9 +522,8 @@ fun AzureBoardsSettingsDialog(
                                 singleLine = true,
                                 visualTransformation = if (editorPatVisible) VisualTransformation.None else PasswordVisualTransformation(),
                                 keyboardOptions = KeyboardOptions(
-                                    capitalization = KeyboardCapitalization.None,
+                                    keyboardType = KeyboardType.Password,
                                     autoCorrectEnabled = false,
-                                    keyboardType = KeyboardType.Text,
                                     imeAction = ImeAction.Done
                                 ),
                                 trailingIcon = {
@@ -580,8 +579,9 @@ fun AzureBoardsSettingsDialog(
                                                     return@onPreviewKeyEvent true
                                                 }
                                             } else if ((isCtrlOrMeta && keyEvent.key == Key.C) || keyEvent.key == Key.Copy) {
-                                                if (editorPatInput.isNotEmpty()) {
-                                                    writeClipboardText(context, editorPatInput)
+                                                val patVisible = editorPatVisible
+                                                if (patVisible && editorPatInput.isNotEmpty()) {
+                                                    writeClipboardText(context, editorPatInput, isSensitive = true)
                                                     return@onPreviewKeyEvent true
                                                 }
                                             }

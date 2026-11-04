@@ -71,11 +71,14 @@ class AzureDevOpsRepositoryPerformanceTest {
 
         val pat = "test-pat"
         val cleanPat = pat.trim()
+        val cacheKey = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(cleanPat.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
         val serviceCacheField = AzureDevOpsClient::class.java.getDeclaredField("serviceCache")
         serviceCacheField.isAccessible = true
         @Suppress("UNCHECKED_CAST")
         val cache = serviceCacheField.get(AzureDevOpsClient) as java.util.concurrent.ConcurrentHashMap<String, AzureDevOpsService>
-        cache[cleanPat] = fakeService
+        cache[cacheKey] = fakeService
 
         val repository = AzureDevOpsRepository(context)
 
@@ -276,11 +279,14 @@ class AzureDevOpsRepositoryPerformanceTest {
         } as AzureDevOpsService
 
         val pat = "test-pat-states"
+        val cacheKey = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(pat.trim().toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
         val serviceCacheField = AzureDevOpsClient::class.java.getDeclaredField("serviceCache")
         serviceCacheField.isAccessible = true
         @Suppress("UNCHECKED_CAST")
         val cache = serviceCacheField.get(AzureDevOpsClient) as java.util.concurrent.ConcurrentHashMap<String, AzureDevOpsService>
-        cache[pat] = fakeService
+        cache[cacheKey] = fakeService
 
         val repository = AzureDevOpsRepository(context)
         val hierarchy = repository.fetchProjectProcessHierarchy("test-org", projectName, pat)

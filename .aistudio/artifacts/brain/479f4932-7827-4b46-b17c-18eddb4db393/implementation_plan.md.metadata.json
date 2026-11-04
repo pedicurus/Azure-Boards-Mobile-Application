@@ -1,6 +1,6 @@
 {
-  "summary": "Comprehensive architectural refactoring and performance optimization plan for the Azure Boards mobile workspace:\n- Isolates the two-stage detail bottom sheet gesture physics onto layout/draw phases (Modifier.offset lambda & graphicsLayer) to eliminate frame-by-frame Compose recompositions during dragging and settling.\n- Fixes upper-zone swipe-to-dismiss reliability when the detail sheet is fully expanded so downward swipes in the upper 1/4–1/3 of the screen smoothly drag and close the sheet completely while lower-zone touches stay locked to content scrolling.\n- Deconstructs monolithic UI views into modular, state-isolated subcomponents (Header & Title Editor, Metadata & Classification Bar, Description Editor, Tags Row, Parent & Children Hierarchy Cards, Discussion & Mention Composer, and Shared Picker Dialogs).\n- Eliminates keystroke-level global list mutations and disk snapshot thrashing by keeping draft text state local to the active editor and debouncing global state/repository updates.\n- Separates board list state from detail sheet state and offloads @mention people indexing to background flows so typing, scrolling, and sheet transitions run at a locked 60/120fps.",
-  "updatedAt": "2026-11-03T21:17:53.514909354Z",
+  "summary": "Implementation plan for Task 1: Credential & Session Lifecycle Hardening, covering AndroidKeyStore downgrade prevention, SHA-256 service cache keying with complete sign-out memory/disk eviction, and PAT input/clipboard hardening.",
+  "updatedAt": "2026-11-04T05:06:09.429919417Z",
   "requestFeedback": true,
   "userFacing": true
 }

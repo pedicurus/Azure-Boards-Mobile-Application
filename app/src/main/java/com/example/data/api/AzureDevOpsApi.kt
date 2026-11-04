@@ -212,6 +212,22 @@ object AzureDevOpsClient {
 
     private val serviceCache = java.util.concurrent.ConcurrentHashMap<String, AzureDevOpsService>()
 
+    private fun sha256Hex(input: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(input.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    fun evictService(pat: String) {
+        val cleanPat = pat.trim()
+        if (cleanPat.isEmpty()) return
+        serviceCache.remove(sha256Hex(cleanPat))
+    }
+
+    fun clearServiceCache() {
+        serviceCache.clear()
+    }
+
     fun createPatchRequestBody(operations: List<JsonPatchOperation>): RequestBody {
         val json = patchAdapter.toJson(operations)
         return json.toRequestBody("application/json-patch+json; charset=utf-8".toMediaType())
@@ -219,7 +235,8 @@ object AzureDevOpsClient {
 
     fun createService(pat: String): AzureDevOpsService {
         val cleanPat = pat.trim()
-        return serviceCache.getOrPut(cleanPat) {
+        val cacheKey = sha256Hex(cleanPat)
+        return serviceCache.getOrPut(cacheKey) {
             val authHeader = "Basic " + Base64.encodeToString(
                 ":$cleanPat".toByteArray(Charsets.UTF_8),
                 Base64.NO_WRAP

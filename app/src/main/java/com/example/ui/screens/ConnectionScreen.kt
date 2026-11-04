@@ -101,7 +101,7 @@ fun ConnectionScreen(
     modifier: Modifier = Modifier
 ) {
     var orgInput by rememberSaveable { mutableStateOf(initialOrg) }
-    var patInput by rememberSaveable { mutableStateOf(initialPat) }
+    var patInput by remember(initialPat) { mutableStateOf(initialPat) }
     var rememberCredentials by rememberSaveable { mutableStateOf(true) }
     var patVisible by rememberSaveable { mutableStateOf(false) }
     var showHelp by rememberSaveable { mutableStateOf(false) }
@@ -415,9 +415,8 @@ fun ConnectionScreen(
                         visualTransformation = if (patVisible) VisualTransformation.None else PasswordVisualTransformation(),
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(
-                            capitalization = KeyboardCapitalization.None,
+                            keyboardType = KeyboardType.Password,
                             autoCorrectEnabled = false,
-                            keyboardType = KeyboardType.Text,
                             imeAction = ImeAction.Done
                         ),
                         keyboardActions = KeyboardActions(
@@ -449,8 +448,8 @@ fun ConnectionScreen(
                                             return@onPreviewKeyEvent true
                                         }
                                     } else if ((isCtrlOrMeta && keyEvent.key == Key.C) || keyEvent.key == Key.Copy) {
-                                        if (patInput.isNotEmpty()) {
-                                            writeClipboardText(context, patInput)
+                                        if (patVisible && patInput.isNotEmpty()) {
+                                            writeClipboardText(context, patInput, isSensitive = true)
                                             return@onPreviewKeyEvent true
                                         }
                                     }
