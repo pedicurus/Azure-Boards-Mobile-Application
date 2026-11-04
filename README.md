@@ -194,7 +194,9 @@ Transparency is essential for developer tools that handle workspace credentials.
 | `android.permission.POST_NOTIFICATIONS` | Optional | Delivers system push alerts on Android 13+ for work item assignments and `@mentions` (can be declined or disabled at any time). |
 
 > [!NOTE]
-> Your Personal Access Token (PAT) and cached work item snapshots are stored strictly inside your device's private application sandbox (`Context.filesDir`). Credentials never pass through any intermediate proxy or third-party server.
+> - **Hardware-Backed Credential Storage**: Your Personal Access Token (PAT) is encrypted with AES-256-GCM via the Android Keystore (`EncryptedTokenStore`) without silent plaintext downgrades on device, and cached work item snapshots are stored strictly inside your device's private application sandbox (`Context.filesDir`).
+> - **Hardened Input & Session Lifecycle**: PAT inputs exclude `onSaveInstanceState` serialization, disable IME autocorrect, mark clipboard copies with `ClipDescription.EXTRA_IS_SENSITIVE`, and evict in-memory SHA-256 keyed Retrofit clients and local caches upon sign-out.
+> - **Strict Organization Sanitization & Zero Release Logging**: Organization names and URLs (`dev.azure.com/{org}` and `{org}.visualstudio.com`) are strictly sanitized and validated against `^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$` to block path traversal or URL injection, and OkHttp request logging is restricted strictly to debug builds (`BuildConfig.DEBUG`). Credentials never pass through any intermediate proxy or third-party server.
 
 ---
 

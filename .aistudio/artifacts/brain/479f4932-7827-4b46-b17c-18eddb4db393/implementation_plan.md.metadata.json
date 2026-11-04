@@ -1,6 +1,0 @@
-{
-  "summary": "Implementation plan for Task 1: Credential & Session Lifecycle Hardening, covering AndroidKeyStore downgrade prevention, SHA-256 service cache keying with complete sign-out memory/disk eviction, and PAT input/clipboard hardening.",
-  "updatedAt": "2026-11-04T05:06:09.429919417Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

@@ -40,21 +40,36 @@ class AzureAccountRepository(
                 encoded
             }
 
+        private val ORG_NAME_REGEX = Regex("^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$")
+
         fun extractOrganization(input: String): String {
-            val trimmed = input.trim()
-            if (trimmed.isEmpty()) return ""
-            val withoutProtocol = trimmed.substringAfter("https://").substringAfter("http://")
-            return when {
-                withoutProtocol.startsWith("dev.azure.com/") -> {
-                    withoutProtocol.removePrefix("dev.azure.com/").substringBefore("/").substringBefore("?")
+            val withoutProtocol = input.trim()
+                .replaceFirst(Regex("^https?://", RegexOption.IGNORE_CASE), "")
+                .substringBefore("?")
+                .substringBefore("#")
+                .trim()
+                .trim('/')
+            if (withoutProtocol.isEmpty()) return ""
+
+            val host = withoutProtocol.substringBefore("/")
+            val rawCandidate = when {
+                withoutProtocol.startsWith("dev.azure.com/", ignoreCase = true) -> {
+                    withoutProtocol.substringAfter("/").substringBefore("/")
                 }
-                withoutProtocol.contains(".visualstudio.com") -> {
-                    withoutProtocol.substringBefore(".visualstudio.com")
+                host.endsWith(".visualstudio.com", ignoreCase = true) -> {
+                    host.substring(0, host.length - ".visualstudio.com".length)
                 }
                 else -> {
-                    withoutProtocol.substringBefore("/").substringBefore("?")
+                    withoutProtocol
                 }
-            }.trim()
+            }
+
+            val candidate = rawCandidate
+                .substringBefore("?")
+                .substringBefore("#")
+                .trim()
+
+            return if (ORG_NAME_REGEX.matches(candidate)) candidate else ""
         }
     }
 

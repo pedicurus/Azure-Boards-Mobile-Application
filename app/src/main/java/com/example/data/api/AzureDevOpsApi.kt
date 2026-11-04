@@ -200,11 +200,15 @@ object AzureDevOpsClient {
     private val patchAdapter = moshi.adapter<List<JsonPatchOperation>>(patchListType)
 
     private val baseOkHttpClient: OkHttpClient by lazy {
-        val loggingInterceptor = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BASIC
-        }
         OkHttpClient.Builder()
-            .addInterceptor(loggingInterceptor)
+            .apply {
+                if (com.example.BuildConfig.DEBUG) {
+                    val loggingInterceptor = HttpLoggingInterceptor().apply {
+                        level = HttpLoggingInterceptor.Level.BASIC
+                    }
+                    addInterceptor(loggingInterceptor)
+                }
+            }
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(20, TimeUnit.SECONDS)
             .build()
