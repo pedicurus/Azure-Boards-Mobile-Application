@@ -48,6 +48,15 @@ class AzureCommentsRepository {
             avatarUrl = authorAvatar
         )
 
+        val extractedMentionIds = buildSet {
+            raw.mentions.orEmpty().forEach { mention ->
+                mention.targetId?.trim()?.takeIf { it.isNotEmpty() }?.let { add(it.lowercase()) }
+                mention.artifactId?.trim()?.takeIf { it.isNotEmpty() }?.let { add(it.lowercase()) }
+            }
+            AzureIdentityRegistry.extractMentionedIdsFromRawComment(raw.text, raw.renderedText)
+                .forEach { add(it) }
+        }.toList()
+
         val cleanedText = normalizeCommentTextFromAzure(raw.text, raw.renderedText)?.trim().orEmpty()
         if (cleanedText.isBlank()) return null
         val rawDate = raw.createdDate?.trim().orEmpty()
@@ -60,7 +69,8 @@ class AzureCommentsRepository {
             authorEmail = authorEmail,
             authorAvatar = authorAvatar,
             createdDate = rawDate,
-            formattedDate = formatCommentTimestamp(rawDate)
+            formattedDate = formatCommentTimestamp(rawDate),
+            mentionedIds = extractedMentionIds
         )
     }
 
@@ -87,10 +97,24 @@ class AzureCommentsRepository {
                     workItemId = workItemId,
                     top = 100,
                     order = "desc",
-                    expand = "renderedText",
+                    expand = "all",
                     apiVersion = "7.1-preview.4"
                 )
             }.getOrNull()
+
+            if (response == null || !response.isSuccessful) {
+                response = runCatching {
+                    service.getWorkItemComments(
+                        organization = normalizedOrg,
+                        project = cleanProject,
+                        workItemId = workItemId,
+                        top = 100,
+                        order = "desc",
+                        expand = "renderedText",
+                        apiVersion = "7.1-preview.4"
+                    )
+                }.getOrNull()
+            }
 
             if (response == null || !response.isSuccessful) {
                 response = service.getWorkItemComments(

@@ -235,5 +235,86 @@ class MentionFormattingTest {
         assertEquals(101, triggered.workItemId)
         assertEquals(202, triggered.commentId)
     }
+
+    @Test
+    fun evaluateWorkItemCommentsForMentions_detectsMentionAfterReplyingAndParsesHighPrecisionIsoTimestamps() = kotlinx.coroutines.test.runTest {
+        val org = "ContosoOrg"
+        val myUserId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        val myDisplayName = "Reza Keshavarzi"
+        val myEmail = "keshavarzi72@gmail.com"
+
+        // Initially notifications state has NO detected identity (e.g. connectionData had not run or failed)
+        repository.saveNotificationsStateForTesting(
+            com.example.data.model.CachedNotificationsState(organization = org)
+        )
+
+        val workItem = com.example.data.model.WorkItem(
+            id = 555,
+            title = "Fix Mention Notification Bug",
+            workItemType = "Bug",
+            state = "Active",
+            teamProject = "MobileApp"
+        )
+
+        // 7-digit fractional second timestamp from Azure DevOps in the current month
+        val now = java.util.Date()
+        val baseIso = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }.format(now)
+        val sevenDigitIso = "$baseIso.5432167Z"
+
+        // Colleague mentioned the user via GUID in raw comment / mentionedIds
+        val colleagueComment = com.example.data.model.WorkItemComment(
+            id = 301,
+            workItemId = 555,
+            text = "Hi @<$myUserId>, can you check this?",
+            authorName = "John Doe",
+            authorId = "99999999-8888-7777-6666-555555555555",
+            authorEmail = "john@contoso.com",
+            createdDate = sevenDigitIso,
+            formattedDate = "Just now",
+            mentionedIds = listOf(myUserId)
+        )
+
+        // User replies to John Doe; server returns user's own identity in createdBy
+        val myReplyComment = com.example.data.model.WorkItemComment(
+            id = 302,
+            workItemId = 555,
+            text = "Sure @<John Doe>, I fixed it!",
+            authorName = myDisplayName,
+            authorId = myUserId,
+            authorEmail = myEmail,
+            createdDate = sevenDigitIso,
+            formattedDate = "Just now"
+        )
+
+        // Record authenticated user identity from the reply comment and evaluate all comments on the work item
+        repository.recordAuthenticatedUserIdentity(
+            organization = org,
+            userId = myReplyComment.authorId,
+            displayName = myReplyComment.authorName,
+            email = myReplyComment.authorEmail
+        )
+
+        val outcome = repository.evaluateWorkItemCommentsForMentions(
+            organization = org,
+            workItem = workItem,
+            comments = listOf(myReplyComment, colleagueComment),
+            allowSystemNotification = true
+        )
+
+        val startOfMonthMs = repository.getStartOfCurrentMonthEpochMs()
+        val thisMonthMentions = outcome.state.notifications.filter {
+            it.category == com.example.data.model.NotificationCategory.MENTIONED &&
+                it.epochMs >= startOfMonthMs
+        }
+
+        assertEquals(1, thisMonthMentions.size)
+        val mention = thisMonthMentions.first()
+        assertEquals(555, mention.workItemId)
+        assertEquals(301, mention.commentId)
+        assertEquals("John Doe", mention.actorName)
+        assertTrue(mention.epochMs >= startOfMonthMs)
+    }
 }
 

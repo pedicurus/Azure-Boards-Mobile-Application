@@ -39,13 +39,19 @@ class NotificationsViewModel(
     val assignedNotifications: StateFlow<List<AppNotificationItem>> = notificationsState.map { state ->
         state.notifications
             .filter { it.category == NotificationCategory.ASSIGNED }
-            .sortedByDescending { it.createdDateIso }
+            .sortedWith(
+                compareByDescending<AppNotificationItem> { it.epochMs }
+                    .thenByDescending { it.createdDateIso }
+            )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val mentionedNotifications: StateFlow<List<AppNotificationItem>> = notificationsState.map { state ->
         state.notifications
             .filter { it.category == NotificationCategory.MENTIONED }
-            .sortedByDescending { it.createdDateIso }
+            .sortedWith(
+                compareByDescending<AppNotificationItem> { it.epochMs }
+                    .thenByDescending { it.createdDateIso }
+            )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val unreadNotificationsCount: StateFlow<Int> = notificationsState.map { state ->

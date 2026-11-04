@@ -9,12 +9,16 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -209,18 +213,23 @@ fun NotificationsScreen(
     }
     val activeCategory = if (selectedTabIndex == 0) NotificationCategory.ASSIGNED else NotificationCategory.MENTIONED
 
-    Column(
+    Surface(
+        color = Color.Transparent,
         modifier = modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(NotifBgTop, NotifBgBottom)
-                )
-            )
-            .statusBarsPadding()
-            .navigationBarsPadding()
             .testTag("notifications_screen")
     ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(NotifBgTop, NotifBgBottom)
+                    )
+                )
+                .statusBarsPadding()
+                .navigationBarsPadding()
+        ) {
         // Top App Bar
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -762,6 +771,7 @@ fun NotificationsScreen(
             }
         }
     }
+}
 }
 
 @Composable

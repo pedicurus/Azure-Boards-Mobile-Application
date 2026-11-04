@@ -400,7 +400,8 @@ data class WorkItemComment(
     val authorEmail: String? = null,
     val authorAvatar: String? = null,
     val createdDate: String = "",
-    val formattedDate: String = ""
+    val formattedDate: String = "",
+    val mentionedIds: List<String> = emptyList()
 )
 
 @JsonClass(generateAdapter = true)

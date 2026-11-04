@@ -265,7 +265,8 @@ class WorkItemHierarchyDelegate(
                 val mentionOutcome = repository.evaluateWorkItemCommentsForMentions(
                     organization = org,
                     workItem = item,
-                    comments = serverComments
+                    comments = serverComments,
+                    pat = pat
                 )
                 if (mentionOutcome.newlyTriggeredNotifications.isNotEmpty()) {
                     val appContext = application.applicationContext
@@ -337,6 +338,13 @@ class WorkItemHierarchyDelegate(
             )
             result.fold(
                 onSuccess = { serverComment ->
+                    repository.recordAuthenticatedUserIdentity(
+                        organization = org,
+                        userId = serverComment.authorId,
+                        displayName = serverComment.authorName,
+                        email = serverComment.authorEmail
+                    )
+
                     val existing = commentsByWorkItemId[workItem.id].orEmpty()
                     val replaced = existing.map { c ->
                         if (c.id == tempId) serverComment else c
@@ -349,8 +357,9 @@ class WorkItemHierarchyDelegate(
                     val mentionOutcome = repository.evaluateWorkItemCommentsForMentions(
                         organization = org,
                         workItem = workItem,
-                        comments = listOf(serverComment),
-                        allowSystemNotification = true
+                        comments = replaced,
+                        allowSystemNotification = true,
+                        pat = pat
                     )
                     if (mentionOutcome.newlyTriggeredNotifications.isNotEmpty()) {
                         val appContext = application.applicationContext

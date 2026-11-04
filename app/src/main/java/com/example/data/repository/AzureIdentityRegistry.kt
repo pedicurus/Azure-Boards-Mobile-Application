@@ -26,9 +26,39 @@ object AzureIdentityRegistry {
 
     private val BRACKETED_MENTION_REGEX = Regex("@<([^>\\r\\n]+)>")
     private val VSS_MENTION_ANCHOR_REGEX = Regex(
-        "<a\\b[^>]*data-vss-mention\\s*=\\s*\"(?:version:\\d+\\.\\d+,)?([^\"]+)\"[^>]*>(.*?)</a>",
+        "<a\\b[^>]*data-vss-mention\\s*=\\s*[\"'](?:version:\\d+\\.\\d+,)?([^\"']+)[\"'][^>]*>(.*?)</a>",
         setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
     )
+
+    fun extractMentionedIdsFromRawComment(
+        rawText: String?,
+        renderedText: String? = null
+    ): List<String> {
+        val ids = linkedSetOf<String>()
+        fun collectFromSource(source: String?) {
+            if (source.isNullOrBlank()) return
+            for (match in VSS_MENTION_ANCHOR_REGEX.findAll(source)) {
+                val rawId = match.groupValues[1].trim()
+                if (rawId.isNotEmpty()) {
+                    ids.add(rawId.lowercase())
+                }
+            }
+            for (match in BRACKETED_MENTION_REGEX.findAll(source)) {
+                val inner = match.groupValues[1].trim()
+                if (inner.isNotEmpty()) {
+                    ids.add(inner.lowercase())
+                    resolveIdentityRecord(inner)?.let { record ->
+                        record.id?.trim()?.takeIf { it.isNotEmpty() }?.let { ids.add(it.lowercase()) }
+                        record.displayName.trim().takeIf { it.isNotEmpty() }?.let { ids.add(it.lowercase()) }
+                        record.email?.trim()?.takeIf { it.isNotEmpty() }?.let { ids.add(it.lowercase()) }
+                    }
+                }
+            }
+        }
+        collectFromSource(rawText)
+        collectFromSource(renderedText)
+        return ids.toList()
+    }
 
     fun registerKnownIdentity(
         id: String?,
@@ -314,12 +344,46 @@ object AzureIdentityRegistry {
         commentText: String,
         effectiveDisplayName: String?,
         detectedEmail: String?,
-        detectedUserId: String? = null
+        detectedUserId: String? = null,
+        mentionedIds: List<String> = emptyList()
     ): Boolean {
         val lowerText = commentText.lowercase()
-        val targetName = effectiveDisplayName?.trim()?.lowercase().orEmpty()
-        val targetEmail = detectedEmail?.trim()?.lowercase().orEmpty()
-        val targetId = detectedUserId?.trim()?.lowercase().orEmpty()
+        val resolvedRecord = listOfNotNull(detectedUserId, detectedEmail, effectiveDisplayName)
+            .firstNotNullOfOrNull { resolveIdentityRecord(it) }
+
+        val targetName = (effectiveDisplayName?.trim()?.takeIf { it.isNotEmpty() }
+            ?: resolvedRecord?.displayName?.trim()).orEmpty().lowercase()
+        val targetEmail = (detectedEmail?.trim()?.takeIf { it.isNotEmpty() }
+            ?: resolvedRecord?.email?.trim()).orEmpty().lowercase()
+        val targetId = (detectedUserId?.trim()?.takeIf { it.isNotEmpty() }
+            ?: resolvedRecord?.id?.trim()).orEmpty().lowercase()
+
+        if (mentionedIds.isNotEmpty()) {
+            val lowerMentioned = mentionedIds.map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+            if (targetId.isNotEmpty() && lowerMentioned.any { it == targetId || it.endsWith(",$targetId") }) {
+                return true
+            }
+            if (targetName.isNotEmpty() && lowerMentioned.contains(targetName)) {
+                return true
+            }
+            if (targetEmail.isNotEmpty() && lowerMentioned.contains(targetEmail)) {
+                return true
+            }
+            for (mId in lowerMentioned) {
+                val rec = resolveIdentityRecord(mId) ?: continue
+                if (targetId.isNotEmpty() && rec.id?.lowercase() == targetId) return true
+                if (matchesUserIdentity(rec.displayName, rec.email, targetName, targetEmail)) return true
+            }
+        }
+
+        for (match in BRACKETED_MENTION_REGEX.findAll(commentText)) {
+            val token = match.groupValues[1].trim()
+            val rec = resolveIdentityRecord(token)
+            if (rec != null) {
+                if (targetId.isNotEmpty() && rec.id?.lowercase() == targetId) return true
+                if (matchesUserIdentity(rec.displayName, rec.email, targetName, targetEmail)) return true
+            }
+        }
 
         if (targetId.isNotEmpty()) {
             if (lowerText.contains("@<$targetId>") ||

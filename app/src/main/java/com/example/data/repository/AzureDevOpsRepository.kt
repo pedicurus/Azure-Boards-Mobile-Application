@@ -565,29 +565,45 @@ class AzureDevOpsRepository(
         detectedEmail = detectedEmail
     )
 
+    suspend fun recordAuthenticatedUserIdentity(
+        organization: String,
+        userId: String?,
+        displayName: String?,
+        email: String?
+    ): CachedNotificationsState = notificationsRepository.recordAuthenticatedUserIdentity(
+        organization = organization,
+        userId = userId,
+        displayName = displayName,
+        email = email
+    )
+
     fun commentMentionsIdentity(
         commentText: String,
         effectiveDisplayName: String?,
         detectedEmail: String?,
-        detectedUserId: String? = null
+        detectedUserId: String? = null,
+        mentionedIds: List<String> = emptyList()
     ): Boolean = notificationsRepository.commentMentionsIdentity(
         commentText = commentText,
         effectiveDisplayName = effectiveDisplayName,
         detectedEmail = detectedEmail,
-        detectedUserId = detectedUserId
+        detectedUserId = detectedUserId,
+        mentionedIds = mentionedIds
     )
 
     suspend fun evaluateWorkItemCommentsForMentions(
         organization: String,
         workItem: WorkItem,
         comments: List<WorkItemComment>,
-        allowSystemNotification: Boolean = true
+        allowSystemNotification: Boolean = true,
+        pat: String? = null
     ): AzureNotificationsRepository.NotificationSyncOutcome =
         notificationsRepository.evaluateWorkItemCommentsForMentions(
             organization = organization,
             workItem = workItem,
             comments = comments,
-            allowSystemNotification = allowSystemNotification
+            allowSystemNotification = allowSystemNotification,
+            pat = pat
         )
 
     suspend fun syncOrganizationNotifications(

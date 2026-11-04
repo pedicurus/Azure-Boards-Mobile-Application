@@ -146,12 +146,24 @@ class AzureNotificationsRepository(
         updated
     }
 
-    private fun parseIsoToEpochMs(iso: String?): Long {
+    private val fractionalSecondsRegex = Regex("\\.(\\d{1,9})(Z|[+-]\\d{2}:?\\d{2})?$")
+
+    internal fun parseIsoToEpochMs(iso: String?): Long {
         val clean = iso?.trim().orEmpty()
         if (clean.isEmpty()) return 0L
+
+        val normalized = fractionalSecondsRegex.replace(clean) { match ->
+            val digits = match.groupValues[1].padEnd(3, '0').take(3)
+            val tz = match.groupValues[2]
+            ".$digits$tz"
+        }
+
         val patterns = arrayOf(
             "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
             "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+            "yyyy-MM-dd'T'HH:mm:ssXXX",
+            "yyyy-MM-dd'T'HH:mm:ss.SSS",
             "yyyy-MM-dd'T'HH:mm:ss"
         )
         for (pattern in patterns) {
@@ -159,7 +171,7 @@ class AzureNotificationsRepository(
                 val sdf = SimpleDateFormat(pattern, Locale.US).apply {
                     timeZone = TimeZone.getTimeZone("UTC")
                 }
-                val parsed = sdf.parse(clean.take(24))
+                val parsed = sdf.parse(normalized)
                 if (parsed != null) return parsed.time
             } catch (_: Exception) {
             }
@@ -167,108 +179,127 @@ class AzureNotificationsRepository(
         return 0L
     }
 
+    suspend fun recordAuthenticatedUserIdentity(
+        organization: String,
+        userId: String?,
+        displayName: String?,
+        email: String?
+    ): CachedNotificationsState = withContext(Dispatchers.IO) {
+        val normOrg = AzureAccountRepository.extractOrganization(organization)
+        if (normOrg.isBlank()) return@withContext CachedNotificationsState(organization = "")
+        val current = getCachedNotificationsStateSync(normOrg)
+
+        val validName = displayName?.trim()?.takeIf {
+            it.isNotEmpty() &&
+                !it.equals("You", ignoreCase = true) &&
+                !it.equals("User", ignoreCase = true) &&
+                !it.equals("Unassigned", ignoreCase = true)
+        }
+        val validId = userId?.trim()?.takeIf { it.isNotEmpty() }
+        val validEmail = email?.trim()?.takeIf { it.isNotEmpty() }
+
+        AzureIdentityRegistry.registerKnownIdentity(
+            id = validId ?: current.detectedUserId,
+            displayName = validName ?: current.detectedDisplayName,
+            email = validEmail ?: current.detectedEmail
+        )
+
+        val newName = validName ?: current.detectedDisplayName
+        val newId = validId ?: current.detectedUserId
+        val newEmail = validEmail ?: current.detectedEmail
+
+        if (newName == current.detectedDisplayName &&
+            newId == current.detectedUserId &&
+            newEmail == current.detectedEmail
+        ) {
+            return@withContext current
+        }
+
+        val updated = current.copy(
+            detectedDisplayName = newName,
+            detectedUserId = newId,
+            detectedEmail = newEmail
+        )
+        localStore.saveNotificationsState(updated)
+        updated
+    }
+
     fun matchesUserIdentity(
         candidateName: String?,
         candidateEmail: String?,
         effectiveDisplayName: String?,
         detectedEmail: String?
-    ): Boolean {
-        val cName = candidateName?.trim()?.lowercase().orEmpty()
-        val cEmail = candidateEmail?.trim()?.lowercase().orEmpty()
-        val targetName = effectiveDisplayName?.trim()?.lowercase().orEmpty()
-        val targetEmail = detectedEmail?.trim()?.lowercase().orEmpty()
-
-        if (cName.isEmpty() && cEmail.isEmpty()) return false
-        if (cName == "unassigned") return false
-
-        if (targetEmail.isNotEmpty()) {
-            if (cEmail.isNotEmpty() && cEmail == targetEmail) return true
-            if (cName.isNotEmpty() && cName == targetEmail) return true
-            val emailPrefix = targetEmail.substringBefore('@')
-            if (emailPrefix.length >= 3 && cEmail.startsWith("$emailPrefix@")) return true
-        }
-        if (targetName.isNotEmpty() && cName.isNotEmpty()) {
-            if (cName == targetName) return true
-            val tokens = cName.split(' ', '-', '_', '.', '(', ')', '<', '>').filter { it.isNotEmpty() }
-            if (targetName.length >= 3 && (tokens.contains(targetName) || cName.startsWith("$targetName "))) {
-                return true
-            }
-        }
-        return false
-    }
+    ): Boolean = AzureIdentityRegistry.matchesUserIdentity(
+        candidateName = candidateName,
+        candidateEmail = candidateEmail,
+        effectiveDisplayName = effectiveDisplayName,
+        detectedEmail = detectedEmail
+    )
 
     fun commentMentionsIdentity(
         commentText: String,
         effectiveDisplayName: String?,
         detectedEmail: String?,
-        detectedUserId: String?
-    ): Boolean {
-        val lowerText = commentText.lowercase()
-        val targetName = effectiveDisplayName?.trim()?.lowercase().orEmpty()
-        val targetEmail = detectedEmail?.trim()?.lowercase().orEmpty()
-        val targetId = detectedUserId?.trim()?.lowercase().orEmpty()
-
-        if (targetId.isNotEmpty()) {
-            if (lowerText.contains("@<$targetId>") ||
-                lowerText.contains(targetId) ||
-                (lowerText.contains("data-vss-mention") && lowerText.contains(targetId))
-            ) {
-                return true
-            }
-        }
-
-        if (targetName.isNotEmpty()) {
-            if (lowerText.contains("@<$targetName>") ||
-                lowerText.contains("@$targetName") ||
-                (lowerText.contains("data-vss-mention") && lowerText.contains(targetName)) ||
-                lowerText.contains("@ $targetName")
-            ) {
-                return true
-            }
-            val nameParts = targetName.split(' ', '-', '_', '.').map { it.trim() }.filter { it.length >= 3 }
-            for (part in nameParts) {
-                if (lowerText.contains("@<$part>") ||
-                    lowerText.contains("@$part") ||
-                    Regex("(?<![\\w@])@<?${Regex.escape(part)}>?(?![\\w])").containsMatchIn(lowerText)
-                ) {
-                    return true
-                }
-            }
-            if (lowerText.contains(targetName) && (lowerText.contains("@") || lowerText.contains("mention") || lowerText.contains("<a "))) {
-                return true
-            }
-        }
-        if (targetEmail.isNotEmpty()) {
-            if (lowerText.contains("@<$targetEmail>") || lowerText.contains("@$targetEmail") || lowerText.contains(targetEmail)) {
-                return true
-            }
-            val emailPrefix = targetEmail.substringBefore('@').trim()
-            if (emailPrefix.length >= 3) {
-                if (lowerText.contains("@<$emailPrefix>") ||
-                    lowerText.contains("@$emailPrefix") ||
-                    Regex("(?<![\\w@])@<?${Regex.escape(emailPrefix)}>?(?![\\w])").containsMatchIn(lowerText) ||
-                    (lowerText.contains(emailPrefix) && (lowerText.contains("@") || lowerText.contains("mention")))
-                ) {
-                    return true
-                }
-            }
-        }
-        return false
-    }
+        detectedUserId: String?,
+        mentionedIds: List<String> = emptyList()
+    ): Boolean = AzureIdentityRegistry.commentMentionsIdentity(
+        commentText = commentText,
+        effectiveDisplayName = effectiveDisplayName,
+        detectedEmail = detectedEmail,
+        detectedUserId = detectedUserId,
+        mentionedIds = mentionedIds
+    )
 
     suspend fun evaluateWorkItemCommentsForMentions(
         organization: String,
         workItem: WorkItem,
         comments: List<WorkItemComment>,
-        allowSystemNotification: Boolean = true
+        allowSystemNotification: Boolean = true,
+        pat: String? = null
     ): NotificationSyncOutcome = withContext(Dispatchers.IO) {
         val normOrg = AzureAccountRepository.extractOrganization(organization)
-        val currentState = getCachedNotificationsStateSync(normOrg)
-        val effectiveName = currentState.detectedDisplayName
-        val detectedEmail = currentState.detectedEmail
-        val detectedUserId = currentState.detectedUserId
+        var currentState = getCachedNotificationsStateSync(normOrg)
+        var effectiveName = currentState.detectedDisplayName
+        var detectedEmail = currentState.detectedEmail
+        var detectedUserId = currentState.detectedUserId
 
-        if (effectiveName.isNullOrBlank() && detectedEmail.isNullOrBlank()) {
+        val cleanPat = pat?.trim().orEmpty()
+        if ((effectiveName.isNullOrBlank() || detectedUserId.isNullOrBlank()) &&
+            normOrg.isNotBlank() &&
+            cleanPat.isNotBlank()
+        ) {
+            runCatching {
+                val service = AzureDevOpsClient.createService(cleanPat)
+                val connResp = service.getConnectionData(organization = normOrg)
+                if (connResp.isSuccessful) {
+                    val user = connResp.body()?.authenticatedUser ?: connResp.body()?.authorizedUser
+                    if (user != null) {
+                        effectiveName = user.customDisplayName?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: user.providerDisplayName?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: effectiveName
+                        val propAccount = (user.properties?.get("Account") as? Map<*, *>)?.get("\$value") as? String
+                        detectedEmail = user.uniqueName?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: propAccount?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: detectedEmail
+                        detectedUserId = user.id?.trim()?.takeIf { it.isNotEmpty() } ?: detectedUserId
+                    }
+                }
+            }
+        }
+
+        val resolvedFromRegistry = listOfNotNull(detectedUserId, detectedEmail, effectiveName)
+            .firstNotNullOfOrNull { AzureIdentityRegistry.resolveIdentityRecord(it) }
+        if (effectiveName.isNullOrBlank()) effectiveName = resolvedFromRegistry?.displayName
+        if (detectedEmail.isNullOrBlank()) detectedEmail = resolvedFromRegistry?.email
+        if (detectedUserId.isNullOrBlank()) detectedUserId = resolvedFromRegistry?.id
+
+        AzureIdentityRegistry.registerKnownIdentity(
+            id = detectedUserId,
+            displayName = effectiveName,
+            email = detectedEmail
+        )
+
+        if (effectiveName.isNullOrBlank() && detectedEmail.isNullOrBlank() && detectedUserId.isNullOrBlank()) {
             return@withContext NotificationSyncOutcome(currentState, emptyList())
         }
 
@@ -279,13 +310,21 @@ class AzureNotificationsRepository(
         val recentPushCutoffMs = System.currentTimeMillis() - 48L * 60L * 60L * 1000L
 
         for (comment in comments) {
-            if (commentMentionsIdentity(comment.text, effectiveName, detectedEmail, detectedUserId)) {
+            if (commentMentionsIdentity(
+                    commentText = comment.text,
+                    effectiveDisplayName = effectiveName,
+                    detectedEmail = detectedEmail,
+                    detectedUserId = detectedUserId,
+                    mentionedIds = comment.mentionedIds
+                )
+            ) {
                 val notifId = "mention_${normOrg.lowercase()}_${workItem.id}_${comment.id}"
+                val epoch = parseIsoToEpochMs(comment.createdDate).takeIf { it > 0L }
+                    ?: parseIsoToEpochMs(workItem.changedDate ?: workItem.createdDate).takeIf { it > 0L }
+                    ?: System.currentTimeMillis()
 
                 val existing = existingById[notifId]
                 if (existing == null) {
-                    val epoch = parseIsoToEpochMs(comment.createdDate).takeIf { it > 0L }
-                        ?: System.currentTimeMillis()
                     val isThisMonth = epoch >= startOfMonthMs
                     val isJustMentioned = epoch >= recentPushCutoffMs && isThisMonth
                     val shouldMarkUnread = allowSystemNotification && isThisMonth
@@ -311,6 +350,15 @@ class AzureNotificationsRepository(
                         newlyTriggered.add(notifItem)
                     }
                     notifiedSet.add(notifId)
+                } else {
+                    existingById[notifId] = existing.copy(
+                        workItemTitle = workItem.title,
+                        workItemType = workItem.workItemType,
+                        workItemState = workItem.state,
+                        teamProject = workItem.teamProject,
+                        messageSnippet = comment.text.ifBlank { existing.messageSnippet },
+                        epochMs = if (existing.epochMs > 0L) existing.epochMs else epoch
+                    )
                 }
             }
         }
@@ -319,13 +367,16 @@ class AzureNotificationsRepository(
             .sortedWith(compareByDescending<AppNotificationItem> { it.epochMs }.thenByDescending { it.workItemId })
             .take(150)
 
-        val updatedState = currentState.copy(
+        currentState = currentState.copy(
+            detectedDisplayName = effectiveName ?: currentState.detectedDisplayName,
+            detectedEmail = detectedEmail ?: currentState.detectedEmail,
+            detectedUserId = detectedUserId ?: currentState.detectedUserId,
             notifications = sortedNotifications,
             notifiedNotificationIds = notifiedSet.toList().takeLast(500)
         )
-        localStore.saveNotificationsState(updatedState)
+        localStore.saveNotificationsState(currentState)
         NotificationSyncOutcome(
-            state = updatedState,
+            state = currentState,
             newlyTriggeredNotifications = newlyTriggered.sortedByDescending { it.epochMs }.take(5)
         )
     }
@@ -351,7 +402,7 @@ class AzureNotificationsRepository(
         var detectedEmail = currentState.detectedEmail
         var detectedUserId = currentState.detectedUserId
 
-        if (detectedName.isNullOrBlank() || detectedUserId.isNullOrBlank()) {
+        if (detectedName.isNullOrBlank() || detectedUserId.isNullOrBlank() || detectedEmail.isNullOrBlank()) {
             runCatching {
                 val connResp = service.getConnectionData(organization = normOrg)
                 if (connResp.isSuccessful) {
@@ -370,12 +421,6 @@ class AzureNotificationsRepository(
             }
         }
 
-        AzureIdentityRegistry.registerKnownIdentity(
-            id = detectedUserId,
-            displayName = detectedName,
-            email = detectedEmail
-        )
-
         val newlyHydratedItems = mutableListOf<WorkItem>()
         val itemsById = knownWorkItems.associateBy { it.id }.toMutableMap()
 
@@ -393,6 +438,49 @@ class AzureNotificationsRepository(
                 emptyList()
             }
         }.getOrDefault(emptyList())
+
+        // Hydrate missing @Me assigned items BEFORE resolving fallback user identity and running mention WIQL queries
+        val missingAssignedIds = assignedToMeServerIds.filter { it !in itemsById }.take(100)
+        if (missingAssignedIds.isNotEmpty()) {
+            runCatching {
+                val rawBatch = AzureWorkItemParser.hydrateRawItemsByIds(service, normOrg, missingAssignedIds)
+                val parsedBatch = AzureWorkItemParser.parseAndLinkRawWorkItems(rawBatch)
+                parsedBatch.forEach { item ->
+                    itemsById[item.id] = item
+                    newlyHydratedItems.add(item)
+                }
+            }
+        }
+
+        if ((detectedName.isNullOrBlank() || detectedUserId.isNullOrBlank() || detectedEmail.isNullOrBlank()) &&
+            assignedToMeServerIds.isNotEmpty()
+        ) {
+            val firstMeItem = assignedToMeServerIds.mapNotNull { itemsById[it] }
+                .firstOrNull { !it.assignedToName.isNullOrBlank() && !it.isUnassigned }
+            if (firstMeItem != null) {
+                if (detectedName.isNullOrBlank()) {
+                    detectedName = firstMeItem.assignedToName?.trim()
+                }
+                if (detectedEmail.isNullOrBlank()) {
+                    detectedEmail = firstMeItem.assignedToEmail?.trim()
+                }
+                if (detectedUserId.isNullOrBlank()) {
+                    detectedUserId = firstMeItem.assignedToId?.trim()
+                }
+            }
+        }
+
+        val resolvedFromRegistry = listOfNotNull(detectedUserId, detectedEmail, detectedName)
+            .firstNotNullOfOrNull { AzureIdentityRegistry.resolveIdentityRecord(it) }
+        if (detectedName.isNullOrBlank()) detectedName = resolvedFromRegistry?.displayName
+        if (detectedEmail.isNullOrBlank()) detectedEmail = resolvedFromRegistry?.email
+        if (detectedUserId.isNullOrBlank()) detectedUserId = resolvedFromRegistry?.id
+
+        AzureIdentityRegistry.registerKnownIdentity(
+            id = detectedUserId,
+            displayName = detectedName,
+            email = detectedEmail
+        )
 
         val effectiveIdentityName = detectedName
 
@@ -429,40 +517,27 @@ class AzureNotificationsRepository(
                     )
                     resp.body()?.workItems.orEmpty().map { it.id }.forEach { mentionServerIds.add(it) }
                 }
-                if (mentionServerIds.size >= 40) break
+                if (mentionServerIds.size >= 50) break
             }
 
             runCatching {
-                val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= @Today - 14 AND [System.State] <> 'Removed' ORDER BY [System.ChangedDate] DESC"
+                val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= @Today - 31 AND [System.State] <> 'Removed' ORDER BY [System.ChangedDate] DESC"
                 val resp = service.queryWorkItems(
                     organization = normOrg,
                     request = WiqlQueryRequest(query = wiql)
                 )
-                resp.body()?.workItems.orEmpty().map { it.id }.take(50).forEach { mentionServerIds.add(it) }
+                resp.body()?.workItems.orEmpty().map { it.id }.take(80).forEach { mentionServerIds.add(it) }
             }
         }
 
-        val missingAssignedIds = assignedToMeServerIds.filter { it !in itemsById }
-        val missingMentionIds = mentionServerIds.filter { it !in itemsById }.take(40)
-        val combinedMissingIds = (missingAssignedIds + missingMentionIds).distinct().take(100)
-        if (combinedMissingIds.isNotEmpty()) {
+        val missingMentionIds = mentionServerIds.filter { it !in itemsById }.take(60)
+        if (missingMentionIds.isNotEmpty()) {
             runCatching {
-                val rawBatch = AzureWorkItemParser.hydrateRawItemsByIds(service, normOrg, combinedMissingIds)
+                val rawBatch = AzureWorkItemParser.hydrateRawItemsByIds(service, normOrg, missingMentionIds)
                 val parsedBatch = AzureWorkItemParser.parseAndLinkRawWorkItems(rawBatch)
                 parsedBatch.forEach { item ->
                     itemsById[item.id] = item
                     newlyHydratedItems.add(item)
-                }
-            }
-        }
-
-        if (detectedName.isNullOrBlank() && assignedToMeServerIds.isNotEmpty()) {
-            val firstMeItem = assignedToMeServerIds.mapNotNull { itemsById[it] }
-                .firstOrNull { !it.assignedToName.isNullOrBlank() && !it.isUnassigned }
-            if (firstMeItem != null) {
-                detectedName = firstMeItem.assignedToName?.trim()
-                if (detectedEmail.isNullOrBlank()) {
-                    detectedEmail = firstMeItem.assignedToEmail?.trim()
                 }
             }
         }
@@ -584,11 +659,9 @@ class AzureNotificationsRepository(
         val lastCheckedIso = currentState.lastCheckedChangedDateIso
         var maxObservedChangedIso = lastCheckedIso
 
-        fun currentThisMonthMentionCount(): Int = existingNotificationsById.values.count {
-            it.category == NotificationCategory.MENTIONED && it.epochMs >= startOfCurrentMonthMs
-        }
+        var mentionsDiscoveredInThisSyncPass = 0
 
-        if (!resolvedEffectiveName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) {
+        if (!resolvedEffectiveName.isNullOrBlank() || !detectedEmail.isNullOrBlank() || !detectedUserId.isNullOrBlank()) {
             val candidateChunks = candidateItemsList.take(75).chunked(15)
             for (chunk in candidateChunks) {
                 val commentResults = coroutineScope {
@@ -613,12 +686,24 @@ class AzureNotificationsRepository(
                     }
 
                     for (comment in comments) {
-                        if (commentMentionsIdentity(comment.text, resolvedEffectiveName, detectedEmail, detectedUserId)) {
+                        if (commentMentionsIdentity(
+                                commentText = comment.text,
+                                effectiveDisplayName = resolvedEffectiveName,
+                                detectedEmail = detectedEmail,
+                                detectedUserId = detectedUserId,
+                                mentionedIds = comment.mentionedIds
+                            )
+                        ) {
                             val notifId = "mention_${normOrg.lowercase()}_${workItem.id}_${comment.id}"
+                            val epoch = parseIsoToEpochMs(comment.createdDate).takeIf { it > 0L }
+                                ?: parseIsoToEpochMs(workItem.changedDate ?: workItem.createdDate).takeIf { it > 0L }
+                                ?: System.currentTimeMillis()
+                            if (epoch >= startOfCurrentMonthMs) {
+                                mentionsDiscoveredInThisSyncPass++
+                            }
 
                             val existingMention = existingNotificationsById[notifId]
                             if (existingMention == null) {
-                                val epoch = parseIsoToEpochMs(comment.createdDate).takeIf { it > 0L } ?: 0L
                                 val isRecentMention = epoch >= startOfCurrentMonthMs
                                 val isJustMentionedForPush = (!isInitialMentionsBaseline || epoch >= System.currentTimeMillis() - 15 * 60 * 1000L) && epoch >= recentPushCutoffMs
                                 val shouldMarkUnread = (!isInitialMentionsBaseline || epoch >= System.currentTimeMillis() - 15 * 60 * 1000L) && isRecentMention
@@ -649,14 +734,16 @@ class AzureNotificationsRepository(
                                     workItemTitle = workItem.title,
                                     workItemType = workItem.workItemType,
                                     workItemState = workItem.state,
-                                    teamProject = workItem.teamProject
+                                    teamProject = workItem.teamProject,
+                                    messageSnippet = comment.text.ifBlank { existingMention.messageSnippet },
+                                    epochMs = if (existingMention.epochMs > 0L) existingMention.epochMs else epoch
                                 )
                             }
                         }
                     }
                 }
 
-                if (currentThisMonthMentionCount() >= 15 || existingNotificationsById.values.count { it.category == NotificationCategory.MENTIONED } >= 30) {
+                if (mentionsDiscoveredInThisSyncPass >= 30) {
                     break
                 }
             }
