@@ -1,5 +1,0 @@
-{
-  "summary": "Unique artifact copy of the Clean MVVM Architecture Refactor Plan covering ViewModel decomposition, sealed UI states, Type-Safe Compose Navigation, AES-GCM encrypted PAT storage, WorkManager background sync, and Manual AppContainer DI.",
-  "updatedAt": "2026-11-02T20:38:45.893084623Z",
-  "userFacing": true
-}

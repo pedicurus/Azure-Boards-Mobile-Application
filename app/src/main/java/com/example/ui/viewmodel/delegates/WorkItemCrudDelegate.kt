@@ -92,47 +92,61 @@ class WorkItemCrudDelegate(
     }
 
     fun updateWorkItem(updatedItem: WorkItem) {
-        val currentInMemory = allWorkItems.value.firstOrNull { it.id == updatedItem.id }
+        val currentList = allWorkItems.value
+        val currentInMemory = currentList.firstOrNull { it.id == updatedItem.id }
+        if (currentInMemory == updatedItem) return
 
-        val resolvedEmail = if (updatedItem.assignedToName.isNullOrBlank() ||
-            updatedItem.assignedToName.equals("Unassigned", ignoreCase = true)
-        ) {
-            null
-        } else {
-            allWorkItems.value.firstOrNull {
-                it.assignedToName?.trim()?.equals(updatedItem.assignedToName.trim(), ignoreCase = true) == true &&
-                    !it.assignedToEmail.isNullOrBlank()
-            }?.assignedToEmail ?: updatedItem.assignedToEmail
+        val resolvedEmail = when {
+            updatedItem.assignedToName.isNullOrBlank() ||
+                updatedItem.assignedToName.equals("Unassigned", ignoreCase = true) -> null
+            currentInMemory != null &&
+                currentInMemory.assignedToName == updatedItem.assignedToName &&
+                !currentInMemory.assignedToEmail.isNullOrBlank() -> currentInMemory.assignedToEmail
+            !updatedItem.assignedToEmail.isNullOrBlank() -> updatedItem.assignedToEmail
+            else -> {
+                val targetAssignee = updatedItem.assignedToName.trim()
+                currentList.firstOrNull {
+                    it.assignedToName?.trim()?.equals(targetAssignee, ignoreCase = true) == true &&
+                        !it.assignedToEmail.isNullOrBlank()
+                }?.assignedToEmail
+            }
         }
 
-        val normalizedUpdated = updatedItem.copy(assignedToEmail = resolvedEmail)
+        val normalizedUpdated = if (resolvedEmail == updatedItem.assignedToEmail) {
+            updatedItem
+        } else {
+            updatedItem.copy(assignedToEmail = resolvedEmail)
+        }
+        if (currentInMemory == normalizedUpdated) return
 
-        allWorkItems.value = allWorkItems.value.map {
+        allWorkItems.value = currentList.map {
             if (it.id == normalizedUpdated.id) normalizedUpdated else it
         }
         onSyncSelectedWorkItem(normalizedUpdated)
-
         recordPendingDirty(normalizedUpdated)
-        onPersistSnapshot(null)
 
-        val currentNotifState = sessionManager.notificationsState.value
-        val effectiveName = currentNotifState.detectedDisplayName
-        val detectedEmail = currentNotifState.detectedEmail
-        val isStillAssignedToMe = !normalizedUpdated.isUnassigned &&
-            (!effectiveName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) &&
-            repository.matchesUserIdentity(
-                candidateName = normalizedUpdated.assignedToName,
-                candidateEmail = normalizedUpdated.assignedToEmail,
-                effectiveDisplayName = effectiveName,
-                detectedEmail = detectedEmail
-            )
-        if (!isStillAssignedToMe) {
-            val acc = sessionManager.getActiveAccount()
-            val org = acc?.organization ?: sessionManager.defaultOrganization.value ?: repository.getConfiguredUrl()
-            if (org.isNotBlank()) {
-                scope.launch {
-                    val updatedNotifState = repository.removeAssignedNotificationForWorkItem(org, normalizedUpdated.id)
-                    sessionManager.updateNotificationsState(updatedNotifState)
+        val assigneeChanged = currentInMemory == null ||
+            currentInMemory.assignedToName != normalizedUpdated.assignedToName
+        if (assigneeChanged) {
+            val currentNotifState = sessionManager.notificationsState.value
+            val effectiveName = currentNotifState.detectedDisplayName
+            val detectedEmail = currentNotifState.detectedEmail
+            val isStillAssignedToMe = !normalizedUpdated.isUnassigned &&
+                (!effectiveName.isNullOrBlank() || !detectedEmail.isNullOrBlank()) &&
+                repository.matchesUserIdentity(
+                    candidateName = normalizedUpdated.assignedToName,
+                    candidateEmail = normalizedUpdated.assignedToEmail,
+                    effectiveDisplayName = effectiveName,
+                    detectedEmail = detectedEmail
+                )
+            if (!isStillAssignedToMe) {
+                val acc = sessionManager.getActiveAccount()
+                val org = acc?.organization ?: sessionManager.defaultOrganization.value ?: repository.getConfiguredUrl()
+                if (org.isNotBlank()) {
+                    scope.launch {
+                        val updatedNotifState = repository.removeAssignedNotificationForWorkItem(org, normalizedUpdated.id)
+                        sessionManager.updateNotificationsState(updatedNotifState)
+                    }
                 }
             }
         }
@@ -146,9 +160,14 @@ class WorkItemCrudDelegate(
             (currentInMemory.description != normalizedUpdated.description ||
                 currentInMemory.title != normalizedUpdated.title)
 
+        if (!onlyTextChanged) {
+            onPersistSnapshot(null)
+        }
+
         val job = scope.launch {
             if (onlyTextChanged) {
                 delay(400L)
+                onPersistSnapshot(null)
             }
             syncWorkItemToServer(normalizedUpdated)
         }

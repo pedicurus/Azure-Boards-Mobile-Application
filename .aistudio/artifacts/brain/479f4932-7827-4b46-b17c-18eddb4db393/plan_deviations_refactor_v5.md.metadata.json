@@ -1,5 +1,0 @@
-{
-  "summary": "Refactoring plan addressing all three architectural deviations: Type-Safe Compose Navigation with @Serializable, AndroidX WorkManager background sync, and domain decomposition of WorkItemsViewModel and AzureDevOpsRepository.",
-  "updatedAt": "2026-11-02T21:26:13.687954398Z",
-  "userFacing": true
-}

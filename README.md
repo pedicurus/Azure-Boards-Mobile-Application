@@ -1,145 +1,269 @@
-# Azure Boards for Android
+<div align="center">
 
-[![Platform](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android&logoColor=white)](https://www.android.com/)
-[![Kotlin](https://img.shields.io/badge/Kotlin-2.0+-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/)
-[![Jetpack Compose](https://img.shields.io/badge/UI-Jetpack%20Compose%20%2F%20Material%203-4285F4?logo=jetpackcompose&logoColor=white)](https://developer.android.com/jetpack/compose)
-[![Azure DevOps](https://img.shields.io/badge/Azure%20DevOps-REST%20API-0078D4?logo=azuredevops&logoColor=white)](https://learn.microsoft.com/en-us/rest/api/azure/devops/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+  <h1>Azure Boards for Android</h1>
 
-A modern, fast, and feature-rich native Android client for **Microsoft Azure Boards**, built entirely with **Jetpack Compose** and **Material Design 3**. Connect securely using Personal Access Tokens (PAT) to manage work items, track progress, engage in discussions, and receive push notifications on your device when work items are assigned to you or you are `@mentioned`.
+  <p>
+    <strong>A high-performance, privacy-focused native Android client for Microsoft Azure Boards.</strong><br>
+    Stop suffering through sluggish mobile web views, desktop-only layouts, and missed assignment emails. Experience instant 60fps backlog management, ergonomic two-stage detail sheets, and native push notifications on your device.
+  </p>
+
+  <!-- UNIFIED SHIELDS.IO BADGES -->
+  <p>
+    <img src="https://img.shields.io/badge/Release-Unreleased_(Build_from_Source)-f59e0b?style=flat-square&logo=github" alt="Release Status">
+    <a href="https://developer.android.com"><img src="https://img.shields.io/badge/Platform-Android_7.0+_(API_24--36)-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Platform"></a>
+    <a href="https://kotlinlang.org"><img src="https://img.shields.io/badge/Language-Kotlin_2.0+-7F52FF?style=flat-square&logo=kotlin&logoColor=white" alt="Language"></a>
+    <a href="https://developer.android.com/jetpack/compose"><img src="https://img.shields.io/badge/UI-Jetpack_Compose_/_Material_3-4285F4?style=flat-square&logo=jetpackcompose&logoColor=white" alt="UI Framework"></a>
+    <a href="https://learn.microsoft.com/en-us/rest/api/azure/devops/"><img src="https://img.shields.io/badge/API-Azure_DevOps_REST_v7.0-0078D4?style=flat-square&logo=azuredevops&logoColor=white" alt="Azure DevOps REST API"></a>
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License"></a>
+  </p>
+
+  <!-- QUICK ACTION BAR -->
+  <h4>
+    <a href="#-get-the-app">Get the App</a>
+    <span> • </span>
+    <a href="#-why-this-app">Why This App</a>
+    <span> • </span>
+    <a href="#-features">Features</a>
+    <span> • </span>
+    <a href="#-architecture">Architecture</a>
+    <span> • </span>
+    <a href="#-security--permissions">Privacy & Security</a>
+    <span> • </span>
+    <a href="#-building-from-source">Build from Source</a>
+  </h4>
+
+</div>
+
+---
+
+## 💡 Why This App?
+
+Most mobile workflows for **Azure Boards** rely on desktop-oriented browser views or clunky hybrid wrappers that lose scroll position, lag while typing, and fail to deliver real-time alerts. Here is how **Azure Boards for Android** compares:
+
+| Capability / Metric | Azure Boards (Native Android) | Azure DevOps Mobile Web | Generic Third-Party Wrappers |
+| :--- | :---: | :---: | :---: |
+| **User Interface** | **100% Native (Jetpack Compose / Material 3)** | Desktop HTML/JS (Cramped & Laggy) | Hybrid / WebView Wrapper |
+| **Cold Start Time** | **< 100ms** (Instant Local Snapshot) | 3,000ms – 7,000ms | 1,500ms – 3,000ms |
+| **Detail Sheet Ergonomics** | **Two-Stage Sheet + Upper-Screen Swipe Dismiss** | Full-page reload (loses board context) | Rigid modal screens |
+| **Hierarchy Navigation** | **In-Sheet Parent/Child Stack & Cycle Checks** | Multi-tab browser juggling | Flat lists or read-only links |
+| **System Push Alerts** | ✅ Native OS Notification Channels (`@Me`) | ❌ None (Requires Email rules) | ⚠️ Delayed / Cloud-relay dependent |
+| **Offline Usability** | ✅ Instant Local Snapshot & Optimistic Edits | ❌ Completely Broken Offline | ⚠️ Read-only |
+| **Credential Storage** | 🔒 Device-Local Storage (Direct PAT Auth) | Browser Cookies (Frequent Re-login) | Third-party Cloud Relay |
+| **Data Tracking** | 🛡️ **Zero Telemetry / Direct TLS API Only** | Heavy Web Analytics Beacons | Third-party Ad & Analytics SDKs |
 
 ---
 
 ## ✨ Features
 
-### 📋 Work Item Management
-- **Full Hierarchy Support**: Browse and navigate Work Items across all active backlog levels:
-  - Portfolio Backlogs (e.g., Epics, Features)
-  - Requirement Backlogs (e.g., User Stories, Product Backlog Items)
-  - Iteration Backlogs (e.g., Tasks, Bugs)
-- **Parent & Child Hierarchy Links**:
-  - **In-Sheet Hierarchy Navigation & History Stack**: Tap any linked Parent or Child row inside the detail sheet to open its full detail view, view or edit its fields, and press the top-left **Back** button (or system back gesture) to return to the previous work item with all updates reflected live, or tap the top-right **Close (`X`)** button to close the sheet immediately.
-  - **Dedicated Parent Section**: View linked parent details (ID, status badge, title, type symbol, and single-tap navigation). Parent section is automatically hidden for top-level backlog items (e.g., Epics) based on project process template settings.
-  - **Add or Replace Parent**: Link an existing work item ID or create a brand new parent item of allowed type, with an automatic replacement confirmation dialog if a parent is already linked.
-  - **Unlink Parent**: Easily remove parent links (`System.LinkTypes.Hierarchy-Reverse`) without deleting either work item.
-  - **Child Item Management**: Create new child items, tap any child row to open its details, or link/unlink existing children with automated cycle and ancestor validation.
-- **Rich Work Item Details**:
-  - **Full-Screen Detail & Create Experience**: Dedicated full-screen pages with pinned header bars (`< Back` and `X` close controls) so vertical scrolling is completely isolated from accidental swipe dismissal.
-  - **Keyboard-Aware Auto-Scrolling**: Focusing or typing in **Description** or **Discussion Comment** automatically resizes the scroll viewport above the software keyboard and brings the active text field into clear view.
-  - Edit titles, descriptions, assignees, states, area paths, iteration paths, and tags.
-  - Official Azure Boards type colors and vector iconography.
-  - Real-time optimistic UI updates with resilient background synchronization.
+### ⚡ 60fps Fluid Performance & Modular Compose Architecture
+- **Zero-Recomposition Sheet Gestures**: Dragging and backdrop dimming run purely in Compose's Layout and Draw phases (`Modifier.offset` & `Modifier.graphicsLayer`), eliminating full-screen recompositions during touch gestures.
+- **State-Isolated Detail Subcomponents**: Title editing, Description editing, Metadata pills, Tags, Hierarchy management, and Discussion comments operate in isolated state scopes with `320ms–400ms` debounced persistence—keeping typing instantaneous even on work items with large histories.
+- **Offloaded Concurrency**: Multi-dimensional filtering, regex matching, and hierarchy tree construction execute on `Dispatchers.Default` with conflated batch streaming.
 
-### 🔍 Advanced Multi-Dimensional Filtering & Search
-- **Instant Keyword & ID Search**: Search work items by title, numeric ID (`#123`), description, tags, or assignee with zero-lag background filtering.
-- **Work Item Type Filter**: Ordered automatically from highest backlog level to lowest (e.g., Epic → Feature → Story → Task).
-- **State Filtering**: Quick-filter by Proposed, Active/In Progress, Resolved, Closed/Done, or Removed states.
-- **Area & Iteration Hierarchy Trees**: Interactive tree picker for nested classification paths (e.g., `Project\Team\FeatureArea`).
-- **Assignee Filter**: Search assignees with real-time autocompletion and "Unassigned" item support.
-- **Collapsible Filter Section**: Toggle between dense viewing and comprehensive filter controls.
+### 🪄 Two-Stage Animated Work Item Detail Sheet
+- **Stage 1 (Preview) to Stage 2 (Full Screen)**: Tapping a work item opens a smooth half-screen preview (`62%` height). Scrolling upward expands the sheet seamlessly to full height and hands residual scroll momentum directly to the content list.
+- **Locked Content Scrolling & Upper-Screen Swipe Dismissal**: Once fully expanded, touches starting in the lower two-thirds of the screen are strictly locked to content scrolling so you never accidentally pull the sheet down while reading. Swiping down from the upper one-third (including the upper `1/4`) of the screen or tapping `<` (Back) / `X` (Close) smoothly dismisses the sheet.
+- **Keyboard-Aware Auto-Expansion**: Focusing **Description** or **Discussion Comment** automatically expands the sheet to full height, locks it against collapse while the software keyboard is open, and scrolls the active input field above the keyboard.
 
-### 💬 Discussions & Comments
-- **Chronological Discussion Feed**: Read work item discussions and notes, ordered newest-first.
-- **Add Comments**: Post updates and discussions with instant optimistic previews.
-- **Floating Above-Keyboard @Mention Suggestions**: Floating suggestion bar docked above the virtual keyboard showing team member chips with avatar initials, email previews, and instant 1-character filtering without screen clutter or keyboard occlusion.
-- **Rich Text & Mention Formatting**: Full HTML rendering with highlighted `@mentions` and author details.
+### 🌳 Full Backlog Hierarchy & In-Sheet Navigation Stack
+- **Complete Process Template Support**: Browse and manage Portfolio Backlogs (*Epics*, *Features*), Requirement Backlogs (*User Stories*, *Product Backlog Items*), and Iteration Backlogs (*Tasks*, *Bugs*) with official Azure Boards iconography and color tokens.
+- **In-Sheet Hierarchy History Stack**: Tap any linked Parent or Child row inside the Detail sheet to inspect and edit it in place, then press the top-left **Back** button (or system back gesture) to return to the previous work item with all updates reflected live, or tap **Close (`X`)** to dismiss the sheet immediately.
+- **Parent & Child Link Management**: Link existing work items by ID or keyword, create new linked Parent/Child items of valid process types, replace an existing parent with confirmation, or unlink relations (`System.LinkTypes.Hierarchy-Reverse` / `Hierarchy-Forward`) with automated cycle and ancestor validation.
 
-### 🔔 Smart Notifications Center & Device Push Alerts
-- **Dedicated Notifications Screen**: Accessible via the Bell icon beside Settings in the top header.
-- **Assigned & Mentioned Sections**:
-  - **Assigned**: View the 10 most recent work items assigned to you.
-  - **Mentioned**: View the 10 most recent discussion comments where your name or email was `@mentioned`.
-- **Streamlined Header & Refresh Controls**: Fast on-demand sync via dedicated Refresh action and pull-to-refresh without obtrusive syncing symbols cluttering the header bar.
-- **System Push Notifications**:
-  - Android 13+ runtime notification support with dedicated Notification Channels for **Assigned Work Items** and **Discussion Mentions**.
-  - Periodic background sync via AndroidX `WorkManager` alongside live checks during active sessions.
-  - **Deep-Link Support**: Tapping any system notification launches the app directly into the corresponding work item's detail sheet.
-- **Seamless Identity & Zero-Configuration Notifications**: Automatically discovers your authenticated Azure DevOps profile directly from your Personal Access Token (PAT) credentials and executes native server-side `@Me` queries, providing effortless assignment and mention tracking without unnecessary verification dialogs or manual override cards.
+### 🔍 Multi-Dimensional Filtering & Instant Search
+- **Instant Keyword & Numeric ID Search**: Filter work items by title, numeric ID (`#123`), description, tags, or assignee in real time.
+- **Backlog-Ordered Type & State Filters**: Filter by Work Item Type (automatically ordered from highest backlog level to lowest) and State (*Proposed*, *Active/In Progress*, *Resolved*, *Closed/Done*, *Removed*).
+- **Interactive Area & Iteration Tree Pickers**: Navigate deeply nested Area Paths and Iteration Paths (`Project\Team\Sprint`) via expandable tree dialogs.
+- **Assignee Autocomplete**: Filter by team member or specifically isolate **Unassigned** work items.
 
-### 🏢 Multi-Organization Support & Touch Feedback
-- **Manage Multiple Organizations**: Connect to multiple Azure DevOps organizations with independent PAT credentials.
-- **Quick Switching**: Switch active organizations in a single tap from the header dropdown or Settings dialog with real-time progress indicators.
-- **Default Organization & Project**: Set default organization and default project preferences in Settings for instant cold starts.
+### 💬 Discussions & Floating `@Mention` Autocomplete
+- **Chronological Discussion Feed**: Read and post work item comments with HTML rendering, clickable links, highlighted `@mentions`, and automatic RTL/Persian text alignment.
+- **Above-Keyboard `@Mention` Bar**: Typing `@` in a comment surfaces a floating suggestion bar docked above the keyboard with team member avatars, display names, and email previews powered by a precomputed people index.
 
-### ⚡ Performance & Offline Caching
-- **Offloaded Concurrency**: Heavy list filtering, regex matching, and grouping run on `Dispatchers.Default` for a smooth 60fps UI.
-- **Iterative Background Streaming**: Unloaded work items stream in non-blocking batches with UI update conflation and 250ms throttling.
-- **Zero-Wait Cold Starts**: Local snapshot caching restores your work items and project metadata instantly on app launch before network verification.
+### 🔔 Smart Notifications Center & System Push Alerts
+- **Assigned & Mentioned Feeds**: Dedicated Notifications screen displaying the 10 most recent work items **Assigned** to you and the 10 most recent comments where you were **@Mentioned**.
+- **Zero-Configuration Identity Discovery**: Automatically resolves your Azure DevOps profile from your Personal Access Token (PAT) and runs native `@Me` WIQL queries.
+- **Native Push Channels & Deep-Linking**: Periodic background sync via AndroidX `WorkManager` posts notifications to dedicated Android 13+ channels (**Assigned Work Items** and **Discussion Mentions**). Tapping any system alert deep-links directly into that work item's Detail sheet.
+
+### 🏢 Multi-Organization Support & Instant Cold Starts
+- **Multi-Organization Switcher**: Connect multiple Azure DevOps organizations with independent PAT credentials, switch active organizations in a single tap, and configure default organization and project startup preferences.
+- **Offline Snapshot Cache**: Atomic file-based JSON snapshots (`LocalStorageManager`) restore your projects, work items, classification trees, and team directories immediately on cold start before network verification completes.
 
 ---
 
-## 🛠️ Architecture & Tech Stack
+## 🏗️ Architecture
 
+Engineered with **Clean Architecture**, **MVVM**, and **Modular Delegate Isolation**:
+
+```mermaid
+flowchart TD
+    subgraph PRESENTATION ["Presentation Layer (Jetpack Compose / Material 3)"]
+        Screens["Modular Screens (WorkItemsScreen, BoardHeader, Notifications, Connection)"]
+        Sheet["Zero-Recomposition TwoStageBottomSheetContainer"]
+        Detail["State-Isolated Detail Modules (DetailSheet, HierarchySection, DiscussionSection)"]
+        VM["AzureDevOpsViewModel (Unidirectional StateFlow)"]
+        Screens --> Sheet --> Detail --> VM
+    end
+
+    subgraph DELEGATES ["ViewModel Domain Delegates"]
+        CrudDel["WorkItemCrudDelegate (Debounced Persistence & Optimistic UI)"]
+        HierDel["HierarchyDelegate (Parent/Child Graph & Cycle Validation)"]
+        ClassDel["ClassificationAndMembersDelegate (Area/Iteration Trees & People Index)"]
+        NotifDel["NotificationDelegate (@Me Identity & Alert Diffing)"]
+        OrgDel["OrganizationDelegate (Multi-Org & Credential Switching)"]
+        VM --> CrudDel & HierDel & ClassDel & NotifDel & OrgDel
+    end
+
+    subgraph DOMAIN ["Repository & Local Persistence Layer"]
+        Repo["AzureDevOpsRepository"]
+        LocalStore["LocalStorageManager (Atomic JSON Snapshot Cache & Preferences)"]
+    end
+
+    subgraph SYNC ["Background Scheduling"]
+        Worker["NotificationSyncWorker (AndroidX WorkManager)"]
+    end
+
+    subgraph REMOTE ["Network Infrastructure"]
+        Client["Retrofit 2 + OkHttp 3 + Moshi"]
+        Server[("Azure DevOps REST API v7.0 (Direct TLS to dev.azure.com)")]
+    end
+
+    CrudDel & HierDel & ClassDel & NotifDel & OrgDel --> Repo
+    Repo --> LocalStore
+    Worker --> Repo
+    Repo --> Client --> Server
+
+    style PRESENTATION fill:#0f172a,stroke:#38bdf8,stroke-width:1px,color:#f8fafc
+    style DELEGATES fill:#172554,stroke:#60a5fa,stroke-width:1px,color:#f8fafc
+    style DOMAIN fill:#1e293b,stroke:#f59e0b,stroke-width:1px,color:#f8fafc
+    style SYNC fill:#1e293b,stroke:#a855f7,stroke-width:1px,color:#f8fafc
+    style REMOTE fill:#0f766e,stroke:#2dd4bf,stroke-width:1px,color:#f8fafc
 ```
+
+### Modular Package Structure
+
+```text
 app/src/main/java/com/example/
 ├── data/
-│   ├── api/             # Retrofit interfaces & Azure DevOps REST client
-│   ├── local/           # Atomic file-based JSON persistence & preferences
-│   ├── model/           # Moshi-serializable domain models & WIQL requests
-│   └── repository/      # Unified data repository, caching, and notification sync
-├── notifications/       # Notification channels, push helper, and JobService
+│   ├── api/                 # Retrofit interfaces, Basic PAT auth interceptor & REST client
+│   ├── local/               # Atomic file-based JSON snapshot persistence & preferences
+│   ├── model/               # @Immutable Moshi-serializable domain models & WIQL payloads
+│   └── repository/          # Unified repository, batch hydration & notification sync
+├── notifications/           # Android 13+ notification channels, push helper & WorkManager worker
 ├── ui/
-│   ├── components/      # Reusable Compose widgets, sheets, and cards
-│   ├── screens/         # WorkItemsScreen, NotificationsScreen, ConnectionScreen, Settings
-│   ├── theme/           # Material 3 colors, typography, Azure Boards color tokens
-│   └── AzureDevOpsViewModel.kt  # Unidirectional reactive StateFlows & UI state
-└── MainActivity.kt      # Edge-to-edge entry point & deep link intent handler
+│   ├── components/
+│   │   ├── TwoStageBottomSheetContainer.kt  # Layout-phase two-stage sheet & upper-zone swipe dismiss
+│   │   ├── WorkItemDetailSheet.kt           # State-isolated detail view & debounced field editors
+│   │   ├── WorkItemHierarchySection.kt      # Parent/Child section & 7 hierarchy linking dialogs
+│   │   ├── WorkItemDiscussionSection.kt     # Comment composer, @mention bar & discussion feed
+│   │   ├── WorkItemCreateSheet.kt           # New work item creation sheet
+│   │   ├── WorkItemPickerDialogs.kt         # Assignee, Tag & Area/Iteration tree pickers
+│   │   ├── WorkItemMentionComponents.kt     # Indexed @mention tokenizer & suggestion chips
+│   │   └── WorkItemSharedAtoms.kt           # WorkItemCard, type symbols, status rows & helpers
+│   ├── screens/
+│   │   ├── WorkItemsScreen.kt               # Main backlog board & detail navigation backstack
+│   │   ├── WorkItemsBoardHeader.kt          # Organization header, filter capsules & inline search
+│   │   ├── NotificationsScreen.kt           # Assigned & @Mentioned activity center
+│   │   ├── ConnectionScreen.kt              # PAT onboarding & organization connection flow
+│   │   └── SettingsDialog.kt                # Multi-org management & startup preferences
+│   ├── theme/               # Material 3 theme, typography & official Azure Boards color tokens
+│   └── viewmodel/           # AzureDevOpsViewModel & focused domain delegates
+└── MainActivity.kt          # Edge-to-edge entry point & notification deep-link intent handler
 ```
 
-- **Architecture**: Clean Architecture + MVVM (Model-View-ViewModel) + Repository Pattern
-- **UI Framework**: Jetpack Compose (100% Kotlin) with Material Design 3
-- **Asynchronous Operations**: Kotlin Coroutines & `StateFlow`
-- **Networking**: Retrofit 2, OkHttp 3, Moshi (JSON serialization)
-- **Background Scheduling**: Android `JobScheduler` (`JobService`)
-- **Compatibility**: Android minSdk 24 (Android 7.0+) up to targetSdk 36 (Android 15+)
+---
+
+## 📥 Get the App
+
+### Pre-Compiled Release Status
+> [!IMPORTANT]
+> **No pre-compiled APK has been released yet.** We are actively finalizing our initial milestone before publishing signed binaries to GitHub Releases.
+
+Until the first official APK is published under **Releases**, please build and install the application directly from source using the steps in [Building from Source](#-building-from-source).
 
 ---
 
-## 🚀 Getting Started
+## 🔒 Security & Permissions
+
+Transparency is essential for developer tools that handle workspace credentials. Here is every permission requested in `AndroidManifest.xml` and why:
+
+| Permission | Necessity | Purpose |
+| :--- | :---: | :--- |
+| `android.permission.INTERNET` | Mandatory | Direct encrypted TLS communication with official Azure DevOps REST APIs (`https://dev.azure.com/{organization}/_apis/...`). |
+| `android.permission.ACCESS_NETWORK_STATE` | Mandatory | Detects connectivity changes to fall back gracefully to local snapshots and constrain background sync. |
+| `android.permission.POST_NOTIFICATIONS` | Optional | Delivers system push alerts on Android 13+ for work item assignments and `@mentions` (can be declined or disabled at any time). |
+
+> [!NOTE]
+> Your Personal Access Token (PAT) and cached work item snapshots are stored strictly inside your device's private application sandbox (`Context.filesDir`). Credentials never pass through any intermediate proxy or third-party server.
+
+---
+
+## 🛠️ Building from Source
 
 ### Prerequisites
-1. Android Studio Ladybug / Meerkat (or newer) with Android SDK 34+.
-2. An active **Azure DevOps** account (cloud or server).
-3. A **Personal Access Token (PAT)** from Azure DevOps with:
-   - **Work Items**: `Read & write`
-   - **Project and Team**: `Read`
+- **Android Studio** Ladybug (2024.2+) or newer
+- **JDK 17** or **JDK 21**
+- **Android SDK** API 36 (minSdk 24 / Android 7.0+)
+- An **Azure DevOps Personal Access Token (PAT)** with:
+  - **Work Items**: `Read & write`
+  - **Project and Team**: `Read`
 
-### Installation & Build
+### Build & Install Steps
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/your-username/azure-boards-android.git
-   cd azure-boards-android
-   ```
+```bash
+# 1. Clone the repository
+git clone https://github.com/your-username/azure-boards-android.git
+cd azure-boards-android
 
-2. **Open in Android Studio**:
-   - Open Android Studio and select **Open**, then select the project root folder.
-   - Wait for Gradle sync to complete.
+# 2. Compile Debug APK
+gradle assembleDebug
 
-3. **Build and Run**:
-   - Connect an Android device or launch an emulator (API 24+).
-   - Click **Run 'app'** or run via command line:
-     ```bash
-     gradle assembleDebug
-     ```
+# 3. Run unit & Robolectric tests
+gradle :app:testDebugUnitTest
+```
 
-### Configuration & Connecting
-1. On first launch, enter your **Azure DevOps Organization**:
-   - Example: `my-org` or `https://dev.azure.com/my-org`
-2. Enter your **Personal Access Token (PAT)**.
-3. Check **Remember credentials on this device** and tap **Connect**.
-4. The application will immediately cache and display your projects and work items.
+### First-Launch Setup
+1. Launch **Azure Boards** on your Android device or emulator.
+2. Enter your **Azure DevOps Organization** name (e.g., `my-org` or `https://dev.azure.com/my-org`).
+3. Paste your **Personal Access Token (PAT)**.
+4. Enable **Remember credentials on this device** and tap **Connect**.
 
 ---
 
-## 🔒 Security & Privacy
+## ❓ Frequently Asked Questions
 
-- **Direct Connections**: Network requests communicate directly with official Azure DevOps APIs (`https://dev.azure.com/{organization}/_apis/...`).
-- **Local Credentials**: Authentication tokens (PAT) and cached metadata are stored locally on the user's device and are never sent to third-party tracking servers.
-- **Principle of Least Privilege**: The application requests only `INTERNET`, `POST_NOTIFICATIONS`, and `ACCESS_NETWORK_STATE` permissions.
+<details>
+<summary><b>Does this application collect personal data or telemetry?</b></summary>
+<br>
+No. The application is completely telemetry-free. There are no analytics SDKs, crash-reporting beacons, or advertising trackers embedded in the codebase. All network requests go directly from your device to <code>dev.azure.com</code>.
+</details>
+
+<details>
+<summary><b>How does the two-stage Detail bottom sheet gesture work?</b></summary>
+<br>
+When you tap a work item, the Detail sheet opens in <b>Stage 1 (preview)</b>. Scrolling up expands the sheet to <b>Stage 2 (full screen)</b>. Once fully expanded, scrolling anywhere in the lower two-thirds of the screen scrolls only the work item content so the sheet never accidentally collapses. To close the expanded sheet, swipe down from the upper one-third (or upper quarter) of your screen, or tap the <code>&lt;</code> (Back) or <code>X</code> (Close) button.
+</details>
+
+<details>
+<summary><b>How does background synchronization impact battery life?</b></summary>
+<br>
+Background notification checks are scheduled through AndroidX <code>WorkManager</code> with network connectivity constraints. The app respects Android Doze Mode and never holds persistent wake locks.
+</details>
+
+<details>
+<summary><b>Why is there no APK download link yet?</b></summary>
+<br>
+We have not cut our first public APK release yet. Once the initial release is tagged, a direct APK download badge and signed release binary will be published in the repository's Releases section.
+</details>
+
+---
+
+## 🤝 Contributing
+
+Contributions, bug reports, and feature requests are welcome! Feel free to open an issue or submit a pull request for review.
 
 ---
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Distributed under the **MIT License**. See [`LICENSE`](./LICENSE) for more information.

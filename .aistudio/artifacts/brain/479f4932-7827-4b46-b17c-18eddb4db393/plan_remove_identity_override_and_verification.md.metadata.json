@@ -1,5 +1,0 @@
-{
-  "summary": "Plan to remove 'Your Identity (For Notifications)', manual identity overrides, identity confirmation prompts, and ensure notification tracking relies seamlessly on Azure DevOps PAT identity.",
-  "updatedAt": "2026-11-03T18:52:02.437112894Z",
-  "userFacing": true
-}
