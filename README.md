@@ -57,6 +57,7 @@ Most mobile workflows for **Azure Boards** rely on desktop-oriented browser view
 
 ### ⚡ 60fps Fluid Performance & Modular Compose Architecture
 - **Zero-Recomposition Sheet Gestures**: Dragging and backdrop dimming run purely in Compose's Layout and Draw phases (`Modifier.offset` & `Modifier.graphicsLayer`), eliminating full-screen recompositions during touch gestures.
+- **Zero-Jank Backlog Scrolling & On-Demand Heap Footprint**: `WorkItem` domain models evaluate normalized lowercase area/iteration paths and tags lazily (`LazyThreadSafetyMode.NONE`) and compute lowercase descriptions on demand (`get()`), while `WorkItemHierarchyDelegate` memoizes process state lookups in a thread-safe `ConcurrentHashMap` and `WorkItemsScreen` hoists fallback state lists outside `LazyColumn` items to eliminate per-card allocations during fast scrolling.
 - **State-Isolated Detail Subcomponents**: Title editing, Description editing, Metadata pills, Tags, Hierarchy management, and Discussion comments operate in isolated state scopes with `320ms–400ms` debounced persistence—keeping typing instantaneous even on work items with large histories.
 - **Offloaded Concurrency**: Multi-dimensional filtering, regex matching, and hierarchy tree construction execute on `Dispatchers.Default` with conflated batch streaming.
 

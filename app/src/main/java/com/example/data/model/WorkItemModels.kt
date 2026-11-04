@@ -64,26 +64,29 @@ data class WorkItem(
     @Transient
     val isUnassigned: Boolean = normAssigneeLower.isEmpty() || normAssigneeLower == "unassigned"
 
-    @Transient
-    val descriptionLower: String = description?.lowercase().orEmpty()
+    val descriptionLower: String
+        get() = description?.lowercase().orEmpty()
 
     @Transient
     val normAreaPath: String = normalizeWorkItemClassificationPath(areaPath)
 
-    @Transient
-    val normAreaPathLower: String = normAreaPath.lowercase()
+    val normAreaPathLower: String by lazy(LazyThreadSafetyMode.NONE) {
+        normAreaPath.lowercase()
+    }
 
     @Transient
     val normIterationPath: String = normalizeWorkItemClassificationPath(iterationPath)
 
-    @Transient
-    val normIterationPathLower: String = normIterationPath.lowercase()
+    val normIterationPathLower: String by lazy(LazyThreadSafetyMode.NONE) {
+        normIterationPath.lowercase()
+    }
 
-    @Transient
-    val tagsLower: List<String> = if (tags.isEmpty()) {
-        emptyList()
-    } else {
-        tags.map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+    val tagsLower: List<String> by lazy(LazyThreadSafetyMode.NONE) {
+        if (tags.isEmpty()) {
+            emptyList()
+        } else {
+            tags.map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+        }
     }
 
     @Transient

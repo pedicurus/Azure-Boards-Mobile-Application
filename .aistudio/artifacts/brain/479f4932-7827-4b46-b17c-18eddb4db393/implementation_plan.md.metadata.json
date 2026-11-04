@@ -1,0 +1,6 @@
+{
+  "summary": "Implementation plan for Task 1 of Performance Hardening: Zero-Jank Scroll & Memory Footprint Optimization across WorkItem models, WorkItemHierarchyDelegate state lookup memoization, and WorkItemsScreen LazyColumn item allocations.",
+  "updatedAt": "2026-11-04T06:28:05.019565889Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

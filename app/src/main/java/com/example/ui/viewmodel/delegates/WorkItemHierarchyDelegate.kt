@@ -52,7 +52,18 @@ class WorkItemHierarchyDelegate(
     val isLoadingComments: StateFlow<Boolean> = _isLoadingComments.asStateFlow()
 
     private val commentsByWorkItemId = ConcurrentHashMap<Int, List<WorkItemComment>>()
+    private val statesForTypeCache = ConcurrentHashMap<String, List<String>>()
+    private var lastProcessMapSnapshot: Map<String, Map<String, List<String>>> = processDelegate.projectProcessMap.value
     private var activeCommentsJob: Job? = null
+
+    init {
+        scope.launch {
+            processDelegate.projectProcessMap.collect { newMap ->
+                lastProcessMapSnapshot = newMap
+                statesForTypeCache.clear()
+            }
+        }
+    }
 
     val selectedWorkItemChildren: StateFlow<List<WorkItem>> = combine(
         _selectedWorkItem,
@@ -369,26 +380,38 @@ class WorkItemHierarchyDelegate(
         workItemType: String,
         currentState: String? = null
     ): List<String> {
+        val currentProcessMap = processDelegate.projectProcessMap.value
+        if (currentProcessMap !== lastProcessMapSnapshot) {
+            lastProcessMapSnapshot = currentProcessMap
+            statesForTypeCache.clear()
+        }
+
+        val cacheKey = "${project.orEmpty().lowercase()}|${workItemType.trim().lowercase()}|${currentState.orEmpty().trim().lowercase()}"
+        statesForTypeCache[cacheKey]?.let { return it }
+
         val resolvedProj = (project ?: filterDelegate.selectedProject.value).orEmpty()
         val activeOrg = sessionManager.getActiveOrganization()
         val allItems = allWorkItems.value
-        val projectProcessMap = processDelegate.projectProcessMap.value
-        val processMapForProj = findProcessHierarchy(activeOrg, resolvedProj, projectProcessMap)
+        val processMapForProj = findProcessHierarchy(activeOrg, resolvedProj, currentProcessMap)
         val fromProcess = processMapForProj?.entries
             ?.firstOrNull { it.key.equals(workItemType, ignoreCase = true) }?.value
         if (!fromProcess.isNullOrEmpty()) {
-            return fromProcess.distinctBy { it.lowercase() }
+            val result = fromProcess.distinctBy { it.lowercase() }
+            statesForTypeCache[cacheKey] = result
+            return result
         }
         val fromItems = allItems.filter {
             it.teamProject?.equals(resolvedProj, ignoreCase = true) == true &&
                 it.workItemType.equals(workItemType, ignoreCase = true)
         }.map { it.state }.distinct()
         val baseStates = if (fromItems.isNotEmpty()) fromItems else repository.getStandardProcessStates(workItemType)
-        return if (!currentState.isNullOrBlank()) {
+        val result = if (!currentState.isNullOrBlank()) {
             (baseStates + currentState).distinctBy { it.lowercase() }
         } else {
             baseStates.distinctBy { it.lowercase() }
         }
+        statesForTypeCache[cacheKey] = result
+        return result
     }
 
     fun getAllowedChildTypesForWorkItem(item: WorkItem): List<String> {
@@ -1059,6 +1082,7 @@ class WorkItemHierarchyDelegate(
     fun reset() {
         activeCommentsJob?.cancel()
         commentsByWorkItemId.clear()
+        statesForTypeCache.clear()
         _selectedWorkItem.value = null
         _selectedWorkItemComments.value = emptyList()
         _isLoadingComments.value = false

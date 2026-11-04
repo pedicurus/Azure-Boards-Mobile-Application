@@ -196,6 +196,9 @@ fun WorkItemsScreen(
     val searchFocusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val cleanFallbackStates = remember(availableStates) {
+        availableStates.filterNot { it.equals("All", ignoreCase = true) }
+    }
 
     BackHandler(enabled = selectedWorkItem != null) {
         onNavigateBackInDetail()
@@ -530,9 +533,7 @@ fun WorkItemsScreen(
                                     }
                                     onWorkItemClick(item)
                                 },
-                                availableStates = getStatesForWorkItem(item).ifEmpty {
-                                    availableStates.filterNot { it.equals("All", ignoreCase = true) }
-                                },
+                                availableStates = getStatesForWorkItem(item).ifEmpty { cleanFallbackStates },
                                 onUpdateState = { newState ->
                                     onUpdateWorkItem(item.copy(state = newState))
                                 }
@@ -662,9 +663,7 @@ fun WorkItemsScreen(
                 workItem = selectedWorkItem,
                 onDismiss = onDismissDetail,
                 onBack = onNavigateBackInDetail,
-                availableStates = getStatesForWorkItem(selectedWorkItem).ifEmpty {
-                    availableStates.filterNot { it.equals("All", ignoreCase = true) }
-                },
+                availableStates = getStatesForWorkItem(selectedWorkItem).ifEmpty { cleanFallbackStates },
                 availableAssignees = availableAssignees,
                 availableTags = availableTags,
                 availableAreas = detailAreas,

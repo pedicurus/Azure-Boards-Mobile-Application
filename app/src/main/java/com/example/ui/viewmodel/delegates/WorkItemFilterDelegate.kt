@@ -520,8 +520,8 @@ class WorkItemFilterDelegate(
                 (typeLower.isEmpty() || item.normTypeLower == typeLower) &&
                 (stateLower.isEmpty() || item.normStateLower == stateLower) &&
                 (isAssigneeAll || (if (isAssigneeUnassigned) item.isUnassigned else item.normAssigneeLower == assigneeLower)) &&
-                matchesClassificationHierarchyFast(item.normAreaPathLower, normAreaLower, normAreaPrefixLower) &&
-                matchesClassificationHierarchyFast(item.normIterationPathLower, normIterationLower, normIterationPrefixLower)
+                (normAreaLower.isEmpty() || matchesClassificationHierarchyFast(item.normAreaPathLower, normAreaLower, normAreaPrefixLower)) &&
+                (normIterationLower.isEmpty() || matchesClassificationHierarchyFast(item.normIterationPathLower, normIterationLower, normIterationPrefixLower))
         }
 
         val boardOrderComparator = compareBy<WorkItem>(
