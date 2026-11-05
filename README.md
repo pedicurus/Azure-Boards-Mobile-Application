@@ -9,7 +9,7 @@
 
   <!-- UNIFIED SHIELDS.IO BADGES -->
   <p>
-    <img src="https://img.shields.io/badge/Release-v1.0.1_(Build_1)-3DDC84?style=flat-square&logo=github" alt="Release Status">
+    <img src="https://img.shields.io/badge/Release-v1.1.0_(Build_1)-3DDC84?style=flat-square&logo=github" alt="Release Status">
     <a href="https://developer.android.com"><img src="https://img.shields.io/badge/Platform-Android_7.0+_(API_24--36)-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Platform"></a>
     <a href="https://kotlinlang.org"><img src="https://img.shields.io/badge/Language-Kotlin_2.0+-7F52FF?style=flat-square&logo=kotlin&logoColor=white" alt="Language"></a>
     <a href="https://developer.android.com/jetpack/compose"><img src="https://img.shields.io/badge/UI-Jetpack_Compose_/_Material_3-4285F4?style=flat-square&logo=jetpackcompose&logoColor=white" alt="UI Framework"></a>

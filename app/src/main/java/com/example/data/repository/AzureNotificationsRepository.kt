@@ -470,7 +470,7 @@ class AzureNotificationsRepository(
             }
         }
 
-        val resolvedFromRegistry = listOfNotNull(detectedUserId, detectedEmail, detectedName)
+        var resolvedFromRegistry = listOfNotNull(detectedUserId, detectedEmail, detectedName)
             .firstNotNullOfOrNull { AzureIdentityRegistry.resolveIdentityRecord(it) }
         if (detectedName.isNullOrBlank()) detectedName = resolvedFromRegistry?.displayName
         if (detectedEmail.isNullOrBlank()) detectedEmail = resolvedFromRegistry?.email
@@ -482,55 +482,77 @@ class AzureNotificationsRepository(
             email = detectedEmail
         )
 
-        val effectiveIdentityName = detectedName
+        val highPriorityMentionIds = linkedSetOf<Int>()
+        val recentCommentedIds = linkedSetOf<Int>()
 
-        val mentionServerIds = mutableSetOf<Int>()
-        if (!effectiveIdentityName.isNullOrBlank() || !detectedEmail.isNullOrBlank() || !detectedUserId.isNullOrBlank()) {
-            val mentionQueryTokens = mutableListOf<String>()
-            val escapedUserId = detectedUserId?.replace("'", "''")?.trim()
-            if (!escapedUserId.isNullOrBlank()) {
-                mentionQueryTokens.add(escapedUserId)
-            }
-            val escapedName = effectiveIdentityName?.replace("'", "''")?.trim()
-            if (!escapedName.isNullOrBlank()) {
-                mentionQueryTokens.add(escapedName)
-                val firstName = escapedName.substringBefore(' ').trim()
-                if (firstName.length >= 3 && firstName != escapedName) {
-                    mentionQueryTokens.add(firstName)
+        // 1. Native @RecentMentions WIQL macro (discovers mentions for @Me regardless of state/type)
+        runCatching {
+            val recentMentionsWiql = "SELECT [System.Id] FROM WorkItems WHERE [System.Id] IN (@RecentMentions) AND [System.State] <> 'Removed'"
+            val resp = service.queryWorkItems(
+                organization = normOrg,
+                request = WiqlQueryRequest(query = recentMentionsWiql)
+            )
+            if (resp.isSuccessful) {
+                resp.body()?.workItems.orEmpty().map { it.id }.take(100).forEach { highPriorityMentionIds.add(it) }
+            } else {
+                val fallbackMacroWiql = "SELECT [System.Id] FROM WorkItems WHERE [System.Id] IN (@RecentMentions)"
+                val fallbackResp = service.queryWorkItems(
+                    organization = normOrg,
+                    request = WiqlQueryRequest(query = fallbackMacroWiql)
+                )
+                if (fallbackResp.isSuccessful) {
+                    fallbackResp.body()?.workItems.orEmpty().map { it.id }.take(100).forEach { highPriorityMentionIds.add(it) }
                 }
             }
-            val escapedEmail = detectedEmail?.replace("'", "''")?.trim()
-            if (!escapedEmail.isNullOrBlank()) {
-                val emailPrefix = escapedEmail.substringBefore('@').trim()
-                if (emailPrefix.length >= 3) {
-                    mentionQueryTokens.add(emailPrefix)
-                }
-            }
+        }
 
-            for (token in mentionQueryTokens.distinct().take(4)) {
-                runCatching {
-                    val cleanToken = token.replace("'", "''")
-                    val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.History] CONTAINS WORDS '$cleanToken' ORDER BY [System.ChangedDate] DESC"
+        // 2. [System.History] token queries using CONTAINS (safe for phrases, emails, and GUIDs) with CONTAINS WORDS fallback
+        val mentionQueryTokens = buildMentionSearchTokens(
+            displayName = detectedName,
+            email = detectedEmail,
+            userId = detectedUserId
+        )
+        for (token in mentionQueryTokens.take(6)) {
+            val queries = buildHistoryMentionQueriesForToken(token)
+            for (wiql in queries) {
+                val succeeded = runCatching {
                     val resp = service.queryWorkItems(
                         organization = normOrg,
                         request = WiqlQueryRequest(query = wiql)
                     )
-                    resp.body()?.workItems.orEmpty().map { it.id }.forEach { mentionServerIds.add(it) }
-                }
-                if (mentionServerIds.size >= 50) break
+                    if (resp.isSuccessful) {
+                        resp.body()?.workItems.orEmpty().map { it.id }.take(60).forEach { highPriorityMentionIds.add(it) }
+                        true
+                    } else {
+                        false
+                    }
+                }.getOrDefault(false)
+                if (succeeded) break
             }
+            if (highPriorityMentionIds.size >= 80) break
+        }
 
-            runCatching {
-                val wiql = "SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= @Today - 31 AND [System.State] <> 'Removed' ORDER BY [System.ChangedDate] DESC"
-                val resp = service.queryWorkItems(
+        // 3. Recent work items that actually have discussion comments ([System.CommentCount] > 0)
+        runCatching {
+            val commentedWiql = "SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= @Today - 45 AND [System.State] <> 'Removed' AND [System.CommentCount] > 0 ORDER BY [System.ChangedDate] DESC"
+            val commentedResp = service.queryWorkItems(
+                organization = normOrg,
+                request = WiqlQueryRequest(query = commentedWiql)
+            )
+            if (commentedResp.isSuccessful) {
+                commentedResp.body()?.workItems.orEmpty().map { it.id }.take(100).forEach { recentCommentedIds.add(it) }
+            } else {
+                val fallbackWiql = "SELECT [System.Id] FROM WorkItems WHERE [System.ChangedDate] >= @Today - 31 AND [System.State] <> 'Removed' ORDER BY [System.ChangedDate] DESC"
+                val fallbackResp = service.queryWorkItems(
                     organization = normOrg,
-                    request = WiqlQueryRequest(query = wiql)
+                    request = WiqlQueryRequest(query = fallbackWiql)
                 )
-                resp.body()?.workItems.orEmpty().map { it.id }.take(80).forEach { mentionServerIds.add(it) }
+                fallbackResp.body()?.workItems.orEmpty().map { it.id }.take(80).forEach { recentCommentedIds.add(it) }
             }
         }
 
-        val missingMentionIds = mentionServerIds.filter { it !in itemsById }.take(60)
+        val orderedServerMentionIds = (highPriorityMentionIds + recentCommentedIds).distinct()
+        val missingMentionIds = orderedServerMentionIds.filter { it !in itemsById }.take(120)
         if (missingMentionIds.isNotEmpty()) {
             runCatching {
                 val rawBatch = AzureWorkItemParser.hydrateRawItemsByIds(service, normOrg, missingMentionIds)
@@ -541,6 +563,13 @@ class AzureNotificationsRepository(
                 }
             }
         }
+
+        // Re-resolve identity after hydrating candidate items in case AzureIdentityRegistry learned more fields
+        resolvedFromRegistry = listOfNotNull(detectedUserId, detectedEmail, detectedName)
+            .firstNotNullOfOrNull { AzureIdentityRegistry.resolveIdentityRecord(it) }
+        if (detectedName.isNullOrBlank()) detectedName = resolvedFromRegistry?.displayName
+        if (detectedEmail.isNullOrBlank()) detectedEmail = resolvedFromRegistry?.email
+        if (detectedUserId.isNullOrBlank()) detectedUserId = resolvedFromRegistry?.id
 
         val resolvedEffectiveName = detectedName
         val assignedServerIdSet = assignedToMeServerIds.toSet()
@@ -643,17 +672,12 @@ class AzureNotificationsRepository(
             }
         }
 
-        val candidateWorkItemIds = linkedSetOf<Int>()
-        mentionServerIds.forEach { candidateWorkItemIds.add(it) }
-        assignedToMeServerIds.forEach { candidateWorkItemIds.add(it) }
-        itemsById.values
-            .filter { !it.teamProject.isNullOrBlank() && !AzureDevOpsRepository.isExcludedNonWorkItemType(it.workItemType) }
-            .sortedByDescending { it.changedDate ?: "" }
-            .map { it.id }
-            .forEach { candidateWorkItemIds.add(it) }
-
-        val candidateItemsList = candidateWorkItemIds.mapNotNull { itemsById[it] }
-            .filter { !it.teamProject.isNullOrBlank() && !AzureDevOpsRepository.isExcludedNonWorkItemType(it.workItemType) }
+        val candidateItemsList = prioritizeMentionCandidateItems(
+            itemsById = itemsById,
+            highPriorityMentionIds = highPriorityMentionIds,
+            recentCommentedIds = recentCommentedIds,
+            assignedToMeServerIds = assignedToMeServerIds
+        )
 
         val isInitialMentionsBaseline = !currentState.baselineMentionsInitialized
         val lastCheckedIso = currentState.lastCheckedChangedDateIso
@@ -661,8 +685,8 @@ class AzureNotificationsRepository(
 
         var mentionsDiscoveredInThisSyncPass = 0
 
-        if (!resolvedEffectiveName.isNullOrBlank() || !detectedEmail.isNullOrBlank() || !detectedUserId.isNullOrBlank()) {
-            val candidateChunks = candidateItemsList.take(75).chunked(15)
+        if (!resolvedEffectiveName.isNullOrBlank() || !detectedEmail.isNullOrBlank() || !detectedUserId.isNullOrBlank() || highPriorityMentionIds.isNotEmpty()) {
+            val candidateChunks = candidateItemsList.take(90).chunked(15)
             for (chunk in candidateChunks) {
                 val commentResults = coroutineScope {
                     chunk.map { workItem ->
@@ -679,6 +703,12 @@ class AzureNotificationsRepository(
                     }.awaitAll()
                 }
 
+                val latestIdentity = listOfNotNull(detectedUserId, detectedEmail, detectedName)
+                    .firstNotNullOfOrNull { AzureIdentityRegistry.resolveIdentityRecord(it) }
+                if (detectedName.isNullOrBlank()) detectedName = latestIdentity?.displayName
+                if (detectedEmail.isNullOrBlank()) detectedEmail = latestIdentity?.email
+                if (detectedUserId.isNullOrBlank()) detectedUserId = latestIdentity?.id
+
                 for ((workItem, comments) in commentResults) {
                     val itemChanged = workItem.changedDate?.trim()
                     if (!itemChanged.isNullOrEmpty() && (maxObservedChangedIso == null || itemChanged > maxObservedChangedIso)) {
@@ -688,7 +718,7 @@ class AzureNotificationsRepository(
                     for (comment in comments) {
                         if (commentMentionsIdentity(
                                 commentText = comment.text,
-                                effectiveDisplayName = resolvedEffectiveName,
+                                effectiveDisplayName = detectedName ?: resolvedEffectiveName,
                                 detectedEmail = detectedEmail,
                                 detectedUserId = detectedUserId,
                                 mentionedIds = comment.mentionedIds
@@ -792,4 +822,103 @@ class AzureNotificationsRepository(
             newlyHydratedWorkItems = newlyHydratedItems
         )
     }
+
+    internal fun buildMentionSearchTokens(
+        displayName: String?,
+        email: String?,
+        userId: String?
+    ): List<String> {
+        val tokens = mutableListOf<String>()
+        val cleanId = userId?.trim().orEmpty()
+        if (cleanId.isNotEmpty()) {
+            tokens.add(cleanId)
+        }
+        val cleanName = displayName?.trim().orEmpty()
+        if (cleanName.isNotEmpty()) {
+            tokens.add(cleanName)
+            cleanName.split(Regex("\\s+"))
+                .map { it.trim() }
+                .filter { it.length >= 3 && !it.equals(cleanName, ignoreCase = true) }
+                .forEach { tokens.add(it) }
+        }
+        val cleanEmail = email?.trim().orEmpty()
+        if (cleanEmail.isNotEmpty()) {
+            tokens.add(cleanEmail)
+            val emailPrefix = cleanEmail.substringBefore('@').trim()
+            if (emailPrefix.length >= 3) {
+                tokens.add(emailPrefix)
+            }
+        }
+        return tokens.distinctBy { it.lowercase() }
+    }
+
+    internal fun buildHistoryMentionQueriesForToken(token: String): List<String> {
+        val cleanToken = token.trim().replace("'", "''")
+        if (cleanToken.isEmpty()) return emptyList()
+        val queries = mutableListOf<String>()
+        // CONTAINS is valid for multi-word phrases, emails, and hyphenated GUIDs in Azure DevOps WIQL
+        queries.add(
+            "SELECT [System.Id] FROM WorkItems WHERE [System.History] CONTAINS '$cleanToken' AND [System.State] <> 'Removed' ORDER BY [System.ChangedDate] DESC"
+        )
+        // CONTAINS WORDS is only valid for single-word tokens without spaces, hyphens, or '@'
+        if (!cleanToken.contains(' ') && !cleanToken.contains('-') && !cleanToken.contains('@')) {
+            queries.add(
+                "SELECT [System.Id] FROM WorkItems WHERE [System.History] CONTAINS WORDS '$cleanToken' AND [System.State] <> 'Removed' ORDER BY [System.ChangedDate] DESC"
+            )
+        }
+        return queries
+    }
+
+    internal fun prioritizeMentionCandidateItems(
+        itemsById: Map<Int, WorkItem>,
+        highPriorityMentionIds: Set<Int>,
+        recentCommentedIds: Set<Int>,
+        assignedToMeServerIds: Collection<Int>
+    ): List<WorkItem> {
+        val validItemsById = itemsById.values
+            .filter {
+                !it.teamProject.isNullOrBlank() &&
+                    !AzureDevOpsRepository.isExcludedNonWorkItemType(it.workItemType) &&
+                    it.normStateLower != "removed"
+            }
+            .associateBy { it.id }
+
+        val dateComparator = compareByDescending<WorkItem> { parseIsoToEpochMs(it.changedDate ?: it.createdDate) }
+            .thenByDescending { it.id }
+
+        val resultIds = linkedSetOf<Int>()
+
+        // Tier 1: Explicit server mention matches (@RecentMentions + [System.History] CONTAINS)
+        highPriorityMentionIds.mapNotNull { validItemsById[it] }
+            .sortedWith(dateComparator)
+            .forEach { resultIds.add(it.id) }
+
+        // Tier 2: Any candidate (server commented query, assigned, or in-memory) known to have comments (commentCount > 0)
+        val serverPoolIds = (recentCommentedIds + assignedToMeServerIds).toSet()
+        validItemsById.values
+            .filter { it.id !in resultIds && ((it.commentCount != null && it.commentCount > 0) || it.id in recentCommentedIds) }
+            .sortedWith(
+                compareByDescending<WorkItem> { (it.commentCount ?: 0) > 0 }
+                    .then(dateComparator)
+            )
+            .forEach { resultIds.add(it.id) }
+
+        // Tier 3: Assigned or in-memory items where commentCount is null (unknown, e.g. from legacy local cache)
+        validItemsById.values
+            .filter { it.id !in resultIds && it.commentCount == null }
+            .sortedWith(
+                compareByDescending<WorkItem> { it.id in serverPoolIds }
+                    .then(dateComparator)
+            )
+            .forEach { resultIds.add(it.id) }
+
+        // Tier 4: Fallback assigned items even if commentCount == 0
+        assignedToMeServerIds.mapNotNull { validItemsById[it] }
+            .filter { it.id !in resultIds }
+            .sortedWith(dateComparator)
+            .forEach { resultIds.add(it.id) }
+
+        return resultIds.mapNotNull { validItemsById[it] }
+    }
 }
+

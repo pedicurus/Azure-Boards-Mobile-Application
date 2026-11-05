@@ -154,6 +154,8 @@ object AzureWorkItemParser {
             val rawTags = f["System.Tags"] as? String
             val tagList = rawTags?.split(";")?.map { it.trim() }?.filter { it.isNotEmpty() }
                 ?: emptyList()
+            val commentCount = (f["System.CommentCount"] as? Number)?.toInt()
+                ?: (f["System.CommentCount"] as? String)?.trim()?.toIntOrNull()
 
             WorkItem(
                 id = id,
@@ -174,7 +176,8 @@ object AzureWorkItemParser {
                 boardOrder = boardOrder,
                 parentId = parentId,
                 childIds = childIdsFromRel,
-                tags = tagList
+                tags = tagList,
+                commentCount = commentCount
             )
         }
 

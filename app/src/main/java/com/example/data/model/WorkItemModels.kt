@@ -41,7 +41,8 @@ data class WorkItem(
     val boardOrder: Double? = null,
     val parentId: Int? = null,
     val childIds: List<Int> = emptyList(),
-    val tags: List<String> = emptyList()
+    val tags: List<String> = emptyList(),
+    val commentCount: Int? = null
 ) {
     @Transient
     val idString: String = id.toString()

@@ -229,5 +229,82 @@ class NotificationsFilteringTest {
         composeTestRule.onNodeWithText("#201", useUnmergedTree = true).assertExists()
         composeTestRule.onNodeWithText("Clean Up Refactor", useUnmergedTree = true).assertExists()
     }
+
+    @Test
+    fun testMentionWiqlQueriesAvoidContainsWordsForMultiWordAndGuidTokens() {
+        val notifRepo = AzureNotificationsRepository(context, localStore)
+
+        val tokens = notifRepo.buildMentionSearchTokens(
+            displayName = "Ali Keshavarzi",
+            email = "keshavarzi72@gmail.com",
+            userId = "8c9d1e2f-3a4b-5c6d-7e8f-9a0b1c2d3e4f"
+        )
+        assertTrue(tokens.contains("8c9d1e2f-3a4b-5c6d-7e8f-9a0b1c2d3e4f"))
+        assertTrue(tokens.contains("Ali Keshavarzi"))
+        assertTrue(tokens.contains("Ali"))
+        assertTrue(tokens.contains("Keshavarzi"))
+        assertTrue(tokens.contains("keshavarzi72"))
+
+        // Multi-word display name and hyphenated GUID must ONLY use CONTAINS, never CONTAINS WORDS
+        val fullNameQueries = notifRepo.buildHistoryMentionQueriesForToken("Ali Keshavarzi")
+        assertEquals(1, fullNameQueries.size)
+        assertTrue(fullNameQueries.first().contains("[System.History] CONTAINS 'Ali Keshavarzi'"))
+
+        val guidQueries = notifRepo.buildHistoryMentionQueriesForToken("8c9d1e2f-3a4b-5c6d-7e8f-9a0b1c2d3e4f")
+        assertEquals(1, guidQueries.size)
+        assertTrue(guidQueries.first().contains("[System.History] CONTAINS '8c9d1e2f-3a4b-5c6d-7e8f-9a0b1c2d3e4f'"))
+
+        // Single-word token uses CONTAINS first and CONTAINS WORDS as fallback
+        val singleWordQueries = notifRepo.buildHistoryMentionQueriesForToken("Keshavarzi")
+        assertEquals(2, singleWordQueries.size)
+        assertTrue(singleWordQueries[0].contains("[System.History] CONTAINS 'Keshavarzi'"))
+        assertTrue(singleWordQueries[1].contains("[System.History] CONTAINS WORDS 'Keshavarzi'"))
+    }
+
+    @Test
+    fun testPrioritizeMentionCandidateItemsPlacesCustomStateCommentedItemsBeforeCommentlessItems() {
+        val notifRepo = AzureNotificationsRepository(context, localStore)
+
+        // Create 85 commentless Active items modified recently
+        val commentlessItems = (1..85).map { idx ->
+            WorkItem(
+                id = 1000 + idx,
+                title = "Active Task #$idx",
+                workItemType = "Task",
+                state = "Active",
+                teamProject = "Atlas",
+                changedDate = "2026-11-04T10:00:00Z",
+                commentCount = 0
+            )
+        }
+
+        // Create #10395 in custom state "Ready to Review" with 2 comments
+        val customStateCommentedItem = WorkItem(
+            id = 10395,
+            title = "URL to connect to production site",
+            workItemType = "Product Backlog Item",
+            state = "Ready to Review",
+            teamProject = "Atlas",
+            changedDate = "2026-11-02T09:30:00Z",
+            commentCount = 2
+        )
+
+        val itemsById = (commentlessItems + customStateCommentedItem).associateBy { it.id }
+
+        val prioritized = notifRepo.prioritizeMentionCandidateItems(
+            itemsById = itemsById,
+            highPriorityMentionIds = emptySet(),
+            recentCommentedIds = setOf(10395),
+            assignedToMeServerIds = emptyList()
+        )
+
+        assertTrue("Commented custom-state item #10395 must be prioritized first", prioritized.isNotEmpty())
+        assertEquals(10395, prioritized.first().id)
+        assertFalse(
+            "Unassigned commentless items should not crowd out candidate list",
+            prioritized.any { it.commentCount == 0 }
+        )
+    }
 }
+
 
